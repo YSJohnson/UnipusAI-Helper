@@ -1,0 +1,5 @@
+logs/
+__pycache__/
+*.pyc
+.idea/
+net10.0-windows/
