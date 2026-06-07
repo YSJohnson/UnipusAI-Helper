@@ -1,6 +1,10 @@
-customtkinter>=5.2.2
 selenium>=4.10.0
 webdriver-manager>=4.0.1
 openai>=1.10.0
 openai-whisper>=20231117
+pydub>=0.25.1
+requests>=2.31.0
 numpy<2.0.0
+PyQt5>=5.15.0
+PyQt-Fluent-Widgets>=1.0.0
+pywin32

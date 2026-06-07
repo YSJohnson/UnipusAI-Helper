@@ -1,15 +1,41 @@
 # -*- coding: utf-8 -*-
-"""
-UnipusAI 配置文件编辑器
-用法: python config_editor.py
-"""
-import json, os, sys, io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+import json
+import os
+import sys
 
-import customtkinter as ctk
-from tkinter import messagebox
+from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    CardWidget,
+    CheckBox,
+    FluentIcon as FIF,
+    InfoBar,
+    InfoBarPosition,
+    LineEdit,
+    MessageBox,
+    PlainTextEdit,
+    PrimaryPushButton,
+    ScrollArea,
+    Theme,
+    ToolButton,
+    setTheme,
+)
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "username": "",
@@ -20,43 +46,45 @@ DEFAULT_CONFIG = {
     "model": "",
     "max_tokens": 4096,
     "temperature": 0.3,
-    "whisper_api": None,
     "debug_mode": False,
+}
+
+PALETTE = {
+    "bg": "#17191d",
+    "panel": "#202328",
+    "panel_border": "#2c3138",
+    "top": "#202328",
+    "input": "#14171b",
+    "input_border": "#303640",
+    "text": "#f4f7fb",
+    "muted": "#a7b0bb",
 }
 
 
 def load_config():
-    """加载现有配置, 不存在则返回默认值"""
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            # 合并默认值, 保证所有 key 存在
             merged = dict(DEFAULT_CONFIG)
             merged.update(cfg)
             return merged
-        except:
+        except Exception:
             pass
     return dict(DEFAULT_CONFIG)
 
 
 def save_config(data: dict):
-    """保存配置, token 字段自动转义内部双引号"""
-    # 深拷贝
     out = dict(data)
-
-    # token_full: 自动转义（json.dump 会自动处理内部双引号转义）
     token = out.get("token_full", "")
     if token and isinstance(token, str):
         token = token.strip()
-        # 去掉控制台复制时带上的外层引号 '...' 或 "..."
-        if (token.startswith("'") and token.endswith("'")) or \
-           (token.startswith('"') and token.endswith('"')):
+        if (token.startswith("'") and token.endswith("'")) or (
+            token.startswith('"') and token.endswith('"')
+        ):
             token = token[1:-1].strip()
-        # json.dump 会自动对内部 " 做转义，无需手动处理
         out["token_full"] = token
 
-    # 删除 config.json 不需要的字段
     out.pop("learning_strategy", None)
     out.pop("timeout", None)
 
@@ -65,202 +93,270 @@ def save_config(data: dict):
     return True
 
 
-# ── GUI ──
-class ConfigEditor:
+class ConfigEditor(QWidget):
     def __init__(self):
-        ctk.set_appearance_mode("system")
-        self.root = ctk.CTk()
-        self.root.title("UnipusAI 配置编辑器")
-        self.root.geometry("620x720")
-        self.root.minsize(550, 650)
-        self.root.configure(fg_color=("#f2f1ed", "#1a1915"))
-
+        self._qt_app = QApplication.instance() or QApplication(sys.argv)
+        setTheme(Theme.DARK)
+        super().__init__()
         self.cfg = load_config()
         self.entries = {}
+        self._drag_active = False
+        self._drag_position = QPoint()
+        self._init_window()
+        self._build_ui()
+        self._apply_theme()
 
-        # 标题
-        title = ctk.CTkLabel(
-            self.root, text="UnipusAI 配置编辑器",
-            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
-            text_color=("#26251e", "#e6e5e0")
+    def _init_window(self):
+        self.setObjectName("windowRoot")
+        self.setWindowTitle("UnipusAI Helper 配置编辑器")
+        self.resize(820, 860)
+        self.setMinimumSize(700, 720)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 18, 28, 24)
+        root.setSpacing(14)
+
+        root.addWidget(self._build_top_strip())
+        root.addWidget(self._build_form_area(), 1)
+
+    def _build_top_strip(self):
+        self.top_strip = QFrame()
+        self.top_strip.setObjectName("topStrip")
+        self.top_strip.installEventFilter(self)
+        layout = QHBoxLayout(self.top_strip)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(12)
+
+        self.title_label = QLabel("UnipusAI Helper 配置编辑器")
+        self.title_label.setObjectName("pageTitle")
+        self.title_label.installEventFilter(self)
+        layout.addWidget(self.title_label)
+        layout.addStretch(1)
+
+        self.close_btn = ToolButton(FIF.CLOSE)
+        self.close_btn.setToolTip("关闭")
+        self.close_btn.setFixedSize(32, 32)
+        self.close_btn.clicked.connect(self.close)
+        layout.addWidget(self.close_btn)
+        return self.top_strip
+
+    def _build_form_area(self):
+        scroll = ScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        content.setObjectName("contentHost")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(14)
+
+        form_card, form = self._form_card()
+        self._add_text_row(form, "username", "账号", "输入 U校园AI版账号")
+        self._add_text_row(form, "password", "密码", "输入 U校园AI版密码")
+        self._add_text_row(form, "url", "登录地址", "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome")
+        self._add_text_row(form, "api_key", "API Key", "")
+        self._add_text_row(form, "base_url", "API 地址", "兼容OpenAI接口")
+        self._add_text_row(form, "model", "模型名称", "")
+        self._add_text_row(form, "max_tokens", "最大 Token 数", "4096")
+        self._add_text_row(form, "temperature", "温度 (0-2)", "0.3")
+        self._add_text_row(
+            form,
+            "token_full",
+            "Token (反作弊)",
+            "从浏览器控制台获取 localStorage.getItem('__token')",
+            multiline=True,
         )
-        title.pack(pady=(24, 4))
 
-        sub = ctk.CTkLabel(
-            self.root, text="编辑下方字段后点击[保存配置]",
-            font=ctk.CTkFont(size=12),
-            text_color=("#82817a", "#8c8b87")
+        self.debug_check = CheckBox("开启调试输出")
+        self.debug_check.setChecked(bool(self.cfg.get("debug_mode", False)))
+        self.entries["debug_mode"] = self.debug_check
+        form.addRow(self._field_label("调试模式"), self.debug_check)
+        content_layout.addWidget(form_card)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.save_btn = PrimaryPushButton("保存配置")
+        self.save_btn.clicked.connect(self._on_save)
+        action_row.addWidget(self.save_btn)
+        content_layout.addLayout(action_row)
+
+        scroll.setWidget(content)
+        return scroll
+
+    def _form_card(self):
+        card = CardWidget()
+        card.setObjectName("panelCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
+        form.setFormAlignment(Qt.AlignTop)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(14)
+        layout.addLayout(form)
+        return card, form
+
+    def _field_label(self, title_text):
+        title = QLabel(title_text)
+        title.setObjectName("fieldTitle")
+        return title
+
+    def _create_input(self, key, placeholder, password=False, multiline=False):
+        if multiline:
+            entry = PlainTextEdit()
+            entry.setFixedHeight(110)
+            entry.setPlaceholderText(placeholder)
+            entry.setPlainText(str(self.cfg.get(key, "") or ""))
+        else:
+            entry = LineEdit()
+            entry.setPlaceholderText(placeholder)
+            entry.setText(str(self.cfg.get(key, "") or ""))
+            entry.setClearButtonEnabled(True)
+        self.entries[key] = entry
+        return entry
+
+    def _add_text_row(self, form, key, title, placeholder, password=False, multiline=False):
+        entry = self._create_input(key, placeholder, password=password, multiline=multiline)
+        form.addRow(self._field_label(title), entry)
+
+    def _apply_theme(self):
+        self.setStyleSheet(
+            f"""
+            QWidget#windowRoot {{
+                background: {PALETTE['bg']};
+            }}
+            QWidget {{
+                background: transparent;
+                font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';
+                font-size: 14px;
+                color: {PALETTE['text']};
+            }}
+            QWidget#topStrip {{
+                background: transparent;
+                border: none;
+            }}
+            CardWidget#panelCard {{
+                background: {PALETTE['panel']};
+                border: 1px solid {PALETTE['panel_border']};
+                border-radius: 10px;
+            }}
+            QLabel#pageTitle {{
+                background: transparent;
+                color: {PALETTE['text']};
+                font-size: 24px;
+                font-weight: 800;
+            }}
+            QLabel#fieldTitle {{
+                background: transparent;
+                color: {PALETTE['text']};
+                font-size: 14px;
+                font-weight: 700;
+                padding-top: 8px;
+            }}
+            ScrollArea, QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            LineEdit, PlainTextEdit {{
+                background: {PALETTE['input']};
+                border: 1px solid {PALETTE['input_border']};
+                border-radius: 8px;
+                color: {PALETTE['text']};
+                selection-background-color: #2a6df4;
+                padding: 8px 10px;
+            }}
+            PlainTextEdit {{
+                font-family: 'Cascadia Mono', Consolas, 'Microsoft YaHei UI';
+            }}
+            CheckBox, QCheckBox {{
+                color: {PALETTE['text']};
+                padding: 6px 0;
+                font-size: 14px;
+                font-weight: 600;
+                spacing: 8px;
+            }}
+            """
         )
-        sub.pack(pady=(0, 20))
 
-        # 滚动区域
-        scroll = ctk.CTkScrollableFrame(
-            self.root, fg_color="transparent",
-            width=560, height=520
-        )
-        scroll.pack(fill="both", expand=True, padx=30)
-
-        # 字段定义: (key, label, placeholder, width, height, is_password, is_multiline)
-        fields = [
-            ("username", "账号", "输入U校园账号", 280, 36, False, False),
-            ("password", "密码", "输入U校园密码", 280, 36, False, False),
-            ("url", "登录地址", DEFAULT_CONFIG["url"], 500, 36, False, False),
-            ("api_key", "API Key", "sk-xxxxxxxx", 500, 36, False, False),
-            ("base_url", "API 地址", "https://api.deepseek.com", 500, 36, False, False),
-            ("model", "模型名称", "deepseek-chat", 280, 36, False, False),
-            ("max_tokens", "最大 Token 数", "4096", 150, 36, False, False),
-            ("temperature", "温度 (0-2)", "0.3", 150, 36, False, False),
-            ("token_full", "Token (反作弊)", "从浏览器控制台获取: localStorage.getItem('__token')", 500, 80, False, True),
-        ]
-
-        for i, (key, label, ph, w, h, is_pw, is_ml) in enumerate(fields):
-            row = ctk.CTkFrame(scroll, fg_color="transparent")
-            row.pack(fill="x", pady=(0, 14))
-
-            lbl = ctk.CTkLabel(
-                row, text=label,
-                font=ctk.CTkFont(size=13, weight="bold"),
-                text_color=("#26251e", "#e6e5e0"),
-                width=120, anchor="w"
-            )
-            lbl.pack(side="left", padx=(0, 8))
-
-            if is_ml:
-                entry = ctk.CTkTextbox(row, height=h, font=ctk.CTkFont(size=12),
-                                        fg_color=("#ffffff", "#111110"),
-                                        text_color=("#26251e", "#e6e5e0"),
-                                        wrap="word")
-                val = self.cfg.get(key, "")
-                if val:
-                    entry.insert("1.0", str(val))
-                entry.pack(side="left", fill="x", expand=True)
-            else:
-                entry = ctk.CTkEntry(row, width=w, height=h,
-                                      font=ctk.CTkFont(size=13),
-                                      fg_color=("#ffffff", "#111110"),
-                                      text_color=("#26251e", "#e6e5e0"))
-                val = self.cfg.get(key, "")
-                if val is not None and val != "":
-                    entry.insert(0, str(val))
-                entry.pack(side="left", fill="x", expand=True)
-
-            self.entries[key] = entry
-
-        # whisper_api (nullable)
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 14))
-        ctk.CTkLabel(row, text="Whisper API",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=("#26251e", "#e6e5e0"), width=120, anchor="w"
-                     ).pack(side="left", padx=(0, 8))
-        entry = ctk.CTkEntry(row, width=500, height=36, font=ctk.CTkFont(size=13),
-                              fg_color=("#ffffff", "#111110"),
-                              text_color=("#82817a", "#8c8b87"))
-        entry.insert(0, "(留空使用本地语音模型)")
-        val = self.cfg.get("whisper_api")
-        if val:
-            entry.delete(0, "end")
-            entry.insert(0, str(val))
-        entry.pack(side="left", fill="x", expand=True)
-        self.entries["whisper_api"] = entry
-
-        # debug_mode checkbox
-        row = ctk.CTkFrame(scroll, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 14))
-        ctk.CTkLabel(row, text="调试模式",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=("#26251e", "#e6e5e0"), width=120, anchor="w"
-                     ).pack(side="left", padx=(0, 8))
-        self.debug_var = ctk.BooleanVar(value=self.cfg.get("debug_mode", False))
-        ctk.CTkCheckBox(row, text="开启(输出完整API请求/响应)", variable=self.debug_var,
-                         font=ctk.CTkFont(size=12),
-                         text_color=("#26251e", "#e6e5e0"),
-                         fg_color=("#f54e00", "#f54e00")
-                         ).pack(side="left")
-        self.entries["debug_mode"] = self.debug_var
-
-        # ── 底部按钮 ──
-        btn_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        btn_row.pack(pady=20)
-
-        ctk.CTkButton(
-            btn_row, text="保存配置",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color=("#f54e00", "#f54e00"),
-            hover_color=("#d94400", "#d94400"),
-            text_color=("#ffffff", "#ffffff"),
-            corner_radius=8,
-            height=48,
-            command=self._on_save
-        ).pack(side="left", padx=(0, 12))
-
-        ctk.CTkButton(
-            btn_row, text="关闭",
-            font=ctk.CTkFont(size=14),
-            fg_color=("#ebeae5", "#33322a"),
-            text_color=("#26251e", "#e6e5e0"),
-            hover_color=("#e1e0db", "#3d3c33"),
-            corner_radius=8,
-            height=48,
-            command=self.root.destroy
-        ).pack(side="left")
-
-        self.status_label = ctk.CTkLabel(
-            self.root, text="",
-            font=ctk.CTkFont(size=12),
-            text_color=("#1f8a65", "#2fba8a")
-        )
-        self.status_label.pack(pady=(0, 16))
+    def eventFilter(self, obj, event):
+        if obj in (getattr(self, "top_strip", None), getattr(self, "title_label", None)):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._drag_active = True
+                self._drag_position = event.globalPos() - self.frameGeometry().topLeft()
+                return True
+            if event.type() == QEvent.MouseMove and self._drag_active and event.buttons() & Qt.LeftButton:
+                self.move(event.globalPos() - self._drag_position)
+                return True
+            if event.type() == QEvent.MouseButtonRelease:
+                self._drag_active = False
+                return True
+        return super().eventFilter(obj, event)
 
     def _on_save(self):
-        """收集字段值并保存"""
         data = {}
         for key, entry in self.entries.items():
             if key == "debug_mode":
-                data[key] = entry.get()
-            elif isinstance(entry, ctk.CTkTextbox):
-                data[key] = entry.get("1.0", "end-1c").strip()
+                data[key] = entry.isChecked()
+            elif isinstance(entry, PlainTextEdit):
+                data[key] = entry.toPlainText().strip()
             else:
-                data[key] = entry.get().strip()
+                data[key] = entry.text().strip()
 
-        # 处理空的 whisper_api
-        if data.get("whisper_api") == "(留空使用本地语音模型)" or not data.get("whisper_api"):
-            data["whisper_api"] = None
-        else:
-            ws = data["whisper_api"]
-            if ws.lower() == "null" or ws.lower() == "none":
-                data["whisper_api"] = None
-
-        # max_tokens 转 int
         try:
             data["max_tokens"] = int(data["max_tokens"])
-        except:
+        except Exception:
             data["max_tokens"] = 4096
 
-        # temperature 转 float
         try:
             data["temperature"] = float(data["temperature"])
-        except:
+        except Exception:
             data["temperature"] = 0.3
 
-        # 保存
         try:
             save_config(data)
-            self.status_label.configure(text="[OK] 配置已保存到 config.json")
+            InfoBar.success(
+                "保存成功",
+                "配置已保存到 config.json",
+                duration=1800,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
             try:
                 import winsound
+
                 winsound.MessageBeep()
-            except:
+            except Exception:
                 pass
         except Exception as e:
-            messagebox.showerror("保存失败", str(e))
-            self.status_label.configure(text=f"[FAIL] 保存失败: {e}",
-                                         text_color=("#cf2d56", "#e04a6f"))
+            MessageBox("保存失败", str(e), self).exec()
+            InfoBar.error(
+                "保存失败",
+                str(e),
+                duration=2400,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        if event.key() == Qt.Key_S and event.modifiers() & Qt.ControlModifier:
+            self._on_save()
+            return
+        super().keyPressEvent(event)
 
     def run(self):
-        self.root.mainloop()
+        self.show()
+        return self._qt_app.exec_()
 
 
 if __name__ == "__main__":
+    app = QApplication.instance() or QApplication(sys.argv)
     editor = ConfigEditor()
     editor.run()

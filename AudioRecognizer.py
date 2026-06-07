@@ -3,32 +3,27 @@ import requests
 import tempfile
 import os
 import hashlib
-from typing import Dict,Optional
-import time
+import traceback
+from typing import Dict, Optional
 
 
 class AudioTranscriber:
     """
-    使用 OpenAI Whisper 进行语音识别
-
-    支持方式：
-    1. OpenAI API (需要 api_key)
-    2. 本地 Whisper 模型 (无需网络，首次下载模型)
+    使用本地 Whisper 进行语音识别
     """
 
-    def __init__(self, api_key: Optional[str] = None, use_local: bool = False):
-        """
-        Args:
-            api_key: OpenAI API Key，为 None 则使用本地模型
-            use_local: 强制使用本地模型（无需 API）
-        """
-        self.api_key = api_key
-        self.use_local = use_local
+    def __init__(self):
         self.local_model = None
         self._transcript_cache: Dict[str, str] = {}
+        self._init_local_model()
 
-        if use_local or api_key is None:
-            self._init_local_model()
+    @staticmethod
+    def _print_exception(prefix: str, exc: Exception) -> None:
+        """完整输出异常信息与堆栈，方便定位问题"""
+        print(f"{prefix}: {exc}")
+        tb = traceback.format_exc().rstrip()
+        if tb and tb != "NoneType: None":
+            print(tb)
 
     def _init_local_model(self):
         """初始化本地 Whisper 模型"""
@@ -42,7 +37,7 @@ class AudioTranscriber:
             print("       未安装 whisper，请运行: pip install openai-whisper")
             raise
         except Exception as e:
-            print(f"       加载本地模型失败: {str(e)[:50]}")
+            self._print_exception("       加载本地模型失败", e)
             raise
 
     def transcribe(self, audio_url: str, language: str = "en") -> str:
@@ -77,12 +72,7 @@ class AudioTranscriber:
                 temp_files.append(audio_path)
 
             print(f"        开始识别...")
-
-            # 选择识别方式
-            if self.use_local or self.api_key is None:
-                text = self._transcribe_local(audio_path, language)
-            else:
-                text = self._transcribe_api(audio_path, language)
+            text = self._transcribe_local(audio_path, language)
 
             # 缓存结果
             if text:
@@ -93,10 +83,10 @@ class AudioTranscriber:
             return text or ""
 
         except requests.RequestException as e:
-            print(f"       下载音频失败: {str(e)[:50]}")
+            self._print_exception("       下载音频失败", e)
             return ""
         except Exception as e:
-            print(f"       识别失败: {str(e)[:50]}")
+            self._print_exception("       识别失败", e)
             return ""
         finally:
             # 清理临时文件
@@ -107,55 +97,26 @@ class AudioTranscriber:
                 except:
                     pass
 
-    def _transcribe_api(self, audio_path: str, language: str) -> Optional[str]:
-        """使用 OpenAI API 识别"""
-        try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=self.api_key)
-
-            with open(audio_path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language=language,
-                    response_format="text"
-                )
-
-            return transcript.strip() if transcript else None
-
-        except Exception as e:
-            print(f"       API 识别失败，尝试本地模型: {str(e)[:50]}")
-            if self.local_model is None:
-                self._init_local_model()
-            return self._transcribe_local(audio_path, language)
-
     def _transcribe_local(self, audio_path: str, language: str) -> Optional[str]:
         """使用本地 Whisper 模型识别"""
         if self.local_model is None:
             print("       本地模型未加载")
             return None
 
-        try:
-            # 执行识别
-            result = self.local_model.transcribe(
-                audio_path,
-                language=language,
-                fp16=False  # CPU 运行设为 False
-            )
+        result = self.local_model.transcribe(
+            audio_path,
+            language=language,
+            fp16=False  # CPU 运行设为 False
+        )
 
-            return result["text"].strip() if result else None
-
-        except Exception as e:
-            print(f"       本地识别失败: {str(e)[:50]}")
-            return None
+        return result["text"].strip() if result else None
 
     def transcribe_long_audio(self, audio_url: str, language: str = "en",
                               chunk_length: int = 30) -> str:
         """
-        识别长音频（超过 25MB 或需要更精细控制时使用）
+        识别长音频（需要更精细控制时使用）
 
-        Whisper API 限制 25MB，本地模型无此限制但长音频建议分段
+        本地模型虽然可直接识别长音频，但分段后更利于稳定性和定位问题
         """
         temp_files = []
 
@@ -171,16 +132,12 @@ class AudioTranscriber:
             file_size = os.path.getsize(audio_path)
             print(f"       音频大小: {file_size / 1024 / 1024:.1f} MB")
 
-            # 如果小于 20MB 且使用 API，直接识别
-            if file_size < 20 * 1024 * 1024 and not self.use_local:
-                return self._transcribe_api(audio_path, language) or ""
-
-            # 大文件或本地模型：使用 pydub 分段
-            print(f"      ⏭ 音频较大，分段识别...")
+            # 本地模型统一采用分段识别，便于控制资源使用
+            print(f"      ⏭ 使用分段方式识别长音频...")
             return self._split_and_transcribe(audio_path, language, chunk_length)
 
         except Exception as e:
-            print(f"       长音频处理失败: {str(e)[:50]}")
+            self._print_exception("       长音频处理失败", e)
             return ""
         finally:
             for f in temp_files:
@@ -217,11 +174,7 @@ class AudioTranscriber:
 
                 print(f"       识别第 {i + 1}/{num_chunks} 段...")
 
-                # 识别
-                if self.use_local or self.api_key is None:
-                    text = self._transcribe_local(chunk_path, language)
-                else:
-                    text = self._transcribe_api(chunk_path, language)
+                text = self._transcribe_local(chunk_path, language)
 
                 if text:
                     full_text.append(text)
@@ -232,14 +185,10 @@ class AudioTranscriber:
                 except:
                     pass
 
-                # 避免 API 限流
-                if not self.use_local and i < num_chunks - 1:
-                    time.sleep(0.5)
-
             return " ".join(full_text)
 
         except ImportError:
             return self._transcribe_local(audio_path, language) or ""
         except Exception as e:
-            print(f"       分段识别失败: {str(e)[:50]}")
+            self._print_exception("       分段识别失败", e)
             return ""

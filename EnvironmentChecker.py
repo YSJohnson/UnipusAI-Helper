@@ -25,6 +25,7 @@ class EnvironmentChecker:
         self.edge_path: Optional[str] = None
         self.edge_version: Optional[str] = None
         self.ffmpeg_path: Optional[str] = None
+        self.ffprobe_path: Optional[str] = None
         self.ffmpeg_in_path: bool = False
 
     def check_all(self) -> bool:
@@ -121,9 +122,15 @@ class EnvironmentChecker:
         ffmpeg_in_path = shutil.which("ffmpeg")
         if ffmpeg_in_path:
             self.ffmpeg_path = ffmpeg_in_path
+            self.ffprobe_path = self._resolve_ffprobe_path(ffmpeg_in_path, prefer_path_lookup=True)
             self.ffmpeg_in_path = True
             version = self._get_ffmpeg_version(ffmpeg_in_path)
             print(f"       FFmpeg 已添加到 PATH: {version}")
+            print(f"         FFmpeg 路径: {ffmpeg_in_path}")
+            if self.ffprobe_path:
+                print(f"         FFprobe 路径: {self.ffprobe_path}")
+            else:
+                print("         FFprobe 路径: 未检测到")
             return
 
         # 方法2：检查常见安装路径
@@ -139,10 +146,15 @@ class EnvironmentChecker:
         for path in common_paths:
             if os.path.exists(path):
                 self.ffmpeg_path = path
+                self.ffprobe_path = self._resolve_ffprobe_path(path)
                 self.ffmpeg_in_path = False  # 安装了但未添加到 PATH
                 version = self._get_ffmpeg_version(path)
                 print(f"        FFmpeg 已安装但未添加到 PATH: {version}")
-                print(f"         路径: {path}")
+                print(f"         FFmpeg 路径: {path}")
+                if self.ffprobe_path:
+                    print(f"         FFprobe 路径: {self.ffprobe_path}")
+                else:
+                    print("         FFprobe 路径: 未检测到")
                 self.issues.append("  FFmpeg 已安装但未添加到系统环境变量 PATH")
                 return
 
@@ -164,6 +176,21 @@ class EnvironmentChecker:
             return version
         except:
             return "未知版本"
+
+    def _resolve_ffprobe_path(self, ffmpeg_path: str, prefer_path_lookup: bool = False) -> Optional[str]:
+        """根据 ffmpeg 路径或 PATH 推断 ffprobe 路径"""
+        if prefer_path_lookup:
+            ffprobe_in_path = shutil.which("ffprobe")
+            if ffprobe_in_path:
+                return ffprobe_in_path
+
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        if ffmpeg_dir:
+            candidate = os.path.join(ffmpeg_dir, "ffprobe.exe")
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
 
     def _check_network(self):
         """检查网络连接"""
@@ -260,9 +287,14 @@ class EnvironmentChecker:
             os.environ['PATH'] = bin_dir + os.pathsep + os.environ.get('PATH', '')
 
             ffmpeg_exe = os.path.join(bin_dir, 'ffmpeg.exe')
+            ffprobe_exe = os.path.join(bin_dir, 'ffprobe.exe')
             version = self._get_ffmpeg_version(ffmpeg_exe)
             print(f"    FFmpeg 安装成功: {version}")
-            print(f"      路径: {bin_dir}")
+            print(f"      FFmpeg 路径: {ffmpeg_exe}")
+            if os.path.exists(ffprobe_exe):
+                print(f"      FFprobe 路径: {ffprobe_exe}")
+            else:
+                print("      FFprobe 路径: 未检测到")
 
             # 清理下载文件
             try:
@@ -275,7 +307,7 @@ class EnvironmentChecker:
             return True
 
         except Exception as e:
-            print(f"\n    安装失败: {str(e)[:100]}")
+            print(f"\n    安装失败: {e}")
             print("    请手动下载: https://ffmpeg.org/download.html")
             return False
 
@@ -294,11 +326,17 @@ class EnvironmentChecker:
         try:
             self._add_to_system_path(bin_dir)
             print("    添加成功")
+            print(f"    FFmpeg 路径: {self.ffmpeg_path}")
+            ffprobe_path = self._resolve_ffprobe_path(self.ffmpeg_path)
+            if ffprobe_path:
+                print(f"    FFprobe 路径: {ffprobe_path}")
+            else:
+                print("    FFprobe 路径: 未检测到")
             print("\n  请重新运行本程序以加载新的环境变量")
             input("按回车键退出...")
             return True
         except Exception as e:
-            print(f"    添加失败: {str(e)[:50]}")
+            print(f"    添加失败: {e}")
             return False
 
     def _add_to_system_path(self, bin_dir: str):
@@ -362,7 +400,7 @@ class EnvironmentChecker:
             input("按回车键退出...")
             return False
         except Exception as e:
-            print(f"    下载失败: {str(e)[:50]}")
+            print(f"    下载失败: {e}")
             return False
 
     def auto_download_driver(self, target_dir: str) -> Optional[str]:
@@ -401,7 +439,7 @@ class EnvironmentChecker:
             return driver_path
 
         except Exception as e:
-            print(f"    下载失败: {str(e)[:50]}")
+            print(f"    下载失败: {e}")
             return None
 
     def manual_specify_path(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:

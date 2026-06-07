@@ -5,11 +5,11 @@
 </p>
 
 <p align="center">
-  基于 Selenium、CustomTkinter 与 OpenAI 兼容接口的 U 校园 AI 版刷课工具
+  基于 Selenium、Fluent UI 与 OpenAI 兼容接口的 U 校园 AI 版刷课工具
 </p>
 
 <p align="center">
-  <img alt="GUI" src="https://img.shields.io/badge/gui-CustomTkinter-2FA572">
+  <img alt="GUI" src="https://img.shields.io/badge/gui-Fluent_UI-2FA572">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
   <img src="https://img.shields.io/badge/license-AGPLv3-blue.svg" alt="License">
@@ -19,7 +19,7 @@
 
 ## 简介
 
-`UnipusAI-Helper` 是从早期 `UnipusAI_Plus` 重构而来的桌面版工具，主程序为 `UnipusAI_v3.4.py`，配置编辑器为 `config_editor.py`。项目重点在于更稳定的 GUI 体验、多任务的批量处理、单页面的手动处理。
+`UnipusAI-Helper` 是从早期 `UnipusAI_Plus` 重构而来的桌面版工具，主程序为 `UnipusAI_Helper.py`，配置编辑器为 `config_editor.py`，界面为 Fluent 风格。项目重点在于更稳定的 GUI 体验、多任务的批量处理、单页面的手动处理。
 
 ---
 
@@ -28,8 +28,7 @@
 - GUI 控制台：显示任务清单、运行状态、实时日志和调试开关。
 - 双模式处理：支持“扫描任务列表”批量处理，也支持“快速处理当前页”。
 - 多题型处理：支持单选、多选、填空、写作、选词填空、下拉选择、词汇测试、听力填空、视频任务、视频弹窗题、词汇闪卡。
-- 讨论题识别：**自动识别并跳过讨论板页面，不会自动作答讨论题。**
-- 音视频辅助：支持本地 Whisper 或 API 转写。
+- 音视频辅助：支持本地 Whisper 转写。
 - 环境检查：启动时检查 Edge、FFmpeg、网络和运行环境。
 - 配置编辑器：提供独立 GUI 编辑器，减少手动修改 JSON 出错的概率。
 
@@ -39,7 +38,8 @@
 
 ```text
 UnipusAI-Helper/
-├── UnipusAI_v3.4.py
+├── UnipusAI_Helper.py
+├── fluent_ui.py
 ├── config_editor.py
 ├── EnvironmentChecker.py
 ├── AudioRecognizer.py
@@ -83,13 +83,13 @@ git clone https://github.com/YSJohnson/UnipusAI-Helper.git
 cd UnipusAI-Helper
 pip install -r requirements.txt
 python config_editor.py
-python UnipusAI_v3.4.py
+python UnipusAI_Helper.py
 ```
 
 如需跳过环境检查：
 
 ```bash
-python UnipusAI_v3.4.py --skip-check
+python UnipusAI_Helper.py --skip-check
 ```
 
 ---
@@ -109,7 +109,6 @@ python UnipusAI_v3.4.py --skip-check
   "max_tokens": 8192,
   "temperature": 0.3,
   "token_full": "",
-  "whisper_api": null,
   "debug_mode": false
 }
 ```
@@ -125,7 +124,6 @@ python UnipusAI_v3.4.py --skip-check
 | `max_tokens` | 最大 token 数，默认即可 |
 | `temperature` | 生成温度，默认即可 |
 | `token_full` | 浏览器本地存储中的 `__token`，用于绕过平台的反作弊系统 |
-| `whisper_api` | Whisper API Key，`null` 则使用本地 Whisper |
 | `debug_mode` | 是否开启调试日志 |
 
 > 脚本不限制大模型提供商，所以理论上所有支持 OpenAI 兼容接口的提供商都支持。目前测试过 DeepSeek、硅基流动、Kimi 兼容接口。

@@ -2,9 +2,6 @@ from AudioRecognizer import *
 from EnvironmentChecker import *
 import hashlib, json, logging, os, sys, random, re, threading, time, warnings, winsound
 import queue
-import tkinter as tk
-from tkinter import scrolledtext
-import customtkinter as ctk
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,10 +17,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 import webbrowser as wb
+from fluent_ui import FluentModernGUI
+
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 gui_log_queue = queue.Queue()
-
-DEBUG_MODE = False
 
 DEBUG_MODE = False
 
@@ -56,7 +57,7 @@ def setup_logging():
     logger = logging.getLogger('UCampusBot')
     logger.setLevel(logging.DEBUG)
     logger.handlers = []
-    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    log_dir = os.path.join(BASE_DIR, 'logs')
     os.makedirs(log_dir, exist_ok=True)
     clean_all_logs(log_dir)
     log_file = os.path.join(log_dir, f'ucampus_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.log')
@@ -92,9 +93,9 @@ def setup_logging():
 
         def write(self, text):
             if text.strip():
-                if any(x in text for x in ['', 'Error', 'Exception', 'Traceback']):
+                if any(x in text for x in ['Error', 'Exception', 'Traceback']):
                     self.logger.error(text.strip())
-                elif any(x in text for x in ['', 'Warning']):
+                elif any(x in text for x in ['Warning']):
                     self.logger.warning(text.strip())
                 else:
                     self.logger.info(text.strip())
@@ -123,11 +124,13 @@ class Config:
     temperature: float
     max_tokens: int
     timeout: int
-    whisper_api: str
     debug_mode: bool
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
+        # PyInstaller 兼容：冻结模式下相对路径解析到 EXE 所在目录
+        if getattr(sys, 'frozen', False) and not os.path.isabs(path):
+            path = os.path.join(BASE_DIR, path)
         with open(path, "r", encoding="UTF-8") as f:
             data = json.load(f)
         global DEBUG_MODE
@@ -145,7 +148,6 @@ class Config:
             temperature=data.get("temperature", 0.3),
             max_tokens=data.get("max_tokens", 2000),
             timeout=data.get("timeout", 10),
-            whisper_api=data.get("whisper_api", None),
             debug_mode=DEBUG_MODE
         )
 
@@ -215,6 +217,8 @@ class AnswerResult:
     question_number: int
     answer: str
     message: str = ""
+    completed_count: int = 0
+    total_count: int = 1
 
 
 class Selectors:
@@ -354,7 +358,7 @@ class WebDriverHelper:
                     return elements
             except Exception as e:
                 error_msg = str(e)
-                print(f"操作失败: {error_msg[:50]}")  # 控制台只显示简短信息
+                print(f"操作失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)  # 详细堆栈保存到文件
                 continue
         return []
@@ -425,13 +429,15 @@ class WebDriverHelper:
                     time.sleep(0.5)
                     continue
                 error_msg = str(e)
-                print(f"操作失败: {error_msg[:50]}")  # 控制台只显示简短信息
+                print(f"操作失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)  # 详细堆栈保存到文件
         return False
 
 
 class KimiClient:
     """Kimi API客户端 - 职责：仅处理API通信"""
+
+    MAX_CONTEXT_MESSAGES = 6
 
     SYSTEM_PROMPT = """你是一个专业的英语教学助手，擅长分析英语题目。
 请根据题目要求给出准确答案，注意区分不同题型：
@@ -442,18 +448,18 @@ class KimiClient:
     def __init__(self, config: Config):
         self.config = config
         self.client = OpenAI(api_key=config.api_key, base_url=config.base_url)
-        self.conversation_history: List[Dict] = []
+        self.context_messages: List[Dict] = []  # 仅保留阅读/听力材料，不保留上一轮问答
         self.current_chapter_id: Optional[str] = None
         self.accumulated_passages: set = set()  # 已累积的原文哈希，防重复
 
     def start_new_chapter(self, chapter_id: str):
-        """开始新章节，记录章节ID（不自动清空历史）"""
+        """开始新章节，记录章节ID（不自动清空材料上下文）"""
         self.current_chapter_id = chapter_id
         print(f" 记录章节: {chapter_id[:50]}")
 
     def force_reset(self, chapter_id: str):
-        """强制清空所有历史，无论章节是否相同"""
-        self.conversation_history = []
+        """强制清空所有材料上下文，无论章节是否相同"""
+        self.context_messages = []
         self.current_chapter_id = chapter_id
         self.accumulated_passages = set()
         print(f" 强制重置章节: {chapter_id[:50]}")
@@ -475,23 +481,22 @@ class KimiClient:
             "role": "user",
             "content": f"【阅读材料 {len(self.accumulated_passages)}】\n\n{passage}\n\n请理解以上材料，等待后续问题。"
         }
-        self.conversation_history.append(passage_msg)
-        self.conversation_history.append({
-            "role": "assistant",
-            "content": f"我已理解材料 {len(self.accumulated_passages)}。请提出问题。"
-        })
+        self.context_messages.append(passage_msg)
+
+        if len(self.context_messages) > self.MAX_CONTEXT_MESSAGES:
+            self.context_messages = self.context_messages[-self.MAX_CONTEXT_MESSAGES:]
 
         print(f"    新增原文（{len(passage)}字符），当前共{len(self.accumulated_passages)}篇")
         return True
 
     def ask(self, prompt: str, retry_count: int = 3) -> Optional[str]:
         """发送问题并获取回答"""
-        print(f"当前ai对话历史共{len(self.conversation_history)}条")
+        print(f"当前AI材料上下文共{len(self.context_messages)}条，本次请求不携带上一轮问答")
         for attempt in range(retry_count):
             try:
                 messages = [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
-                    *self.conversation_history,
+                    *self.context_messages,
                     {"role": "user", "content": prompt}
                 ]
 
@@ -528,12 +533,6 @@ class KimiClient:
                     print(f"   answer:       {answer[:500]}{'...' if len(answer) > 500 else ''}")
                     print("=" * 60 + "\n")
 
-                self.conversation_history.append({"role": "user", "content": prompt})
-                self.conversation_history.append({"role": "assistant", "content": answer})
-
-                if len(self.conversation_history) > 22:
-                    self.conversation_history = self.conversation_history[:2] + self.conversation_history[-20:]
-
                 print(f"AI回答: {answer}")
                 return answer
 
@@ -565,7 +564,7 @@ class KimiClient:
                 if attempt < retry_count - 1:
                     time.sleep((2 ** attempt) + random.random())
                 error_msg = str(e)
-                print(f"AI调用失败: {error_msg[:50]}")  # 控制台只显示简短信息
+                print(f"AI调用失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)  # 详细堆栈保存到文件
 
         return None
@@ -588,7 +587,7 @@ class QuestionParserStrategy(ABC):
 class QuestionParser:
     """题目解析器 - 使用策略模式"""
 
-    def __init__(self, driver, whisper_api_key: Optional[str] = None):
+    def __init__(self, driver):
         self.driver = driver
         self.strategies: List[QuestionParserStrategy] = [
             VideoStrategy(),
@@ -724,7 +723,7 @@ class QuestionParser:
 
             except Exception as e:
                 error_msg = str(e)
-                print(f"       解析容器 {idx} 失败:{error_msg[:50]}")
+                print(f"       解析容器 {idx} 失败:{error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
                 continue
 
@@ -751,7 +750,7 @@ class QuestionParser:
             return False
         except Exception as e:
             error_msg = str(e)
-            print(f"操作失败: {error_msg[:50]}")
+            print(f"操作失败: {error_msg}")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return False
 
@@ -879,7 +878,7 @@ class QuestionParser:
                         print(f"      策略返回None")
             except Exception as e:
                 error_msg = str(e)
-                print(f"      策略 {strategy.__class__.__name__} 失败: {error_msg[:50]} ")
+                print(f"      策略 {strategy.__class__.__name__} 失败: {error_msg} ")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
                 continue
         print(f"      没有匹配的策略")
@@ -1333,7 +1332,7 @@ class TextInputStrategy(QuestionParserStrategy):
 
         except Exception as e:
             error_msg = str(e)
-            print(f"      TextInputStrategy解析失败: {error_msg[:100]}")
+            print(f"      TextInputStrategy解析失败: {error_msg}")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return None
 
@@ -1932,7 +1931,7 @@ class AnswerExecutor:
 
                 except Exception as e:
                     error_msg = str(e)
-                    print(f"      填空 {i + 1} 失败:{error_msg[:50]} ")
+                    print(f"      填空 {i + 1} 失败:{error_msg} ")
                     logger.error(f"详细错误: {error_msg}", exc_info=True)
 
         return AnswerResult(
@@ -2039,23 +2038,48 @@ class AnswerExecutor:
             if not ans:
                 answers = self._parse_banked_answer(answer, expected_count)
                 ans = answers[0] if answers else ""
+            answers = [ans]
         else:
             answers = self._parse_banked_answer(answer, expected_count)
             ans = answers[0] if answers else ""
 
-        print(f"\t题{q.number}: {ans[:60]}..." if ans else f"\t题{q.number}: (空)")
+        print(f"\tText question {q.number}: {expected_count} inputs detected")
 
-        if ans:
-            inp = q.inputs[0]
+        success_count = 0
+        filled_answers = []
+
+        for i, inp in enumerate(q.inputs):
+            current_answer = answers[i] if i < len(answers) else ""
+            item_label = f"input {i + 1}"
+            if i < len(q.banked_blanks):
+                item_label = (
+                    q.banked_blanks[i].get('question_text')
+                    or q.banked_blanks[i].get('words')
+                    or item_label
+                )
+
+            if not current_answer:
+                print(f"\t{item_label}: (empty)")
+                continue
+
+            print(f"\t{item_label}: {current_answer[:60]}...")
             self.driver.execute_script(
                 "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
                 inp
             )
             time.sleep(0.2)
-            WebDriverHelper.simulate_typing(self.driver, inp, ans)
-            return AnswerResult(True, q.number, ans, f"填写题{q.number}成功")
+            WebDriverHelper.simulate_typing(self.driver, inp, current_answer)
+            filled_answers.append(current_answer)
+            success_count += 1
 
-        return AnswerResult(False, q.number, answer, f"题{q.number}无答案")
+        return AnswerResult(
+            success_count > 0,
+            q.number,
+            "\n".join(filled_answers) if filled_answers else answer,
+            f"filled {success_count}/{expected_count} text inputs",
+            completed_count=success_count,
+            total_count=expected_count
+        )
 
     def _fill_unknown(self, q: Question, answer: str) -> AnswerResult:
         return AnswerResult(False, q.number, answer, "未知题型，无法填写")
@@ -2088,7 +2112,12 @@ class AnswerExecutor:
     @staticmethod
     def _parse_banked_answer(answer: str, expected_count: int) -> List[str]:
         result = [''] * expected_count
-        answer = re.sub(r'^(简答题|选词/选择填空|填空题|答案|选词填空|翻译)[：:]\s*', '', answer.strip())
+        label_pattern = (
+            r'(?:简答题|选词/选择填空|填空题|答案|选词填空|翻译|'
+            r'short\s*answer|answer(?:s)?|translation|fill\s*in(?:\s*the\s*blanks?)?)'
+        )
+        answer = answer.strip()
+        answer = re.sub(rf'(?im)^\s*{label_pattern}\s*[：:]\s*', '', answer)
         print(f"    [调试] 清理后答案前200字: {answer[:200]}...")
 
         matched_any = False
@@ -2099,6 +2128,8 @@ class AnswerExecutor:
 
             if match:
                 clean_ans = match.group(1).strip().replace('\n', ' ')
+                clean_ans = re.sub(rf'(?i)^\s*{label_pattern}\s*[：:]\s*', '', clean_ans).strip()
+                clean_ans = re.sub(rf'(?i)\s*{label_pattern}\s*[：:]\s*$', '', clean_ans).strip()
                 result[i - 1] = clean_ans
                 matched_any = True
                 print(f"    [调试] 成功提取空 {i}: '{clean_ans}'")
@@ -2113,6 +2144,7 @@ class AnswerExecutor:
         content_lines = []
 
         for line in lines:
+            line = re.sub(rf'(?i)^\s*{label_pattern}\s*[：:]\s*', '', line).strip()
             clean = re.sub(r'^\d+\s*[.、)\]]\s*', '', line).strip()
             if clean and not re.match(r'^\d+$', clean):
                 content_lines.append(clean)
@@ -2225,7 +2257,7 @@ class AnswerExecutor:
                             self._sync_react_state(select_wrapper, ans)
 
                     except Exception as e:
-                        print(f"         验证失败: {str(e)[:50]}")
+                        print(f"         验证失败: {e}")
                         success_count += 1
 
                 else:
@@ -2234,7 +2266,7 @@ class AnswerExecutor:
                         success_count += 1
 
             except Exception as e:
-                print(f"        处理空{i + 1}失败: {str(e)[:50]}")
+                print(f"        处理空{i + 1}失败: {e}")
                 logger.error(f"详细错误: {str(e)}", exc_info=True)
                 continue
 
@@ -2315,7 +2347,7 @@ class AnswerExecutor:
             return value.lower() in text_elem.text.lower()
 
         except Exception as e:
-            print(f"        JS强制设置失败: {str(e)[:50]}")
+            print(f"        JS强制设置失败: {e}")
             return False
 
     def _sync_react_state(self, select_wrapper, value: str) -> bool:
@@ -2380,10 +2412,7 @@ class VideoHandler(ContentHandler):
         self.popup_monitor_thread = None
         self.stop_monitoring = threading.Event()
 
-        self.transcriber = AudioTranscriber(
-            api_key=config.whisper_api,
-            use_local=True
-        )
+        self.transcriber = AudioTranscriber()
 
         self.analyzer_client = OpenAI(
             api_key=config.api_key,
@@ -2514,7 +2543,7 @@ class VideoHandler(ContentHandler):
                 return ""
 
         except Exception as e:
-            print(f"     音频识别失败: {str(e)[:50]}")
+            print(f"     音频识别失败: {e}")
             return ""
 
     def _play_video(self, duration: float):
@@ -2540,7 +2569,7 @@ class VideoHandler(ContentHandler):
                 time.sleep(10)
 
         except Exception as e:
-            print(f"       视频播放失败: {str(e)[:50]}")
+            print(f"       视频播放失败: {e}")
 
     def _monitor_popup_questions(self):
         print("      [监视器] 开始监视弹窗...")
@@ -2682,7 +2711,7 @@ class VideoHandler(ContentHandler):
             }
 
         except Exception as e:
-            print(f"      [监视器] 解析失败: {str(e)[:50]}")
+            print(f"      [监视器] 解析失败: {e}")
             return None
 
     def _intelligent_select_answer(self, question_data: Dict) -> str:
@@ -2717,7 +2746,7 @@ class VideoHandler(ContentHandler):
             return self._keyword_match(question, options)
 
         except Exception as e:
-            print(f"      [监视器]  AI分析失败: {str(e)[:50]}，使用关键词匹配")
+            print(f"      [监视器]  AI分析失败: {e}，使用关键词匹配")
             return self._keyword_match(question, options)
 
     def _build_analysis_prompt(self, question: str, options: List[Dict]) -> str:
@@ -2832,7 +2861,7 @@ class VideoHandler(ContentHandler):
             return False
 
         except Exception as e:
-            print(f"      [监视器] 点击失败: {str(e)[:50]}")
+            print(f"      [监视器] 点击失败: {e}")
             return False
 
     def _click_submit_if_exists(self, popup):
@@ -2939,7 +2968,7 @@ class FlashcardHandler(ContentHandler):
                 print(f" 学习{current_word.text}")
             except Exception as e:
                 error_msg = str(e)
-                print(f"      处理闪卡失败: {error_msg[:50]}")
+                print(f"      处理闪卡失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
                 time.sleep(1)
                 continue
@@ -2976,7 +3005,7 @@ class AISolver:
         self.driver = driver
         self.config = config
         self.kimi = KimiClient(self.config)
-        self.parser = QuestionParser(driver, self.config.whisper_api)
+        self.parser = QuestionParser(driver)
         self.prompt_builder = PromptBuilder(self.kimi)
         self.executor = AnswerExecutor(driver)
         self.content_handlers: List[ContentHandler] = [
@@ -2987,6 +3016,16 @@ class AISolver:
         self.processed_hashes: set = set()
         self._processed_video_tabs: set = set()
         self._processed_audio_tabs: set = set()
+        self.stop_requested = threading.Event()
+
+    def request_stop(self):
+        self.stop_requested.set()
+
+    def clear_stop(self):
+        self.stop_requested.clear()
+
+    def _should_stop(self) -> bool:
+        return self.stop_requested.is_set()
 
     def solve_current_chapter(self, chapter_name: str) -> bool:
         print(f"\n{'=' * 60}")
@@ -3044,10 +3083,18 @@ class AISolver:
 
         self.kimi.start_new_chapter(chapter_name)
         self.processed_hashes.clear()
+        self.clear_stop()
 
         course_home_url = self.driver.current_url
+        progress_callback = getattr(self, "progress_callback", None)
 
         for task_idx, tab in enumerate(selected_tabs):
+            if self._should_stop():
+                print("  已请求停止，批量处理提前结束")
+                break
+
+            if callable(progress_callback):
+                progress_callback(task_idx, len(selected_tabs), tab.get('display') or tab.get('l1_title', 'unknown'))
             tab_name = tab.get('l1_title', 'unknown')
 
             if '_element' in tab and tab['_element'] is not None:
@@ -3069,29 +3116,34 @@ class AISolver:
                             self.driver.execute_script("arguments[0].click();", unit_tabs[tab['_unit_idx']])
                             time.sleep(1.2)
                     except Exception as e:
-                        print(f"    切换Unit失败: {str(e)[:50]}")
+                        print(f"    切换Unit失败: {e}")
 
                 chapter_clicked = False
                 try:
                     chapters = self.driver.find_elements(
                         By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN'
                     )
+                    name_occurrence = tab.get('_name_occurrence')
+                    seen_name_count = {}
                     for ch in chapters:
                         try:
                             name_elem = ch.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
                             if name_elem.text.strip() == tab_name:
-                                self.driver.execute_script("arguments[0].click();", name_elem)
-                                chapter_clicked = True
+                                current_occurrence = seen_name_count.get(tab_name, 0)
+                                seen_name_count[tab_name] = current_occurrence + 1
+                                if name_occurrence is not None and current_occurrence != name_occurrence:
+                                    continue
+                                chapter_clicked = self._click_course_directory_task(ch, name_elem)
                                 break
                         except:
                             continue
                 except Exception as e:
-                    print(f"    重新定位章节失败: {str(e)[:50]}")
+                    print(f"    重新定位章节失败: {e}")
 
                 if chapter_clicked:
                     time.sleep(3)
                     self._process_tab_with_accumulation(tab_name, task_idx, 0)
-                    time.sleep(2)
+                    self._sync_course_directory_completion(tab, course_home_url)
                 else:
                     print(f"  点击章节失败，跳过")
 
@@ -3114,7 +3166,7 @@ class AISolver:
 
                 if l2_idx < 0:
                     self._process_tab_with_accumulation(l1_tab['title'], l1_idx, 0)
-                    time.sleep(2)
+                    self._wait_for_post_submit_settle()
                 else:
                     level2_tabs = self._get_level2_tabs()
                     if l2_idx >= len(level2_tabs):
@@ -3131,11 +3183,130 @@ class AISolver:
 
                     combined_name = f"{l1_tab['title']}_{l2_tab['title']}"
                     self._process_tab_with_accumulation(combined_name, l1_idx, l2_idx)
-                    time.sleep(2)
+                    self._wait_for_post_submit_settle()
 
         print(f"\n{'=' * 60}")
         print(f"全部 {len(selected_tabs)} 个任务处理完毕")
         print(f"{'=' * 60}")
+        if callable(progress_callback):
+            progress_callback(len(selected_tabs), len(selected_tabs), "")
+
+    def _wait_for_post_submit_settle(self, seconds: float = 3.0):
+        """Give the site a short window to persist task state after submit."""
+        self.stop_requested.wait(seconds)
+
+    def _sync_course_directory_completion(self, tab: Dict, course_home_url: str, timeout: int = 18) -> bool:
+        """
+        Return to the course directory and wait for the task row to show a completed state.
+        Batch mode uses this to avoid racing the site's asynchronous directory refresh.
+        """
+        task_name = tab.get('l1_title', '').strip()
+        if not task_name:
+            self._wait_for_post_submit_settle()
+            return False
+
+        self._wait_for_post_submit_settle(3.0)
+
+        deadline = time.time() + timeout
+        last_error = ""
+
+        while time.time() < deadline and not self._should_stop():
+            try:
+                if course_home_url:
+                    self.driver.get(course_home_url)
+                time.sleep(1.2)
+
+                self._select_course_directory_unit(tab)
+                task_item = self._find_course_directory_task_item(tab)
+
+                if task_item is not None and self._is_course_task_completed(task_item):
+                    return True
+            except Exception as e:
+                last_error = str(e)
+
+            if self.stop_requested.wait(2):
+                break
+
+        return False
+
+    def _click_course_directory_task(self, task_item, name_elem) -> bool:
+        """Open a directory task with a real browser click before falling back to JS."""
+        click_targets = [task_item, name_elem]
+        for target in click_targets:
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
+                    target
+                )
+                time.sleep(0.4)
+                ActionChains(self.driver).move_to_element(target).pause(0.2).click().perform()
+                time.sleep(0.8)
+                return True
+            except Exception as e:
+                pass
+
+        for target in click_targets:
+            if WebDriverHelper.safe_click(self.driver, target, retries=1):
+                return True
+
+        return False
+
+    def _select_course_directory_unit(self, tab: Dict) -> bool:
+        unit_idx = tab.get('_unit_idx')
+        if unit_idx is None:
+            return False
+
+        unit_container = WebDriverWait(self.driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, 'unipus-tabs_unitTabScrollContainer__fXBxR'))
+        )
+        unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
+        if unit_idx >= len(unit_tabs):
+            return False
+
+        self.driver.execute_script("arguments[0].click();", unit_tabs[unit_idx])
+        time.sleep(1.0)
+        return True
+
+    def _find_course_directory_task_item(self, tab: Dict):
+        task_name = tab.get('l1_title', '').strip()
+        name_occurrence = tab.get('_name_occurrence')
+        seen_name_count = {}
+        chapters = self.driver.find_elements(By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN')
+        for chapter in chapters:
+            try:
+                name_elem = chapter.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
+                if name_elem.text.strip() == task_name:
+                    current_occurrence = seen_name_count.get(task_name, 0)
+                    seen_name_count[task_name] = current_occurrence + 1
+                    if name_occurrence is not None and current_occurrence != name_occurrence:
+                        continue
+                    return chapter
+            except Exception:
+                continue
+        return None
+
+    def _is_course_task_completed(self, task_item) -> bool:
+        try:
+            text = (task_item.text or "").strip().lower()
+            class_name = (task_item.get_attribute("class") or "").lower()
+            html = (task_item.get_attribute("innerHTML") or "").lower()
+            state = f"{text}\n{class_name}\n{html}"
+
+            negative_markers = [
+                "未完成", "未提交", "待完成", "待提交",
+                "incomplete", "not completed", "uncompleted", "unsubmitted", "todo"
+            ]
+            if any(marker in state for marker in negative_markers):
+                return False
+
+            positive_markers = [
+                "已完成", "已提交", "成绩", "得分",
+                "completed", "finished", "submitted", "score", "passed", "done",
+                "completeicon", "completedicon", "finishicon", "success"
+            ]
+            return any(marker in state for marker in positive_markers)
+        except Exception:
+            return False
 
     def _process_tab_with_accumulation(self, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
         """处理Tab - 累积原文模式，包含视频/音频预处理"""
@@ -3171,6 +3342,10 @@ class AISolver:
         last_questions_signature = ""
 
         while True:
+            if self._should_stop():
+                print("    已请求停止，当前任务提前结束")
+                return False
+
             questions, directions = self.parser.parse_all()
             print(f"\n    处理第 {page_num} 页题目...")
             print(f"    找到 {len(questions)} 个可见题目")
@@ -3208,6 +3383,8 @@ class AISolver:
 
                 if ai_response:
                     success_count = 0
+                    completed_units = 0
+                    total_work_units = sum(self._question_work_units(q) for q in normal_questions)
 
                     for q in normal_questions:
                         if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
@@ -3221,13 +3398,19 @@ class AISolver:
 
                         if ans:
                             result = self.executor.execute(q, ans)
+                            completed_units += self._result_completed_units(result)
                             if result.success:
                                 success_count += 1
                         else:
                             print(f"    题目 {q.number} 无答案")
 
                     total_answered += success_count
-                    print(f"    本页成功填写 {success_count}/{len(normal_questions)} 题")
+                    if total_work_units > len(normal_questions):
+                        print(
+                            f"    本页成功填写 {completed_units}/{total_work_units} 项（题目 {success_count}/{len(normal_questions)}）"
+                        )
+                    else:
+                        print(f"    本页成功填写 {success_count}/{len(normal_questions)} 题")
 
             if normal_questions and self.executor.submit():
                 self._wait_for_submit_complete()
@@ -3283,6 +3466,18 @@ class AISolver:
 
         return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
+    @staticmethod
+    def _question_work_units(question: Question) -> int:
+        if question.q_type == QuestionType.TEXT and question.inputs:
+            return len(question.inputs)
+        return 1
+
+    @staticmethod
+    def _result_completed_units(result: AnswerResult) -> int:
+        if result.completed_count > 0:
+            return result.completed_count
+        return 1 if result.success else 0
+
     def solve_current_page(self, chapter_name: str = "unknown") -> bool:
         print("\n" + "=" * 60)
         print(" 开始处理当前停留的页面")
@@ -3335,7 +3530,7 @@ class AISolver:
                             return btn
             except Exception as e:
                 error_msg = str(e)
-                print(f"操作失败: {error_msg[:50]}")
+                print(f"操作失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
                 continue
 
@@ -3389,7 +3584,7 @@ class AISolver:
 
         except Exception as e:
             error_msg = str(e)
-            print(f"    生成哈希失败:{error_msg[:50]} ")
+            print(f"    生成哈希失败:{error_msg} ")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return "empty"
 
@@ -3412,6 +3607,10 @@ class AISolver:
 
     def _process_current_content(self, chapter_name: str) -> bool:
         print(f"    正在分析页面结构...")
+
+        if self._should_stop():
+            print("    已请求停止，当前页面处理提前结束")
+            return False
 
         questions, directions = self.parser.parse_all()
         print(f"    找到 {len(questions)} 个题目")
@@ -3441,8 +3640,13 @@ class AISolver:
             return False
 
         success_count = 0
+        completed_units = 0
+        total_work_units = sum(self._question_work_units(q) for q in normal_questions)
 
         for q in normal_questions:
+            if self._should_stop():
+                print("    已请求停止，停止当前页面剩余题目处理")
+                break
             if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
                             QuestionType.VOCABULARY_TEST]:
                 ans = self._extract_single_answer(ai_response, q.number)
@@ -3454,12 +3658,22 @@ class AISolver:
 
             if ans:
                 result = self.executor.execute(q, ans)
+                completed_units += self._result_completed_units(result)
                 if result.success:
                     success_count += 1
             else:
                 print(f"    题目 {q.number} 无答案")
 
-        print(f"     成功填写 {success_count}/{len(normal_questions)} 题")
+        if total_work_units > len(normal_questions):
+            print(
+                f"     成功填写 {completed_units}/{total_work_units} 项（题目 {success_count}/{len(normal_questions)}）"
+            )
+        else:
+            print(f"     成功填写 {success_count}/{len(normal_questions)} 题")
+
+        if self._should_stop():
+            print("     已请求停止，跳过当前页面提交")
+            return success_count > 0
 
         if self.executor.submit():
             self._wait_for_submit_complete()
@@ -3597,7 +3811,7 @@ class AISolver:
                 print("   未找到有效音频URL，跳过")
                 return
 
-            transcriber = AudioTranscriber(use_local=True)
+            transcriber = AudioTranscriber()
             duration = self._get_audio_duration()
             if duration > 120:
                 transcript = transcriber.transcribe_long_audio(audio_url, language="en")
@@ -3613,7 +3827,7 @@ class AISolver:
             self._processed_audio_tabs.add((tab_name, l1_idx, l2_idx))
 
         except Exception as e:
-            print(f"   预处理失败: {str(e)[:80]}")
+            print(f"   预处理失败: {e}")
             logger.error(f"音频预处理异常: {e}", exc_info=True)
 
     def _has_audio_on_page(self) -> bool:
@@ -3690,7 +3904,7 @@ class AISolver:
             self._processed_video_tabs.add((tab_name, l1_idx, l2_idx))
 
         except Exception as e:
-            print(f"   预处理失败: {str(e)[:80]}")
+            print(f"   预处理失败: {e}")
             logger.error(f"视频预处理异常: {e}", exc_info=True)
 
     def _has_video_on_page(self) -> bool:
@@ -3754,442 +3968,6 @@ class AISolver:
 
         print(f"         等待内容变化超时")
         return False
-
-
-class ModernGUI:
-    """基于 CustomTkinter 的 Cursor 主题 Dashboard 仪表盘布局，支持深/浅色模式无缝切换"""
-
-    def __init__(self, driver, solver, bot):
-        self.driver = driver
-        self.solver = solver
-        self.bot = bot
-
-        ctk.set_appearance_mode("dark")
-
-        self.root = ctk.CTk()
-        self.root.title("UnipusAI Helper v3.4")
-        self.root.geometry("1150x760")
-        self.root.minsize(950, 620)
-
-        self.root.configure(fg_color="#0d1117")
-
-        self.root.grid_rowconfigure(1, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
-
-        self.top_bar = ctk.CTkFrame(self.root, height=60, corner_radius=0, fg_color="#161b22")
-        self.top_bar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
-        self.top_bar.grid_columnconfigure(4, weight=1)
-
-        ctk.CTkLabel(self.top_bar, text="UnipusAI Helper", font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=(20,6), pady=10, sticky="w")
-        ctk.CTkLabel(self.top_bar, text="v3.4", font=ctk.CTkFont(family="Consolas", size=12), text_color="#484f58").grid(row=0, column=1, padx=0, pady=10, sticky="w")
-
-        info_frame = ctk.CTkFrame(self.top_bar, fg_color="transparent")
-        info_frame.grid(row=0, column=2, padx=16, sticky="e")
-        ctk.CTkLabel(info_frame, text=f"账号：{self.bot.config.username[:12]}", font=ctk.CTkFont(size=13), text_color="#8b949e").pack(side="left", padx=4)
-        ctk.CTkLabel(info_frame, text=f"当前AI模型：{self.bot.config.model}", font=ctk.CTkFont(size=13), text_color="#58a6ff").pack(side="left", padx=4)
-
-        self.debug_var = ctk.BooleanVar(value=DEBUG_MODE)
-        self.debug_switch = ctk.CTkSwitch(self.top_bar, text="调试", command=self._on_debug_toggle, variable=self.debug_var, onvalue=True, offvalue=False, font=ctk.CTkFont(size=13), progress_color="#58a6ff", button_color="#30363d", text_color="#8b949e")
-        self.debug_switch.grid(row=0, column=3, padx=8, pady=12, sticky="e")
-
-        self.btn_quit = ctk.CTkButton(self.top_bar, text="退出", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#f85149", hover_color="#30363d", width=60, height=32, corner_radius=6, command=self.on_quit_clicked)
-        self.btn_quit.grid(row=0, column=4, padx=(8,20), pady=14, sticky="e")
-
-        self.main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=24, pady=(4, 16))
-        self.root.grid_rowconfigure(1, weight=1)
-        self.main_frame.grid_rowconfigure(2, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-
-        self.action_bar = ctk.CTkFrame(self.main_frame, fg_color="#161b22", corner_radius=8, height=64)
-        self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        self.action_bar.grid_columnconfigure(0, weight=1)
-
-        self.status_label = ctk.CTkLabel(self.action_bar, text=" 初始化中...", font=ctk.CTkFont(size=14), text_color="#8b949e")
-        self.status_label.grid(row=0, column=0, padx=16, pady=14, sticky="w")
-
-        self.progress_bar = ctk.CTkProgressBar(self.action_bar, mode="indeterminate", width=140, fg_color="#21262d", progress_color="#58a6ff")
-        self.progress_bar.grid(row=0, column=1, padx=8, pady=12, sticky="e")
-        self.progress_bar.grid_remove()
-
-        self.btn_scan = ctk.CTkButton(self.action_bar, text="系统未就绪", font=ctk.CTkFont(size=14), fg_color="#21262d", text_color="#8b949e", hover_color="#30363d", corner_radius=6, height=44, state="disabled", command=self._on_scan_clicked)
-        self.btn_scan.grid(row=0, column=2, padx=4, pady=10, sticky="e")
-
-        self.btn_quick = ctk.CTkButton(self.action_bar, text="系统未就绪", font=ctk.CTkFont(size=14), fg_color="#21262d", text_color="#8b949e", hover_color="#30363d", corner_radius=6, height=44, state="disabled", command=self._on_quick_clicked)
-        self.btn_quick.grid(row=0, column=3, padx=4, pady=10, sticky="e")
-
-        self.btn_auto = ctk.CTkButton(self.action_bar, text="开始处理", font=ctk.CTkFont(size=14, weight="bold"), fg_color="#238636", text_color="#ffffff", hover_color="#2ea043", corner_radius=6, height=44, state="disabled", command=self._on_auto_clicked)
-        self.btn_auto.grid(row=0, column=4, padx=(4,12), pady=10, sticky="e")
-
-        self.task_header = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=40)
-        self.task_header.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-        self.task_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.task_header, text="任务清单", font=ctk.CTkFont(size=16, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=4, sticky="w")
-
-        self.task_search = ctk.CTkEntry(self.task_header, placeholder_text="搜索任务...", font=ctk.CTkFont(size=14), fg_color="#0d1117", text_color="#e6edf3", border_color="#30363d", corner_radius=6, height=34, width=220)
-        self.task_search.grid(row=0, column=1, padx=8, sticky="e")
-        self.task_search.bind("<KeyRelease>", self._on_search_key)
-
-        ctk.CTkButton(self.task_header, text="全选", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_select_all).grid(row=0, column=2, padx=2, sticky="e")
-        ctk.CTkButton(self.task_header, text="必修", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_select_compulsory).grid(row=0, column=3, padx=2, sticky="e")
-        ctk.CTkButton(self.task_header, text="取消", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_deselect_all).grid(row=0, column=4, padx=2, sticky="e")
-        self.btn_select_visible = ctk.CTkButton(self.task_header, text="全选当前", font=ctk.CTkFont(size=13), fg_color="#1f6feb", text_color="#ffffff", hover_color="#388bfd", corner_radius=6, height=30, width=80, command=self._on_select_visible)
-        self.btn_select_visible.grid(row=0, column=5, padx=2, sticky="e")
-        self.btn_select_visible.grid_remove()
-
-        self.task_list_card = ctk.CTkFrame(self.main_frame, fg_color="#161b22", corner_radius=8)
-        self.task_list_card.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        self.task_list_card.grid_rowconfigure(0, weight=1)
-        self.task_list_card.grid_columnconfigure(0, weight=1)
-
-        self._tab_list_frame = ctk.CTkScrollableFrame(self.task_list_card, fg_color="transparent", corner_radius=0)
-        self._tab_list_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-
-        self.log_header = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=36)
-        self.log_header.grid(row=3, column=0, sticky="ew", pady=(0, 0))
-        self.log_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.log_header, text="终端日志", font=ctk.CTkFont(size=16, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=4, sticky="w")
-
-        self.log_visible = True
-        self.log_toggle_btn = ctk.CTkButton(self.log_header, text="折叠日志", font=ctk.CTkFont(size=14), fg_color="transparent", text_color="#8b949e", hover_color="#21262d", height=28, width=90, command=self._on_toggle_log)
-        self.log_toggle_btn.grid(row=0, column=1, padx=8, pady=4, sticky="e")
-
-        self.log_card = ctk.CTkFrame(self.main_frame, fg_color="#0d1117", corner_radius=8)
-        self.log_card.grid(row=4, column=0, sticky="nsew")
-        self.log_card.grid_rowconfigure(0, weight=1)
-        self.log_card.grid_columnconfigure(0, weight=1)
-
-        self.log_area = ctk.CTkTextbox(self.log_card, fg_color="#0d1117", text_color="#c9d1d9", font=ctk.CTkFont(family="Consolas", size=12), corner_radius=0, wrap="word", state="disabled", border_width=0)
-        self.log_area.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
-
-        self._all_tabs = []
-        self._tab_check_vars = []
-        self._tab_checkboxes = []
-        self._tab_list_built = False
-        self._auto_running = False
-        self._quick_running = False
-        self._current_filter = ""
-        self._task_groups = {}  # unit_name -> list of tab indices
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_quit_clicked)
-        self.root.after(100, self._poll_logs)
-
-    def enable_scan_button(self):
-        """登录成功后激活所有按钮"""
-        self.btn_scan.configure(
-            state="normal", text="扫描任务列表",
-            fg_color="#238636", text_color="#ffffff", hover_color="#2ea043", corner_radius=6
-        )
-        self.btn_quick.configure(
-            state="normal", text="快速处理当前页",
-            fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6
-        )
-        self.status_label.configure(text="就绪 - 点击[扫描任务列表]或[快速处理当前页]")
-        gui_log_queue.put("\n" + "=" * 60)
-        gui_log_queue.put("系统就绪")
-        gui_log_queue.put("模式1: 点击[扫描任务列表] -> 勾选 -> 自动处理")
-        gui_log_queue.put("模式2: 手动翻到题目页 -> 点击[快速处理当前页]")
-        try:
-            winsound.MessageBeep()
-        except:
-            pass
-
-    def _on_scan_clicked(self):
-        """扫描Tab按钮：列出当前页面所有Tab供选择"""
-        if self.btn_scan.cget("state") == "disabled":
-            return
-        self.btn_scan.configure(state="disabled", text="⏳ 扫描中...")
-        self.status_label.configure(text="扫描中...", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._scan_tabs_thread, daemon=True).start()
-
-    def _scan_tabs_thread(self):
-        """后台线程：扫描Tab — 自动检测页面层级（课程目录 / 章节内部）"""
-        try:
-            tabs = []
-            course_tabs = self._scan_course_directory()
-            if course_tabs:
-                tabs = course_tabs
-                gui_log_queue.put(f"课程目录页发现 {len(tabs)} 个任务")
-            else:
-                level1 = self.solver._get_level1_tabs()
-                if level1:
-                    for l1_idx, l1_tab in enumerate(level1):
-                        if not WebDriverHelper.safe_click(self.driver, l1_tab['element']):
-                            continue
-                        time.sleep(1.2)
-                        level2 = self.solver._get_level2_tabs()
-                        if not level2:
-                            tabs.append({'l1_idx': l1_idx, 'l2_idx': -1, 'l1_title': l1_tab['title'], 'l2_title': '', 'display': l1_tab['title'], 'is_l2': False, 'is_compulsory': True})
-                        else:
-                            for l2_idx, l2_tab in enumerate(level2):
-                                tabs.append({'l1_idx': l1_idx, 'l2_idx': l2_idx, 'l1_title': l1_tab['title'], 'l2_title': l2_tab['title'], 'display': f"  └ {l2_tab['title']}", 'is_l2': True, 'is_compulsory': True})
-                    gui_log_queue.put(f"章节内部页发现 {len(tabs)} 个任务")
-            self._all_tabs = tabs
-            self.root.after(0, self._build_tab_list_ui)
-        except Exception as e:
-            gui_log_queue.put(f"扫描失败: {str(e)[:80]}")
-            logger.error(f"扫描异常: {e}", exc_info=True)
-            self.root.after(0, self._reset_scan_button)
-
-    def _scan_course_directory(self):
-        """扫描课程目录页（Unit 列表视图）"""
-        tabs = []
-        try:
-            unit_container = WebDriverWait(self.driver, 5).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'unipus-tabs_unitTabScrollContainer__fXBxR')))
-            unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
-            gui_log_queue.put(f"课程目录页，找到 {len(unit_tabs)} 个Unit")
-            for unit_idx, unit_tab in enumerate(unit_tabs):
-                try:
-                    self.driver.execute_script("arguments[0].click();", unit_tab)
-                except:
-                    unit_tab.click()
-                time.sleep(0.8)
-                chapters = self.driver.find_elements(By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN')
-                for chapter in chapters:
-                    try:
-                        name_elem = chapter.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
-                        name = name_elem.text.strip()
-                        if not name:
-                            continue
-                        try:
-                            chapter.find_element(By.CLASS_NAME, 'courses-unit_taskRequireIcon__zZldK')
-                            is_compulsory = True
-                        except NoSuchElementException:
-                            is_compulsory = False
-                        prefix = "[必修]" if is_compulsory else "[选修]"
-                        tabs.append({'l1_idx': len(tabs), 'l2_idx': -1, 'l1_title': name, 'l2_title': '', 'display': f"{prefix} Unit{unit_idx+1} - {name}", 'is_l2': False, 'is_compulsory': is_compulsory, '_element': name_elem, '_unit_idx': unit_idx})
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.debug(f"课程目录扫描未命中: {e}")
-        return tabs
-
-    def _build_tab_list_ui(self):
-        """构建任务勾选列表 - 按 Unit 分组，可折叠"""
-        self.progress_bar.grid_remove()
-        if not self._all_tabs:
-            gui_log_queue.put("未扫描到任何Tab")
-            self._reset_scan_button()
-            return
-        for w in self._tab_list_frame.winfo_children():
-            w.destroy()
-        self._tab_check_vars = []
-        self._tab_checkboxes = []
-        self._task_groups = {}
-
-        compulsory_count = sum(1 for t in self._all_tabs if t.get('is_compulsory', False))
-        gui_log_queue.put(f"必修: {compulsory_count}, 选修: {len(self._all_tabs) - compulsory_count}")
-
-        groups = {}
-        for i, tab in enumerate(self._all_tabs):
-            unit_key = tab.get('display', '').split('Unit')[1].split(' - ')[0].strip() if 'Unit' in tab.get('display', '') else '其他'
-            groups.setdefault(unit_key, []).append(i)
-
-        row = 0
-        for unit_name, indices in groups.items():
-            unit_tabs = [self._all_tabs[i] for i in indices]
-            comp = sum(1 for t in unit_tabs if t.get('is_compulsory', False))
-            header_text = f"Unit {unit_name} ({len(indices)}个任务, {comp}必修)"
-            header_btn = ctk.CTkButton(self._tab_list_frame, text=header_text, font=ctk.CTkFont(size=12, weight="bold"), fg_color="#21262d", text_color="#e6edf3", hover_color="#30363d", corner_radius=4, height=28, anchor="w")
-            header_btn.grid(row=row, column=0, padx=0, pady=(4,2), sticky="ew")
-            row += 1
-
-            for idx in indices:
-                tab = self._all_tabs[idx]
-                var = ctk.BooleanVar(value=tab.get('is_compulsory', False))
-                self._tab_check_vars.append(var)
-                txt = tab['display']
-                tc = "#e6edf3" if tab.get('is_compulsory', False) else "#8b949e"
-                cb = ctk.CTkCheckBox(self._tab_list_frame, text=txt, variable=var, font=ctk.CTkFont(size=12), text_color=tc, fg_color="#58a6ff", hover_color="#1f6feb", checkbox_width=18, checkbox_height=18, corner_radius=4)
-                cb.grid(row=row, column=0, padx=8, pady=1, sticky="w")
-                self._tab_checkboxes.append(cb)
-                row += 1
-
-            row += 1  # gap between groups
-
-        self._tab_list_built = True
-        self.btn_auto.grid()
-        self.btn_auto.configure(state="normal", text=f"开始处理选中任务 ({len(self._all_tabs)}项)")
-        self.btn_scan.configure(state="normal", text="重新扫描", fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d")
-        self.status_label.configure(text=f"已扫描 {len(self._all_tabs)} 个任务，勾选后点击[开始处理]")
-        self._tab_list_built = True
-        self.btn_auto.grid()
-        self.btn_auto.configure(state="normal", text=f"▶ 开始处理选中任务 ({len(self._all_tabs)}项)")
-        self.btn_scan.configure(state="normal", text=" 重新扫描", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.status_label.configure(text=f" 已扫描 {len(self._all_tabs)} 个任务，请勾选后点击[开始处理选中任务]", text_color=("#1f8a65", "#2fba8a"))
-        gui_log_queue.put(f"\n扫描完成，共 {len(self._all_tabs)} 个任务可供选择")
-
-    def _on_select_all(self):
-        for var in self._tab_check_vars:
-            var.set(True)
-
-    def _on_select_compulsory(self):
-        for i, var in enumerate(self._tab_check_vars):
-            if i < len(self._all_tabs):
-                var.set(self._all_tabs[i].get('is_compulsory', False))
-
-    def _on_deselect_all(self):
-        for var in self._tab_check_vars:
-            var.set(False)
-
-    def _on_select_visible(self):
-        """全选当前搜索可见的任务"""
-        query = self.task_search.get().lower()
-        for i, cb in enumerate(self._tab_checkboxes):
-            if i < len(self._all_tabs):
-                if query == "" or query in self._all_tabs[i]['display'].lower():
-                    self._tab_check_vars[i].set(True)
-
-    def _on_search_key(self, event=None):
-        """搜索过滤任务列表"""
-        query = self.task_search.get().lower()
-        for i, cb in enumerate(self._tab_checkboxes):
-            if i < len(self._all_tabs):
-                visible = query == "" or query in self._all_tabs[i]['display'].lower()
-                if visible:
-                    cb.grid()
-                else:
-                    cb.grid_remove()
-        if query:
-            self.btn_select_visible.grid()
-        else:
-            self.btn_select_visible.grid_remove()
-
-    def _on_toggle_log(self):
-        """折叠/展开日志区域"""
-        self.log_visible = not self.log_visible
-        if self.log_visible:
-            self.log_card.grid()
-            self.log_toggle_btn.configure(text="折叠日志")
-            self.main_frame.grid_rowconfigure(4, weight=1)
-        else:
-            self.log_card.grid_remove()
-            self.log_toggle_btn.configure(text="展开日志")
-            self.main_frame.grid_rowconfigure(4, weight=0)
-
-    def _on_auto_clicked(self):
-        if self._auto_running or self.btn_auto.cget("state") == "disabled":
-            return
-        selected = []
-        for i, tab in enumerate(self._all_tabs):
-            if self._tab_check_vars[i].get():
-                selected.append(tab)
-        if not selected:
-            gui_log_queue.put("没有勾选任何任务，请先勾选")
-            return
-        gui_log_queue.put(f"\n{'='*60}")
-        gui_log_queue.put(f"用户选择了 {len(selected)} 个任务，开始全自动处理...")
-        gui_log_queue.put(f"{'='*60}")
-        self._auto_running = True
-        self.btn_auto.configure(state="disabled", text="⏳ 自动处理中...")
-        self.btn_scan.configure(state="disabled")
-        self.btn_quick.configure(state="disabled")
-        self.status_label.configure(text="处理中，请勿操作浏览器", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._run_auto_task, args=(selected,), daemon=True).start()
-
-    def _run_auto_task(self, selected):
-        try:
-            self.solver.process_selected_tabs(selected)
-            gui_log_queue.put("\n全部选中任务处理完成！")
-            winsound.MessageBeep()
-        except Exception as e:
-            gui_log_queue.put(f"\n自动处理异常: {str(e)}")
-            logger.error(f"自动处理异常: {e}", exc_info=True)
-        finally:
-            self._auto_running = False
-            self.root.after(0, self._reset_auto_button)
-
-    def _reset_auto_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_auto.configure(state="normal", text="▶ 开始处理选中任务")
-        self.btn_scan.configure(state="normal", text=" 重新扫描", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.btn_quick.configure(state="normal", text="快速处理当前页", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.status_label.configure(text="任务完成", text_color=("#1f8a65", "#2fba8a"))
-        try: winsound.MessageBeep()
-        except: pass
-
-    def _on_quick_clicked(self):
-        if self._quick_running or self.btn_quick.cget("state") == "disabled":
-            return
-        gui_log_queue.put(f"\n开始处理当前停留的页面...")
-        self._quick_running = True
-        self.btn_quick.configure(state="disabled", text="⏳ 处理中...")
-        self.btn_scan.configure(state="disabled")
-        if self.btn_auto.winfo_ismapped():
-            self.btn_auto.configure(state="disabled")
-        self.status_label.configure(text="处理当前页...", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._run_quick_task, daemon=True).start()
-
-    def _run_quick_task(self):
-        self.solver.processed_hashes.clear()
-        try:
-            success = self.solver.solve_current_page()
-            if success:
-                gui_log_queue.put("\n当前页面处理完成！")
-            else:
-                gui_log_queue.put("\n当前页面没有需要处理的题目")
-        except Exception as e:
-            gui_log_queue.put(f"\n处理异常: {str(e)}")
-            logger.error(f"快速处理异常: {e}", exc_info=True)
-        finally:
-            self._quick_running = False
-            self.root.after(0, self._reset_quick_button)
-
-    def _reset_quick_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_quick.configure(state="normal", text="快速处理当前页", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.btn_scan.configure(state="normal", text="扫描任务列表", fg_color=("#f54e00", "#f54e00"), text_color=("#ffffff", "#ffffff"), hover_color=("#d94400", "#d94400"))
-        if self.btn_auto.winfo_ismapped():
-            self.btn_auto.configure(state="normal")
-        self.status_label.configure(text="就绪", text_color=("#1f8a65", "#2fba8a"))
-        try: winsound.MessageBeep()
-        except: pass
-
-    def _reset_scan_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_scan.configure(state="normal", text="重新扫描", fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d")
-        self.status_label.configure(text="扫描失败，请确认已进入课程页面后重试")
-
-    def _on_debug_toggle(self):
-        global DEBUG_MODE
-        DEBUG_MODE = self.debug_var.get()
-        gui_log_queue.put(f"调试模式: {'开启' if DEBUG_MODE else '关闭'}")
-
-    def _poll_logs(self):
-        """跨线程日志渲染, 超出800行自动裁剪旧内容"""
-        max_lines = 800
-        while not gui_log_queue.empty():
-            msg = gui_log_queue.get()
-            self.log_area.configure(state="normal")
-            self.log_area.insert("end", msg + "\n")
-            line_count = int(self.log_area.index("end-1c").split(".")[0])
-            if line_count > max_lines:
-                self.log_area.delete("1.0", "200.0")
-            self.log_area.see("end")
-            self.log_area.configure(state="disabled")
-        self.root.after(100, self._poll_logs)
-
-    def on_quit_clicked(self):
-        """安全释放资源"""
-        gui_log_queue.put(" 正在关闭浏览器并释放资源...")
-        self.root.destroy()
-        try:
-            self.driver.quit()
-        except:
-            pass
-        sys.exit(0)
 
 
 class UCampusBot:
@@ -4331,7 +4109,7 @@ class UCampusBot:
             service = Service(EdgeChromiumDriverManager().install())
             return webdriver.Edge(service=service, options=options)
         except Exception as e:
-            errors.append(f"自动管理: {str(e)[:40]}")
+            errors.append(f"自动管理: {e}")
 
         manager = DriverManager()
         user_driver = manager.get_driver_path()
@@ -4341,7 +4119,7 @@ class UCampusBot:
                 service = Service(user_driver)
                 return webdriver.Edge(service=service, options=options)
             except Exception as e:
-                errors.append(f"用户驱动: {str(e)[:40]}")
+                errors.append(f"用户驱动: {e}")
 
         bundled = get_resource_path('msedgedriver.exe')
         if os.path.exists(bundled):
@@ -4350,12 +4128,12 @@ class UCampusBot:
                 service = Service(bundled)
                 return webdriver.Edge(service=service, options=options)
             except Exception as e:
-                errors.append(f"自带驱动: {str(e)[:40]}")
+                errors.append(f"自带驱动: {e}")
 
         try:
             return webdriver.Edge(options=options)
         except Exception as e:
-            errors.append(f"系统PATH: {str(e)[:40]}")
+            errors.append(f"系统PATH: {e}")
 
         print("\n 浏览器启动失败:")
         for err in errors:
@@ -4365,7 +4143,7 @@ class UCampusBot:
     def start(self):
         solver = AISolver(self.driver, self.config)
 
-        self.gui = ModernGUI(self.driver, solver, self)
+        self.gui = FluentModernGUI(self.driver, solver, self, globals())
 
         threading.Thread(target=self.popup_watcher.run, daemon=True).start()
         threading.Thread(target=self._background_login_flow, daemon=True).start()
@@ -4430,7 +4208,7 @@ class UCampusBot:
 
         except Exception as e:
             error_msg = str(e)
-            gui_log_queue.put(f" 登录执行流阻断: {error_msg[:50]}")
+            gui_log_queue.put(f" 登录执行流阻断: {error_msg}")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return False
 
@@ -4455,7 +4233,7 @@ class PopupWatcher:
                 time.sleep(0.5)
             except Exception as e:
                 error_msg = str(e)
-                print(f"操作失败: {error_msg[:50]}")
+                print(f"操作失败: {error_msg}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
 
     def _click_known_buttons(self):
@@ -4502,7 +4280,7 @@ if __name__ == '__main__':
     if not skip_check:
         print("\n 提示：")
         print("   - 首次运行需要检查环境")
-        print("   - 语音识别需要 FFmpeg（约130MB，可自动安装）")
+        print("   - 语音识别需要 FFmpeg")
         print("   - 如检查通过但无法启动，使用 --skip-check 跳过")
 
     logger, LOG_FILE = setup_logging()
@@ -4512,6 +4290,6 @@ if __name__ == '__main__':
         bot.start()
     except Exception as e:
         error_msg = str(e)
-        print(f"\n 程序运行失败: {error_msg[:100]}")
+        print(f"\n 程序运行失败: {error_msg}")
         logger.error(f"程序异常: {error_msg}", exc_info=True)
         input("\n按任意键退出...")

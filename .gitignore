@@ -2,4 +2,9 @@ logs/
 __pycache__/
 *.pyc
 .idea/
+.venv/
 net10.0-windows/
+build/
+dist/
+release/
+config.json

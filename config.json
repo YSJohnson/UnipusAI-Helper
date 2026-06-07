@@ -8,6 +8,5 @@
   "max_tokens": 8192,
   "temperature": 0.3,
   "token_full": "",
-  "whisper_api": null,
   "debug_mode": false
 }
