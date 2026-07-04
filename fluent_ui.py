@@ -56,6 +56,7 @@ class FluentModernGUI(MSFluentWindow):
         self.solver = solver
         self.bot = bot
         self._globals = app_globals
+        self.app_version = app_globals.get("APP_VERSION", "")
         self._closing = False
         self.root = self
 
@@ -120,6 +121,10 @@ class FluentModernGUI(MSFluentWindow):
         top_layout.setContentsMargins(14, 8, 14, 8)
         top_layout.setSpacing(12)
         top_layout.addWidget(self._label("UnipusAI Helper", 24, "#f5f7fb", 800))
+        if self.app_version:
+            version_label = self._label(f"v{self.app_version}", 13, "#c9d2dd", 700)
+            version_label.setStyleSheet(version_label.styleSheet() + " padding: 7px 10px; border-radius: 6px; background: rgba(48, 217, 239, 0.12);")
+            top_layout.addWidget(version_label)
         self.author_label = self._label("by YSJohnson", 13, "#c9d2dd", 600)
         self.author_label.setStyleSheet(self.author_label.styleSheet() + " padding: 7px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.06);")
         top_layout.addWidget(self.author_label)
