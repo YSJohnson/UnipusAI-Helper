@@ -436,8 +436,8 @@ class WebDriverHelper:
         return False
 
 
-class KimiClient:
-    """Kimi API客户端 - 职责：仅处理API通信"""
+class OpenAICompatibleClient:
+    """OpenAI兼容 API客户端 - 职责：仅处理API通信"""
 
     SYSTEM_PROMPT = """你是一个专业的英语教学助手，擅长分析英语题目。
 请根据题目要求给出准确答案，注意区分不同题型：
@@ -1911,14 +1911,14 @@ class DropdownSelectStrategy(QuestionParserStrategy):
 class PromptBuilder:
     """Prompt构建器"""
 
-    def __init__(self, kimi_client=None):
-        self.kimi = kimi_client
+    def __init__(self, ai_client=None):
+        self.ai_client = ai_client
 
     def build(self, questions: List[Question], global_directions: str = "") -> str:
         lines = []
 
-        if len(self.kimi.accumulated_passages) > 1:
-            lines.append(f"【注意】本章节共有 {len(self.kimi.accumulated_passages)} 份材料/音频转写，请根据问题判断使用哪份。")
+        if len(self.ai_client.accumulated_passages) > 1:
+            lines.append(f"【注意】本章节共有 {len(self.ai_client.accumulated_passages)} 份材料/音频转写，请根据问题判断使用哪份。")
             lines.append("")
 
         effective_directions = global_directions
@@ -3869,9 +3869,9 @@ class AISolver:
     def __init__(self, driver, config: Config):
         self.driver = driver
         self.config = config
-        self.kimi = KimiClient(self.config)
+        self.ai_client = OpenAICompatibleClient(self.config)
         self.parser = QuestionParser(driver)
-        self.prompt_builder = PromptBuilder(self.kimi)
+        self.prompt_builder = PromptBuilder(self.ai_client)
         self.executor = AnswerExecutor(driver)
         self.content_handlers: List[ContentHandler] = [
             VideoHandler(driver, self.config),
@@ -3898,7 +3898,7 @@ class AISolver:
         print(f" 开始处理章节: {chapter_name}")
         print(f"{'=' * 60}")
 
-        self.kimi.start_new_chapter(chapter_name)
+        self.ai_client.start_new_chapter(chapter_name)
 
         level1_tabs = self._get_level1_tabs()
 
@@ -3908,7 +3908,7 @@ class AISolver:
                 break
             print(f" 一级Tab [{l1_idx}]: {l1_tab['title']}")
             if l1_idx > 0:
-                self.kimi.force_reset(f"{chapter_name}_{l1_tab['title']}")
+                self.ai_client.force_reset(f"{chapter_name}_{l1_tab['title']}")
                 print(f"    切换一级Tab，已清空AI对话历史")
             if not WebDriverHelper.safe_click(self.driver, l1_tab['element']):
                 continue
@@ -3953,7 +3953,7 @@ class AISolver:
         print(f"开始处理 {len(selected_tabs)} 个选中任务")
         print(f"{'=' * 60}")
 
-        self.kimi.start_new_chapter(chapter_name)
+        self.ai_client.start_new_chapter(chapter_name)
         self.processed_hashes.clear()
 
         course_home_url = self.driver.current_url
@@ -3971,7 +3971,7 @@ class AISolver:
                 if task_idx > 0:
                     self.driver.get(course_home_url)
                     time.sleep(3)
-                    self.kimi.force_reset(f"{chapter_name}_{tab_name}")
+                    self.ai_client.force_reset(f"{chapter_name}_{tab_name}")
 
                 if '_unit_idx' in tab:
                     try:
@@ -4060,10 +4060,10 @@ class AISolver:
 
         current_passage = self._extract_passage()
         if current_passage:
-            self.kimi.add_passage_if_new(current_passage)
+            self.ai_client.add_passage_if_new(current_passage)
 
         return self._process_current_tab_content(
-            self.kimi.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
+            self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
         )
 
     def _process_current_tab_content(self, chapter_name: str, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
@@ -4129,7 +4129,7 @@ class AISolver:
             if normal_questions:
                 print(f"    共 {len(normal_questions)} 道题目需要回答")
                 prompt = self.prompt_builder.build(normal_questions, directions)
-                ai_response = self.kimi.ask(prompt)
+                ai_response = self.ai_client.ask(prompt)
 
                 if ai_response:
                     success_count = 0
@@ -4220,6 +4220,9 @@ class AISolver:
         print(" 开始处理当前停留的页面")
         print("=" * 60)
 
+        quick_tab_name = f"quick_current_page_{int(time.time())}"
+        self.ai_client.force_reset(f"{chapter_name}_{quick_tab_name}")
+
         state_key = self._generate_content_hash()
 
         if not state_key or state_key == "empty":
@@ -4234,7 +4237,7 @@ class AISolver:
 
         success = self._process_current_tab_content(
             chapter_name,
-            f"quick_current_page_{int(time.time())}",
+            quick_tab_name,
             0,
             0
         )
@@ -4389,7 +4392,7 @@ class AISolver:
         print(f"     共 {len(normal_questions)} 道题目需要回答")
 
         prompt = self.prompt_builder.build(normal_questions, directions)
-        ai_response = self.kimi.ask(prompt)
+        ai_response = self.ai_client.ask(prompt)
 
         if not ai_response:
             print("     AI未返回答案")
@@ -4575,7 +4578,7 @@ class AISolver:
                 transcript = transcriber.transcribe(audio_url, language="en")
 
             if transcript:
-                self.kimi.add_audio_transcript_if_new(transcript)
+                self.ai_client.add_audio_transcript_if_new(transcript)
                 print(f"   已将音频转录（{len(transcript)}字符）加入上下文")
             else:
                 print("   音频转录为空")
@@ -4655,7 +4658,7 @@ class AISolver:
 
             transcript = video_handler.video_transcript
             if transcript:
-                self.kimi.add_video_transcript_if_new(transcript)
+                self.ai_client.add_video_transcript_if_new(transcript)
                 print(f"   已将视频转录（{len(transcript)}字符）加入上下文")
             else:
                 print("   未获得视频转录，后续题目可能缺乏上下文")

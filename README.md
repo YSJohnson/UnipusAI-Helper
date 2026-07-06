@@ -8,7 +8,7 @@
   基于 Selenium、Fluent UI 与 OpenAI 兼容接口的 U 校园 AI 版刷课工具
 </p>
 
-<p align="center">
+<p align="center">  
   <img alt="GUI" src="https://img.shields.io/badge/gui-Fluent_UI-2FA572">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -178,6 +178,61 @@ localStorage.getItem('__token')
 
 ---
 
+## 题型适配投稿
+
+我本身能接触到的教材有限 能适配的教材题型也有限 所以不能保证所有题型都适配
+如果你遇到暂不支持的新题型 可以在 issue 中投稿页面结构 我会在有可复现材料时优先适配 也将会帮助项目变得更加完善。
+
+在提交 issue 时 请尽量按照以下格式并提供以下内容 这会有利于我的适配：
+1. 题型截图：直接截图整个页面即可。
+2. 关键元素 HTML：在浏览器按下 F12 打开开发人员工具 在控制台粘贴以下内容 会自动获取当前页面的题型内容：
+
+```javascript
+(() => {
+  const selectors = [
+    '.layout-direction-container',
+    '.abs-direction',
+    '.layout-material-container',
+    '.audio-material-wrapper',
+    '.question-audio',
+    'audio',
+    '.layoutBody-container',
+    '.question-common-abs-reply',
+    '.question-common-abs-choice',
+    '.question-wrap',
+    '.question-basic'
+  ];
+
+  const data = {
+    url: location.href,
+    title: document.title,
+    items: selectors.map(sel => ({
+      selector: sel,
+      count: document.querySelectorAll(sel).length,
+      nodes: [...document.querySelectorAll(sel)].map((el, i) => ({
+        index: i,
+        text: (el.innerText || '').slice(0, 2000),
+        html: el.outerHTML
+      }))
+    }))
+  };
+
+  copy(JSON.stringify(data, null, 2));
+  console.log('已复制页面结构，可以直接粘贴给我');
+})();
+```
+3. 将获取到的页面结构保存到 txt 文本文档中 并和图片一起作为 issue 附件上传
+
+请注意隐私：
+
+- 不要公开账号、密码、token、Cookie、API Key、学校个人信息。
+- 如果截图里有姓名、学号等隐私信息，请注意打码。
+- 音频、视频资源链接如果包含个人鉴权参数，也请先脱敏。
+
+材料越完整，越容易适配；只有一句“这个题型不支持”的 issue 无法判断页面结构 将被作为无效 issue 关闭。
+
+---
+
 ## 更新日志
 
 ### 2026-07-05
@@ -218,9 +273,7 @@ localStorage.getItem('__token')
 - `base_url`
 - `model`
 
-### 讨论题为什么没做
 
-- 当前逻辑是 **识别讨论板页面后自动跳过**，不是自动生成并提交讨论内容。
 
 其他问题欢迎在 Issue 提出。
 

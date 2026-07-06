@@ -1,0 +1,12 @@
+{
+  "username": "",
+  "password": "",
+  "url": "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome",
+  "api_key": "",
+  "base_url": "",
+  "model": "",
+  "max_tokens": 8192,
+  "temperature": 0.3,
+  "token_full": "",
+  "debug_mode": false
+}
