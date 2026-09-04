@@ -12,10 +12,12 @@ class AudioTranscriber:
     使用本地 Whisper 进行语音识别
     """
 
-    def __init__(self):
+    def __init__(self, use_local: bool = True):
         self.local_model = None
         self._transcript_cache: Dict[str, str] = {}
-        self._init_local_model()
+        self.use_local = use_local
+        if use_local:
+            self._init_local_model()
 
     @staticmethod
     def _print_exception(prefix: str, exc: Exception) -> None:
