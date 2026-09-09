@@ -1,6 +1,6 @@
-from AudioRecognizer import *
-from EnvironmentChecker import *
-import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, warnings, winsound
+from AudioRecognizer import AudioTranscriber
+from EnvironmentChecker import EnvironmentChecker
+import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, winsound
 import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -16,7 +16,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-import webbrowser as wb
 from fluent_ui import FluentModernGUI
 
 if getattr(sys, 'frozen', False):
@@ -29,16 +28,6 @@ gui_log_queue = queue.Queue()
 DEBUG_MODE = False
 
 APP_VERSION = "3.5.0"
-
-
-def deprecated(func):
-    def wrapper(*args, **kwargs):
-        warnings.warn(f"Function {func.__name__} is deprecated and will be removed in future versions.",
-                      DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-
-    return wrapper
-
 
 def setup_logging():
     """配置日志系统：控制台简洁输出 + 文件详细记录 + UI队列同步"""
@@ -106,9 +95,8 @@ def setup_logging():
         def flush(self):
             pass
 
-    sys._original_stdout = sys.stdout
     sys.stdout = PrintRedirector(logger)
-    return logger, log_file
+    return logger
 
 
 @dataclass(frozen=True)
@@ -119,14 +107,10 @@ class Config:
     password: str
     api_key: str
     token_full: str
-    target_course: str
-    learning_strategy: str
     base_url: str
     model: str
     temperature: float
     max_tokens: int
-    timeout: int
-    debug_mode: bool
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -140,14 +124,10 @@ class Config:
             password=data.get("password"),
             token_full=data.get("token_full"),
             api_key=data.get("api_key"),
-            target_course=data.get("target_course", "新视野大学英语（第四版）读写教程1"),
-            learning_strategy=data.get("learning_strategy", "learn_all_compulsory_course"),
             base_url=data.get("base_url", "https://api.moonshot.cn/v1"),
             model=data.get("model", "kimi-k2-turbo-preview"),
             temperature=data.get("temperature", 0.3),
             max_tokens=data.get("max_tokens", 2000),
-            timeout=data.get("timeout", 10),
-            debug_mode=DEBUG_MODE
         )
 
 
@@ -158,12 +138,10 @@ class QuestionType(Enum):
     FILL_IN = auto()
     TEXT = auto()
     SORTING = auto()
-    DROPDOWN = auto()
     VOCABULARY_FLASHCARD = auto()
     BANKED_CLOZE = auto()
     VOCABULARY_TEST = auto()  # 词汇测试（英汉互译）
     VIDEO = auto()  # 纯视频页面
-    VIDEO_POPUP = auto()  # 视频带有弹窗问题
     DISCUSSION_BOARD = auto()
     SELF_CHECK = auto()
     MY_VOICE_TEXT = auto()
@@ -171,7 +149,6 @@ class QuestionType(Enum):
     LISTENING_FILL_IN = auto()
     LISTENING_CHOICE = auto()
     VIDEO_CHOICE = auto()
-    UNKNOWN = auto()
 
 
 @dataclass
@@ -213,41 +190,8 @@ class Question:
         phrase_count = sum(1 for opt in self.banked_options if ' ' in opt.strip() or len(opt) > 15)
         return phrase_count / len(self.banked_options) > 0.3
 
-
-@dataclass
-class AnswerResult:
-    """答题结果"""
-    success: bool
-    question_number: int
-    answer: str
-    message: str = ""
-
-
 class Selectors:
     """CSS选择器仓库"""
-    FILL_BLANK_INPUTS = [
-        '.fe-scoop input:not([type="hidden"])',  # 严格限定input
-        '.comp-abs-input input',
-        'input.fill-blank--bc-input-DelG1',
-    ]
-    TEXTAREA_INPUTS = [
-        'textarea.question-textarea-content',
-        'textarea.writing--textarea-36VPs',
-    ]
-    MATERIAL_CONTAINER = '.layout-material-container'
-    QUESTION_CONTAINERS = [
-        '.question-common-abs-reply',
-        '.question-common-abs-banked-cloze',
-        '.question-wrap',
-        '.question-basic',
-        '.layoutBody-container.has-reply',
-        '.question-material-banked-cloze.question-abs-question',
-        '.itest-section',
-        '.oral-study-sentence',
-        '.question-common-abs-choice',
-        '.question-vocabulary',
-        '.vocContainer',
-    ]
     CHOICE_OPTIONS = [
         '.option.isNotReview',
         'div.option',
@@ -257,25 +201,6 @@ class Selectors:
     ]
     OPTION_CAPTION = ['.caption', 'span[class*="index"]', '.MultipleChoice--checkbox-opt-2F4xY']
     OPTION_CONTENT = ['.component-htmlview.content', 'div.html-view[class*="content"]', '.html-view', '.content', 'p']
-    FILL_INPUTS = [
-        'input.fill-blank--bc-input-DelG1',
-        '.fe-scoop input:not([type="hidden"])',
-        '.comp-abs-input input',
-        'textarea.question-inputbox-input',
-        '.question-inputbox-input',
-        'textarea.question-textarea-content',
-        'textarea.writing--textarea-36VPs',
-        'textarea.scoopFill_textarea',
-        '.blankinput',
-        'input[type="text"]',
-    ]
-    TEXTAREAS = [
-        'textarea.writing--textarea-36VPs',
-        'textarea.scoopFill_textarea',
-        'textarea.question-inputbox-input',
-        '.question-inputbox-input-container textarea',
-        'textarea.question-textarea-content',
-    ]
     QUESTION_TITLE = [
         '.ques-title',
         '.component-htmlview.ques-title',
@@ -294,14 +219,6 @@ class Selectors:
         'button.submit-btn',
         '.btn',
     ]
-    VIDEO = ['video.vjs-tech', 'video']
-    VOCABULARY_ACTIONS = ['.vocActions', '.vocabulary-actions']
-    BANKED_OPTIONS = [
-        '.question-material-banked-cloze-reply .option-wrapper .option',
-        '.banked-options .option',
-        '[data-rbd-draggable-id^="options-"]'
-    ]
-    BANKED_BLANKS = ['.fe-scoop', '.scoop-wrapper', '.comp-abs-input']
     LEVEL1_TABS = [
         '.pc-header-tabs-container .pc-tab-row > .tab',
         '.pc-header-tabs-container .ant-col.tab',
@@ -311,33 +228,16 @@ class Selectors:
         '.pc-header-tasks-row > .pc-task',
         ':scope > div > div > .pc-header-tasks-row > .pc-task',
     ]
-    SIDEBAR = [
-        '.pc-slider-content-menu',
-        '.pc-slier-menu-container',
-        '.pc-slider-menu',
-        '#sidemenu',
-        '.menu--u3menu-3Xu4h',
-        '[class*="slider-menu"]',
-        '[class*="side-menu"]'
-    ]
-    SIDEBAR_NODES = [
-        'div[data-role="node"]',
-        'div[data-role="micro"]',
-        'li.group.courseware',
-        '.pc-menu-node',
-        '[class*="menu-node"]',
-        '.group.courseware'
-    ]
 
 
 class WebDriverHelper:
     """WebDriver辅助工具类（静态方法）"""
 
     @staticmethod
-    def safe_find_element(driver, selectors: List[str], parent=None, timeout: int = 5) -> Optional[Any]:
+    def safe_find_element(driver, selectors: List[str], parent=None) -> Optional[Any]:
         """安全查找单个元素"""
         search_context = parent if parent else driver
-        wait = WebDriverWait(search_context, timeout)
+        wait = WebDriverWait(search_context, 5)
         for selector in selectors:
             try:
                 element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
@@ -348,14 +248,15 @@ class WebDriverHelper:
         return None
 
     @staticmethod
-    def safe_find_elements(driver, selectors: List[str], parent=None, visible_only: bool = True) -> List[Any]:
+    def safe_find_elements(driver, selectors: List[str], parent=None) -> List[Any]:
         """安全查找多个元素"""
         search_context = parent if parent else driver
         for selector in selectors:
             try:
-                elements = search_context.find_elements(By.CSS_SELECTOR, selector)
-                if visible_only:
-                    elements = [e for e in elements if e.is_displayed()]
+                elements = [
+                    e for e in search_context.find_elements(By.CSS_SELECTOR, selector)
+                    if e.is_displayed()
+                ]
                 if elements:
                     return elements
             except Exception as e:
@@ -364,22 +265,6 @@ class WebDriverHelper:
                 logger.error(f"详细错误: {error_msg}", exc_info=True)  # 详细堆栈保存到文件
                 continue
         return []
-
-    @staticmethod
-    def is_in_viewport(driver, element) -> bool:
-        """检查元素是否在视口内"""
-        try:
-            return driver.execute_script("""
-                var rect = arguments[0].getBoundingClientRect();
-                var html = document.documentElement;
-                return (
-                    rect.top >= 0 && rect.left >= 0 &&
-                    rect.bottom <= (window.innerHeight || html.clientHeight) &&
-                    rect.right <= (window.innerWidth || html.clientWidth)
-                );
-            """, element)
-        except:
-            return True
 
     @staticmethod
     def human_like_delay(base_delay: float = 0.1) -> None:
@@ -1224,9 +1109,6 @@ class BankedClozeStrategy(QuestionParserStrategy):
 
 
 class StandardChoiceStrategy(QuestionParserStrategy):
-    def __init__(self):
-        self._material_cache: Optional[str] = None
-
     def _is_listening_choice_page(self, driver, directions: str = "") -> bool:
         direction_text = (directions or "").lower()
         if not direction_text:
@@ -1268,8 +1150,6 @@ class StandardChoiceStrategy(QuestionParserStrategy):
         return len(options) >= 2
 
     def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
-        if question_number == 1:
-            self._material_cache = None
         if 'question-common-abs-choice' in (container.get_attribute('class') or ''):
             choice_container = container
         else:
@@ -1911,7 +1791,7 @@ class DropdownSelectStrategy(QuestionParserStrategy):
 class PromptBuilder:
     """Prompt构建器"""
 
-    def __init__(self, ai_client=None):
+    def __init__(self, ai_client):
         self.ai_client = ai_client
 
     def build(self, questions: List[Question], global_directions: str = "") -> str:
@@ -2204,7 +2084,7 @@ class AnswerExecutor:
     def __init__(self, driver):
         self.driver = driver
 
-    def execute(self, question: Question, answer: str) -> AnswerResult:
+    def execute(self, question: Question, answer: str) -> bool:
         executors = {
             QuestionType.SINGLE_CHOICE: self._fill_single_choice,
             QuestionType.LISTENING_CHOICE: self._fill_single_choice,
@@ -2223,10 +2103,10 @@ class AnswerExecutor:
         executor = executors.get(question.q_type, self._fill_unknown)
         return executor(question, answer)
 
-    def _fill_single_choice(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_single_choice(self, q: Question, answer: str) -> bool:
         answer_letter = self._extract_letter(answer)
         if not answer_letter:
-            return AnswerResult(False, q.number, answer, "无法解析答案")
+            return False
 
         print(f"\t寻找选项: {answer_letter}")
         print(f"\t可用选项: {[opt.letter for opt in q.options]}")
@@ -2234,26 +2114,20 @@ class AnswerExecutor:
         for opt in q.options:
             if opt.letter.upper() == answer_letter.upper():
                 print(f"\t点击选项 {opt.letter}: {opt.text[:30]}...")
-                success = WebDriverHelper.safe_click(self.driver, opt.element)
-                if success:
-                    return AnswerResult(True, q.number, answer_letter, f"选择成功: {opt.text[:30]}")
-                else:
-                    return AnswerResult(False, q.number, answer, "点击失败")
+                return WebDriverHelper.safe_click(self.driver, opt.element)
 
         try:
             idx = ord(answer_letter.upper()) - ord('A')
             if 0 <= idx < len(q.options):
                 opt = q.options[idx]
                 print(f"\t通过索引匹配选项 {opt.letter}: {opt.text[:30]}...")
-                success = WebDriverHelper.safe_click(self.driver, opt.element)
-                if success:
-                    return AnswerResult(True, q.number, answer_letter, f"选择成功: {opt.text[:30]}")
+                return WebDriverHelper.safe_click(self.driver, opt.element)
         except:
             pass
 
-        return AnswerResult(False, q.number, answer, f"未找到选项 {answer_letter}")
+        return False
 
-    def _fill_multiple_choice(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_multiple_choice(self, q: Question, answer: str) -> bool:
         letters = re.findall(r'[A-D]', answer.upper())
         selected = []
 
@@ -2264,24 +2138,21 @@ class AnswerExecutor:
                         selected.append(letter)
                     break
 
-        return AnswerResult(
-            bool(selected), q.number, ','.join(selected),
-            f"选中 {len(selected)}/{len(letters)} 个选项"
-        )
+        return bool(selected)
 
-    def _fill_sorting(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_sorting(self, q: Question, answer: str) -> bool:
         order = self._parse_sorting_order(answer, [opt.letter for opt in q.options])
         if not order:
-            return AnswerResult(False, q.number, answer, "无法解析排序答案")
+            return False
 
         print(f"\t排序答案: {' '.join(order)}")
         if self._apply_sorting_by_drag(q, order):
-            return AnswerResult(True, q.number, ' '.join(order), "拖拽排序成功")
+            return True
 
         if self._apply_sorting_by_js(q, order):
-            return AnswerResult(True, q.number, ' '.join(order), "JS兜底排序成功")
+            return True
 
-        return AnswerResult(False, q.number, answer, "排序失败")
+        return False
 
     def _parse_sorting_order(self, answer: str, valid_letters: List[str]) -> List[str]:
         valid = [letter.upper() for letter in valid_letters if letter]
@@ -2412,7 +2283,7 @@ class AnswerExecutor:
             print(f"\tJS排序失败: {str(e)[:60]}")
             return False
 
-    def _fill_banked_cloze(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_banked_cloze(self, q: Question, answer: str) -> bool:
         words = self._parse_banked_answer(answer, len(q.banked_blanks))
         is_phrase_mode = q.is_phrase_mode
 
@@ -2455,10 +2326,7 @@ class AnswerExecutor:
                     print(f"      填空 {i + 1} 失败:{error_msg[:50]} ")
                     logger.error(f"详细错误: {error_msg}", exc_info=True)
 
-        return AnswerResult(
-            success_count > 0, q.number, answer,
-            f"填写 {success_count}/{len(q.banked_blanks)} 个空"
-        )
+        return success_count > 0
 
     def _match_to_option(self, answer: str, options: List[str], is_phrase_mode: bool) -> Optional[str]:
         if not answer or not options:
@@ -2510,7 +2378,7 @@ class AnswerExecutor:
 
         return None
 
-    def _fill_fill_in(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_fill_in(self, q: Question, answer: str) -> bool:
         answers = self._parse_banked_answer(answer, len(q.inputs))
         print(f"\t解析答案: {answers}")
         print(f"\t输入框数量: {len(q.inputs)}")
@@ -2527,12 +2395,7 @@ class AnswerExecutor:
             else:
                 print(f"\t空{i + 1}: (空)")
 
-        return AnswerResult(
-            success_count > 0,
-            q.number,
-            answer,
-            f"填写 {success_count}/{len(q.inputs)} 个空"
-        )
+        return success_count > 0
 
     def _extract_answer_by_number(self, answer: str, question_number: int) -> str:
         answer = self._normalize_answer_labels(answer)
@@ -2580,9 +2443,9 @@ class AnswerExecutor:
     def _number_prefix_pattern(number: int) -> str:
         return rf'(?:(?:空\s*)?{number}\s*[.、:：\)\]]|Blank\s*{number}\s*[.、:：\)\]])'
 
-    def _fill_text(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_text(self, q: Question, answer: str) -> bool:
         if not q.inputs:
-            return AnswerResult(False, q.number, answer, "无输入框")
+            return False
 
         expected_count = len(q.inputs)
 
@@ -2613,12 +2476,7 @@ class AnswerExecutor:
                 else:
                     print(f"\t题{idx}: 写入后校验失败")
 
-            return AnswerResult(
-                success_count > 0,
-                q.number,
-                answer,
-                f"填写 {success_count}/{expected_count} 个文本框"
-            )
+            return success_count > 0
 
         if ans and q.q_type == QuestionType.MY_VOICE_TEXT:
             ans = self._limit_text_answer(ans, 500)
@@ -2633,13 +2491,13 @@ class AnswerExecutor:
             )
             time.sleep(0.2)
             if not self._fill_text_input_verified(inp, ans):
-                return AnswerResult(False, q.number, ans, f"题{q.number}写入后校验失败")
+                return False
             if q.q_type == QuestionType.MY_VOICE_TEXT:
                 if not self._upload_my_voice_answer_file(q, ans):
-                    return AnswerResult(False, q.number, ans, "文字已填写，但附件上传失败，平台可能无法提交")
-            return AnswerResult(True, q.number, ans, f"填写题{q.number}成功")
+                    return False
+            return True
 
-        return AnswerResult(False, q.number, answer, f"题{q.number}无答案")
+        return False
 
     def _fill_text_input_verified(self, inp, ans: str) -> bool:
         WebDriverHelper.simulate_typing(self.driver, inp, ans)
@@ -2791,8 +2649,8 @@ class AnswerExecutor:
             return clipped[:sentence_end + 1]
         return clipped
 
-    def _fill_unknown(self, q: Question, answer: str) -> AnswerResult:
-        return AnswerResult(False, q.number, answer, "未知题型，无法填写")
+    def _fill_unknown(self, q: Question, answer: str) -> bool:
+        return False
 
     @staticmethod
     def _button_text(element) -> str:
@@ -2895,7 +2753,7 @@ class AnswerExecutor:
 
         return result
 
-    def _fill_dropdown_select(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_dropdown_select(self, q: Question, answer: str) -> bool:
         answers = self._parse_banked_answer(answer, len(q.banked_blanks))
         print(f"      解析答案: {answers}")
         print(f"      填空数量: {len(q.banked_blanks)}")
@@ -3011,14 +2869,9 @@ class AnswerExecutor:
                 logger.error(f"详细错误: {str(e)}", exc_info=True)
                 continue
 
-        return AnswerResult(
-            success_count > 0,
-            q.number,
-            answer,
-            f"成功 {success_count}/{len(q.banked_blanks)} 个"
-        )
+        return success_count > 0
 
-    def _fill_listening_fill_in(self, q: Question, answer: str) -> AnswerResult:
+    def _fill_listening_fill_in(self, q: Question, answer: str) -> bool:
         answers = self._parse_banked_answer(answer, len(q.inputs))
 
         print(f"\t解析答案: {answers}")
@@ -3038,12 +2891,7 @@ class AnswerExecutor:
                 else:
                     print(f"\t空{i + 1}: 写入后校验失败")
 
-        return AnswerResult(
-            success_count > 0,
-            q.number,
-            answer,
-            f"填写 {success_count}/{len(q.inputs)} 个空"
-        )
+        return success_count > 0
 
     def _normalize_listening_blank_answer(self, blank_info: Dict[str, Any], answer: str) -> str:
         ans = self._clean_extracted_answer(answer)
@@ -3277,7 +3125,7 @@ class VideoHandler(ContentHandler):
         self.popup_monitor_thread = None
         self.stop_monitoring = threading.Event()
 
-        self.transcriber = AudioTranscriber(use_local=True)
+        self.transcriber = AudioTranscriber()
 
         self.analyzer_client = OpenAI(
             api_key=config.api_key,
@@ -3326,36 +3174,8 @@ class VideoHandler(ContentHandler):
             return True
 
         print("     视频页面，开始处理...")
-
-        video_info = self._get_video_info()
-        if not video_info:
-            print("       未找到视频元素")
-            return True
-
-        video_url = video_info.get('url', '')
-        duration = video_info.get('duration', 0)
-
-        if video_url and video_url == self.current_video_url and self.video_transcript:
-            print(f"     使用已缓存的视频转录（{len(self.video_transcript)}字符）")
-        else:
-            self.current_video_url = video_url
-            self.video_transcript = self._transcribe_video(video_url, duration)
-
-        self.stop_monitoring.clear()
-        self.popup_monitor_thread = threading.Thread(
-            target=self._monitor_popup_questions,
-            daemon=True
-        )
-        self.popup_monitor_thread.start()
-
-        self._play_video(duration)
-
+        self._play_video_and_handle_popups()
         print("     视频处理完成")
-        self.stop_monitoring.set()
-
-        if self.popup_monitor_thread.is_alive():
-            self.popup_monitor_thread.join(timeout=5)
-
         return True
 
     def _get_video_info(self) -> Optional[Dict]:
@@ -3387,17 +3207,7 @@ class VideoHandler(ContentHandler):
         print(f"     开始识别视频音频（时长: {int(duration)}秒）...")
 
         try:
-            if duration > 120:
-                transcript = self.transcriber.transcribe_long_audio(
-                    video_url,
-                    language="en",
-                    chunk_length=30
-                )
-            else:
-                transcript = self.transcriber.transcribe(
-                    video_url,
-                    language="en"
-                )
+            transcript = self.transcriber.transcribe(video_url, language="en")
 
             if transcript:
                 preview = transcript[:200] + "..." if len(transcript) > 200 else transcript
@@ -3670,7 +3480,6 @@ class VideoHandler(ContentHandler):
         options = question_data.get('options', [])
         if not options:
             return "C"
-        import random
         choice = random.choice(options)
         return choice['letter']
 
@@ -3873,8 +3682,9 @@ class AISolver:
         self.parser = QuestionParser(driver)
         self.prompt_builder = PromptBuilder(self.ai_client)
         self.executor = AnswerExecutor(driver)
+        self.video_handler = VideoHandler(driver, self.config)
         self.content_handlers: List[ContentHandler] = [
-            VideoHandler(driver, self.config),
+            self.video_handler,
             FlashcardHandler(driver),
             SelfCheckHandler(driver),
             DiscussionBoardHandler(driver),
@@ -3892,54 +3702,6 @@ class AISolver:
 
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
-
-    def solve_current_chapter(self, chapter_name: str) -> bool:
-        print(f"\n{'=' * 60}")
-        print(f" 开始处理章节: {chapter_name}")
-        print(f"{'=' * 60}")
-
-        self.ai_client.start_new_chapter(chapter_name)
-
-        level1_tabs = self._get_level1_tabs()
-
-        for l1_idx, l1_tab in enumerate(level1_tabs):
-            if self._should_stop():
-                print("  已请求停止，批量处理提前结束")
-                break
-            print(f" 一级Tab [{l1_idx}]: {l1_tab['title']}")
-            if l1_idx > 0:
-                self.ai_client.force_reset(f"{chapter_name}_{l1_tab['title']}")
-                print(f"    切换一级Tab，已清空AI对话历史")
-            if not WebDriverHelper.safe_click(self.driver, l1_tab['element']):
-                continue
-            time.sleep(1.5)
-
-            level2_tabs = self._get_level2_tabs()
-
-            if not level2_tabs:
-                self._process_tab_with_accumulation(f"{l1_tab['title']}", l1_idx, 0)
-            else:
-                for l2_idx, l2_tab in enumerate(level2_tabs):
-                    if self._should_stop():
-                        print("  已请求停止，批量处理提前结束")
-                        break
-                    print(f"\n   二级Tab [{l2_idx}]: {l2_tab['title']}")
-
-                    if not WebDriverHelper.safe_click(self.driver, l2_tab['element']):
-                        continue
-                    time.sleep(1.5)
-
-                    tab_name = f"{l1_tab['title']}_{l2_tab['title']}"
-                    self._process_tab_with_accumulation(tab_name, l1_idx, l2_idx)
-
-                    level2_tabs = self._get_level2_tabs()
-                    if l2_idx < len(level2_tabs):
-                        l2_tab['element'] = level2_tabs[l2_idx]['element']
-
-        print(f"\n{'=' * 60}")
-        print(f" 章节 {chapter_name} 处理完成")
-        print(f"{'=' * 60}")
-        return True
 
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = ""):
         """
@@ -4146,8 +3908,7 @@ class AISolver:
                             ans = ai_response
 
                         if ans:
-                            result = self.executor.execute(q, ans)
-                            if result.success:
+                            if self.executor.execute(q, ans):
                                 success_count += 1
                         else:
                             print(f"    题目 {q.number} 无答案")
@@ -4247,10 +4008,6 @@ class AISolver:
         print(f"{'=' * 60}")
         return success
 
-    def solve(self) -> bool:
-        """完整答题流程（扫描所有Tab）- 半自动模式下已弃用"""
-        pass
-
     def _find_next_question_button(self) -> Optional[Any]:
         selectors = [
             '.next-question-btn:not(.disabled)',
@@ -4260,7 +4017,7 @@ class AISolver:
             '.question-next:not(.disabled)',
             '.action.next:not(.disabled)',
             '.submit-bar-pc--btn-next:not(.disabled)',
-            '.next-btn:not(.disabled)',
+        '.next-btn:not(.disabled)',
             '[class*="next"]:not(.disabled)',
             '.question-common-course-page a.btn',
             '.question-common-course-page .btn',
@@ -4306,7 +4063,6 @@ class AISolver:
             if direction_elem:
                 text = direction_elem.text.strip()
                 if text:
-                    import hashlib
                     return hashlib.md5(text.encode()).hexdigest()[:16]
         except:
             pass
@@ -4336,103 +4092,6 @@ class AISolver:
             print(f"    生成哈希失败:{error_msg[:50]} ")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return "empty"
-
-    def _process_tab_content(self, l1_title: str, l2_title: str, tab_indices: Tuple[int, int]):
-        state_key = self._generate_content_hash()
-
-        if not state_key or state_key == "empty":
-            state_key = f"{l1_title}_{l2_title}_{tab_indices[0]}_{tab_indices[1]}"
-
-        print(f"    内容标识: {state_key[:50]}...")
-
-        if state_key in self.processed_hashes:
-            print(f"   ⏭ 已处理过，跳过")
-            return
-
-        self.processed_hashes.add(state_key)
-
-        chapter_name = f"{l1_title}_{l2_title}" if l2_title != "default" else l1_title
-        self._process_current_content(chapter_name)
-
-    def _process_current_content(self, chapter_name: str) -> bool:
-        print(f"    正在分析页面结构...")
-
-        if self._should_stop():
-            print("    已请求停止，当前页面处理提前结束")
-            return False
-
-        self._preprocess_video_if_needed(chapter_name, 0, 0)
-        self._preprocess_audio_if_needed(chapter_name, 0, 0)
-
-        questions, directions = self.parser.parse_all()
-        print(f"    找到 {len(questions)} 个题目")
-
-        normal_questions = []
-        self_check_handled = False
-        for q in questions:
-            handled = False
-            for handler in self.content_handlers:
-                if handler.can_handle(q):
-                    handler.handle(q)
-                    if q.q_type == QuestionType.SELF_CHECK:
-                        self_check_handled = True
-                    handled = True
-                    break
-            if not handled:
-                normal_questions.append(q)
-
-        if not normal_questions:
-            if self_check_handled and self.executor.submit():
-                self._wait_for_submit_complete()
-                self._handle_confirm_dialog()
-                return True
-            print("    ℹ 当前页面未检测到需要AI作答的常规题目")
-            return False
-
-        print(f"     共 {len(normal_questions)} 道题目需要回答")
-
-        prompt = self.prompt_builder.build(normal_questions, directions)
-        ai_response = self.ai_client.ask(prompt)
-
-        if not ai_response:
-            print("     AI未返回答案")
-            return False
-
-        success_count = 0
-
-        for q in normal_questions:
-            if self._should_stop():
-                print("    已请求停止，停止当前页面剩余题目处理")
-                break
-
-            if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
-                            QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
-                            QuestionType.VOCABULARY_TEST]:
-                ans = self._extract_single_answer(ai_response, q.number)
-            elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
-                              QuestionType.DROPDOWN_SELECT, QuestionType.LISTENING_FILL_IN]:
-                ans = ai_response
-            else:
-                ans = ai_response
-
-            if ans:
-                result = self.executor.execute(q, ans)
-                if result.success:
-                    success_count += 1
-            else:
-                print(f"    题目 {q.number} 无答案")
-
-        print(f"     成功填写 {success_count}/{len(normal_questions)} 题")
-
-        if self._should_stop():
-            print("     已请求停止，跳过当前页面提交")
-            return success_count > 0
-
-        if self.executor.submit():
-            self._wait_for_submit_complete()
-            self._handle_confirm_dialog()
-
-        return success_count > 0
 
     def _get_level1_tabs(self) -> List[Dict]:
         tabs = []
@@ -4502,40 +4161,6 @@ class AISolver:
 
         return ""
 
-    def _parse_ai_response(self, response: str, expected_count: int, q_type: QuestionType = None) -> List[str]:
-        answers = []
-        response = response.strip()
-
-        pattern1 = r'(\d+)\s*[.、\)\]]\s*([A-Za-z]+)(?=\s*\d+\s*[.、\)\]]|$)'
-        matches = re.findall(pattern1, response, re.DOTALL | re.IGNORECASE)
-
-        if matches and len(matches) >= expected_count:
-            match_dict = {}
-            for num, content in matches:
-                idx = int(num) - 1
-                clean = content.upper().strip()
-                match_dict[idx] = clean
-
-            for i in range(expected_count):
-                answers.append(match_dict.get(i, ''))
-            return answers
-
-        words = re.findall(r'\b(True|False|Not\s*given|Not\s*mentioned|[A-D])\b',
-                           response, re.IGNORECASE)
-
-        if len(words) >= expected_count:
-            return [w.upper() for w in words[:expected_count]]
-
-        lines = [line.strip() for line in response.split('\n') if line.strip()]
-        for line in lines[:expected_count]:
-            match = re.search(r'\b(True|False|Not\s*given|[A-D])\b', line, re.IGNORECASE)
-            answers.append(match.group(1).upper() if match else '')
-
-        while len(answers) < expected_count:
-            answers.append('')
-
-        return answers[:expected_count]
-
     def _handle_confirm_dialog(self):
         try:
             buttons = self.driver.find_elements(By.TAG_NAME, 'button')
@@ -4570,12 +4195,7 @@ class AISolver:
                 return
 
             print("   检测到音频，开始预处理（下载+转录）...")
-            transcriber = AudioTranscriber(use_local=True)
-            duration = self._get_audio_duration()
-            if duration > 120:
-                transcript = transcriber.transcribe_long_audio(audio_url, language="en")
-            else:
-                transcript = transcriber.transcribe(audio_url, language="en")
+            transcript = self.video_handler.transcriber.transcribe(audio_url, language="en")
 
             if transcript:
                 self.ai_client.add_audio_transcript_if_new(transcript)
@@ -4631,32 +4251,22 @@ class AISolver:
         except:
             return None
 
-    def _get_audio_duration(self) -> float:
-        """获取音频时长（秒）"""
-        try:
-            audio = self.driver.find_element(By.TAG_NAME, 'audio')
-            duration = self.driver.execute_script("return arguments[0].duration;", audio)
-            return float(duration) if duration else 0
-        except:
-            return 0
-
     def _preprocess_video_if_needed(self, tab_name: str, l1_idx: int, l2_idx: int):
         """检测并预处理视频：播放、转录、处理弹窗，将转录文本注入 AI 上下文"""
         if not self._has_video_on_page():
             return
 
         try:
-            video_handler = VideoHandler(self.driver, self.config)
-            video_info = video_handler._get_video_info()
+            video_info = self.video_handler._get_video_info()
             video_url = (video_info or {}).get('url', '')
             video_key = video_url.split('#')[0] if video_url else f"{tab_name}|{l1_idx}|{l2_idx}"
             if video_key in self._processed_video_tabs:
                 return
 
             print("   检测到视频，开始预处理（播放+转录）...")
-            video_handler._play_video_and_handle_popups()
+            self.video_handler._play_video_and_handle_popups()
 
-            transcript = video_handler.video_transcript
+            transcript = self.video_handler.video_transcript
             if transcript:
                 self.ai_client.add_video_transcript_if_new(transcript)
                 print(f"   已将视频转录（{len(transcript)}字符）加入上下文")
@@ -4750,450 +4360,12 @@ class AISolver:
         return False
 
 
-class ModernGUI:
-    """基于 CustomTkinter 的 Cursor 主题 Dashboard 仪表盘布局，支持深/浅色模式无缝切换"""
-
-    def __init__(self, driver, solver, bot):
-        self.driver = driver
-        self.solver = solver
-        self.bot = bot
-
-        ctk.set_appearance_mode("dark")
-
-        self.root = ctk.CTk()
-        self.root.title(f"UnipusAI Helper v{APP_VERSION}")
-        self.root.geometry("1150x760")
-        self.root.minsize(950, 620)
-
-        self.root.configure(fg_color="#0d1117")
-
-        self.root.grid_rowconfigure(1, weight=1)
-        self.root.grid_columnconfigure(0, weight=1)
-
-        self.top_bar = ctk.CTkFrame(self.root, height=60, corner_radius=0, fg_color="#161b22")
-        self.top_bar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
-        self.top_bar.grid_columnconfigure(4, weight=1)
-
-        ctk.CTkLabel(self.top_bar, text="UnipusAI Helper", font=ctk.CTkFont(family="Segoe UI", size=20, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=(20,6), pady=10, sticky="w")
-        ctk.CTkLabel(self.top_bar, text=f"v{APP_VERSION}", font=ctk.CTkFont(family="Consolas", size=12), text_color="#484f58").grid(row=0, column=1, padx=0, pady=10, sticky="w")
-
-        info_frame = ctk.CTkFrame(self.top_bar, fg_color="transparent")
-        info_frame.grid(row=0, column=2, padx=16, sticky="e")
-        ctk.CTkLabel(info_frame, text=f"账号：{self.bot.config.username[:12]}", font=ctk.CTkFont(size=13), text_color="#8b949e").pack(side="left", padx=4)
-        ctk.CTkLabel(info_frame, text=f"当前AI模型：{self.bot.config.model}", font=ctk.CTkFont(size=13), text_color="#58a6ff").pack(side="left", padx=4)
-
-        self.debug_var = ctk.BooleanVar(value=DEBUG_MODE)
-        self.debug_switch = ctk.CTkSwitch(self.top_bar, text="调试", command=self._on_debug_toggle, variable=self.debug_var, onvalue=True, offvalue=False, font=ctk.CTkFont(size=13), progress_color="#58a6ff", button_color="#30363d", text_color="#8b949e")
-        self.debug_switch.grid(row=0, column=3, padx=8, pady=12, sticky="e")
-
-        self.btn_quit = ctk.CTkButton(self.top_bar, text="退出", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#f85149", hover_color="#30363d", width=60, height=32, corner_radius=6, command=self.on_quit_clicked)
-        self.btn_quit.grid(row=0, column=4, padx=(8,20), pady=14, sticky="e")
-
-        self.main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.main_frame.grid(row=1, column=0, sticky="nsew", padx=24, pady=(4, 16))
-        self.root.grid_rowconfigure(1, weight=1)
-        self.main_frame.grid_rowconfigure(2, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)
-
-        self.action_bar = ctk.CTkFrame(self.main_frame, fg_color="#161b22", corner_radius=8, height=64)
-        self.action_bar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        self.action_bar.grid_columnconfigure(0, weight=1)
-
-        self.status_label = ctk.CTkLabel(self.action_bar, text=" 初始化中...", font=ctk.CTkFont(size=14), text_color="#8b949e")
-        self.status_label.grid(row=0, column=0, padx=16, pady=14, sticky="w")
-
-        self.progress_bar = ctk.CTkProgressBar(self.action_bar, mode="indeterminate", width=140, fg_color="#21262d", progress_color="#58a6ff")
-        self.progress_bar.grid(row=0, column=1, padx=8, pady=12, sticky="e")
-        self.progress_bar.grid_remove()
-
-        self.btn_scan = ctk.CTkButton(self.action_bar, text="系统未就绪", font=ctk.CTkFont(size=14), fg_color="#21262d", text_color="#8b949e", hover_color="#30363d", corner_radius=6, height=44, state="disabled", command=self._on_scan_clicked)
-        self.btn_scan.grid(row=0, column=2, padx=4, pady=10, sticky="e")
-
-        self.btn_quick = ctk.CTkButton(self.action_bar, text="系统未就绪", font=ctk.CTkFont(size=14), fg_color="#21262d", text_color="#8b949e", hover_color="#30363d", corner_radius=6, height=44, state="disabled", command=self._on_quick_clicked)
-        self.btn_quick.grid(row=0, column=3, padx=4, pady=10, sticky="e")
-
-        self.btn_auto = ctk.CTkButton(self.action_bar, text="开始处理", font=ctk.CTkFont(size=14, weight="bold"), fg_color="#238636", text_color="#ffffff", hover_color="#2ea043", corner_radius=6, height=44, state="disabled", command=self._on_auto_clicked)
-        self.btn_auto.grid(row=0, column=4, padx=(4,12), pady=10, sticky="e")
-
-        self.task_header = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=40)
-        self.task_header.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-        self.task_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.task_header, text="任务清单", font=ctk.CTkFont(size=16, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=4, sticky="w")
-
-        self.task_search = ctk.CTkEntry(self.task_header, placeholder_text="搜索任务...", font=ctk.CTkFont(size=14), fg_color="#0d1117", text_color="#e6edf3", border_color="#30363d", corner_radius=6, height=34, width=220)
-        self.task_search.grid(row=0, column=1, padx=8, sticky="e")
-        self.task_search.bind("<KeyRelease>", self._on_search_key)
-
-        ctk.CTkButton(self.task_header, text="全选", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_select_all).grid(row=0, column=2, padx=2, sticky="e")
-        ctk.CTkButton(self.task_header, text="必修", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_select_compulsory).grid(row=0, column=3, padx=2, sticky="e")
-        ctk.CTkButton(self.task_header, text="取消", font=ctk.CTkFont(size=13), fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6, height=30, width=56, command=self._on_deselect_all).grid(row=0, column=4, padx=2, sticky="e")
-        self.btn_select_visible = ctk.CTkButton(self.task_header, text="全选当前", font=ctk.CTkFont(size=13), fg_color="#1f6feb", text_color="#ffffff", hover_color="#388bfd", corner_radius=6, height=30, width=80, command=self._on_select_visible)
-        self.btn_select_visible.grid(row=0, column=5, padx=2, sticky="e")
-        self.btn_select_visible.grid_remove()
-
-        self.task_list_card = ctk.CTkFrame(self.main_frame, fg_color="#161b22", corner_radius=8)
-        self.task_list_card.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        self.task_list_card.grid_rowconfigure(0, weight=1)
-        self.task_list_card.grid_columnconfigure(0, weight=1)
-
-        self._tab_list_frame = ctk.CTkScrollableFrame(self.task_list_card, fg_color="transparent", corner_radius=0)
-        self._tab_list_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-
-        self.log_header = ctk.CTkFrame(self.main_frame, fg_color="transparent", height=36)
-        self.log_header.grid(row=3, column=0, sticky="ew", pady=(0, 0))
-        self.log_header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(self.log_header, text="终端日志", font=ctk.CTkFont(size=16, weight="bold"), text_color="#e6edf3").grid(row=0, column=0, padx=4, sticky="w")
-
-        self.log_visible = True
-        self.log_toggle_btn = ctk.CTkButton(self.log_header, text="折叠日志", font=ctk.CTkFont(size=14), fg_color="transparent", text_color="#8b949e", hover_color="#21262d", height=28, width=90, command=self._on_toggle_log)
-        self.log_toggle_btn.grid(row=0, column=1, padx=8, pady=4, sticky="e")
-
-        self.log_card = ctk.CTkFrame(self.main_frame, fg_color="#0d1117", corner_radius=8)
-        self.log_card.grid(row=4, column=0, sticky="nsew")
-        self.log_card.grid_rowconfigure(0, weight=1)
-        self.log_card.grid_columnconfigure(0, weight=1)
-
-        self.log_area = ctk.CTkTextbox(self.log_card, fg_color="#0d1117", text_color="#c9d1d9", font=ctk.CTkFont(family="Consolas", size=12), corner_radius=0, wrap="word", state="disabled", border_width=0)
-        self.log_area.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
-
-        self._all_tabs = []
-        self._tab_check_vars = []
-        self._tab_checkboxes = []
-        self._tab_list_built = False
-        self._auto_running = False
-        self._quick_running = False
-        self._current_filter = ""
-        self._task_groups = {}  # unit_name -> list of tab indices
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_quit_clicked)
-        self.root.after(100, self._poll_logs)
-
-    def enable_scan_button(self):
-        """登录成功后激活所有按钮"""
-        self.btn_scan.configure(
-            state="normal", text="扫描任务列表",
-            fg_color="#238636", text_color="#ffffff", hover_color="#2ea043", corner_radius=6
-        )
-        self.btn_quick.configure(
-            state="normal", text="快速处理当前页",
-            fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d", corner_radius=6
-        )
-        self.status_label.configure(text="就绪 - 点击[扫描任务列表]或[快速处理当前页]")
-        gui_log_queue.put("\n" + "=" * 60)
-        gui_log_queue.put("系统就绪")
-        gui_log_queue.put("模式1: 点击[扫描任务列表] -> 勾选 -> 自动处理")
-        gui_log_queue.put("模式2: 手动翻到题目页 -> 点击[快速处理当前页]")
-        try:
-            winsound.MessageBeep()
-        except:
-            pass
-
-    def _on_scan_clicked(self):
-        """扫描Tab按钮：列出当前页面所有Tab供选择"""
-        if self.btn_scan.cget("state") == "disabled":
-            return
-        self.btn_scan.configure(state="disabled", text="⏳ 扫描中...")
-        self.status_label.configure(text="扫描中...", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._scan_tabs_thread, daemon=True).start()
-
-    def _scan_tabs_thread(self):
-        """后台线程：扫描Tab — 自动检测页面层级（课程目录 / 章节内部）"""
-        try:
-            tabs = []
-            course_tabs = self._scan_course_directory()
-            if course_tabs:
-                tabs = course_tabs
-                gui_log_queue.put(f"课程目录页发现 {len(tabs)} 个任务")
-            else:
-                level1 = self.solver._get_level1_tabs()
-                if level1:
-                    for l1_idx, l1_tab in enumerate(level1):
-                        if not WebDriverHelper.safe_click(self.driver, l1_tab['element']):
-                            continue
-                        time.sleep(1.2)
-                        level2 = self.solver._get_level2_tabs()
-                        if not level2:
-                            tabs.append({'l1_idx': l1_idx, 'l2_idx': -1, 'l1_title': l1_tab['title'], 'l2_title': '', 'display': l1_tab['title'], 'is_l2': False, 'is_compulsory': True})
-                        else:
-                            for l2_idx, l2_tab in enumerate(level2):
-                                tabs.append({'l1_idx': l1_idx, 'l2_idx': l2_idx, 'l1_title': l1_tab['title'], 'l2_title': l2_tab['title'], 'display': f"  └ {l2_tab['title']}", 'is_l2': True, 'is_compulsory': True})
-                    gui_log_queue.put(f"章节内部页发现 {len(tabs)} 个任务")
-            self._all_tabs = tabs
-            self.root.after(0, self._build_tab_list_ui)
-        except Exception as e:
-            gui_log_queue.put(f"扫描失败: {str(e)[:80]}")
-            logger.error(f"扫描异常: {e}", exc_info=True)
-            self.root.after(0, self._reset_scan_button)
-
-    def _scan_course_directory(self):
-        """扫描课程目录页（Unit 列表视图）"""
-        tabs = []
-        try:
-            unit_container = WebDriverWait(self.driver, 5).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'unipus-tabs_unitTabScrollContainer__fXBxR')))
-            unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
-            gui_log_queue.put(f"课程目录页，找到 {len(unit_tabs)} 个Unit")
-            for unit_idx, unit_tab in enumerate(unit_tabs):
-                try:
-                    self.driver.execute_script("arguments[0].click();", unit_tab)
-                except:
-                    unit_tab.click()
-                time.sleep(0.8)
-                chapters = self.driver.find_elements(By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN')
-                for chapter in chapters:
-                    try:
-                        name_elem = chapter.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
-                        name = name_elem.text.strip()
-                        if not name:
-                            continue
-                        try:
-                            chapter.find_element(By.CLASS_NAME, 'courses-unit_taskRequireIcon__zZldK')
-                            is_compulsory = True
-                        except NoSuchElementException:
-                            is_compulsory = False
-                        prefix = "[必修]" if is_compulsory else "[选修]"
-                        tabs.append({'l1_idx': len(tabs), 'l2_idx': -1, 'l1_title': name, 'l2_title': '', 'display': f"{prefix} Unit{unit_idx+1} - {name}", 'is_l2': False, 'is_compulsory': is_compulsory, '_element': name_elem, '_unit_idx': unit_idx})
-                    except Exception:
-                        continue
-        except Exception as e:
-            logger.debug(f"课程目录扫描未命中: {e}")
-        return tabs
-
-    def _build_tab_list_ui(self):
-        """构建任务勾选列表 - 按 Unit 分组，可折叠"""
-        self.progress_bar.grid_remove()
-        if not self._all_tabs:
-            gui_log_queue.put("未扫描到任何Tab")
-            self._reset_scan_button()
-            return
-        for w in self._tab_list_frame.winfo_children():
-            w.destroy()
-        self._tab_check_vars = []
-        self._tab_checkboxes = []
-        self._task_groups = {}
-
-        compulsory_count = sum(1 for t in self._all_tabs if t.get('is_compulsory', False))
-        gui_log_queue.put(f"必修: {compulsory_count}, 选修: {len(self._all_tabs) - compulsory_count}")
-
-        groups = {}
-        for i, tab in enumerate(self._all_tabs):
-            unit_key = tab.get('display', '').split('Unit')[1].split(' - ')[0].strip() if 'Unit' in tab.get('display', '') else '其他'
-            groups.setdefault(unit_key, []).append(i)
-
-        row = 0
-        for unit_name, indices in groups.items():
-            unit_tabs = [self._all_tabs[i] for i in indices]
-            comp = sum(1 for t in unit_tabs if t.get('is_compulsory', False))
-            header_text = f"Unit {unit_name} ({len(indices)}个任务, {comp}必修)"
-            header_btn = ctk.CTkButton(self._tab_list_frame, text=header_text, font=ctk.CTkFont(size=12, weight="bold"), fg_color="#21262d", text_color="#e6edf3", hover_color="#30363d", corner_radius=4, height=28, anchor="w")
-            header_btn.grid(row=row, column=0, padx=0, pady=(4,2), sticky="ew")
-            row += 1
-
-            for idx in indices:
-                tab = self._all_tabs[idx]
-                var = ctk.BooleanVar(value=tab.get('is_compulsory', False))
-                self._tab_check_vars.append(var)
-                txt = tab['display']
-                tc = "#e6edf3" if tab.get('is_compulsory', False) else "#8b949e"
-                cb = ctk.CTkCheckBox(self._tab_list_frame, text=txt, variable=var, font=ctk.CTkFont(size=12), text_color=tc, fg_color="#58a6ff", hover_color="#1f6feb", checkbox_width=18, checkbox_height=18, corner_radius=4)
-                cb.grid(row=row, column=0, padx=8, pady=1, sticky="w")
-                self._tab_checkboxes.append(cb)
-                row += 1
-
-            row += 1  # gap between groups
-
-        self._tab_list_built = True
-        self.btn_auto.grid()
-        self.btn_auto.configure(state="normal", text=f"开始处理选中任务 ({len(self._all_tabs)}项)")
-        self.btn_scan.configure(state="normal", text="重新扫描", fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d")
-        self.status_label.configure(text=f"已扫描 {len(self._all_tabs)} 个任务，勾选后点击[开始处理]")
-        self._tab_list_built = True
-        self.btn_auto.grid()
-        self.btn_auto.configure(state="normal", text=f"▶ 开始处理选中任务 ({len(self._all_tabs)}项)")
-        self.btn_scan.configure(state="normal", text=" 重新扫描", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.status_label.configure(text=f" 已扫描 {len(self._all_tabs)} 个任务，请勾选后点击[开始处理选中任务]", text_color=("#1f8a65", "#2fba8a"))
-        gui_log_queue.put(f"\n扫描完成，共 {len(self._all_tabs)} 个任务可供选择")
-
-    def _on_select_all(self):
-        for var in self._tab_check_vars:
-            var.set(True)
-
-    def _on_select_compulsory(self):
-        for i, var in enumerate(self._tab_check_vars):
-            if i < len(self._all_tabs):
-                var.set(self._all_tabs[i].get('is_compulsory', False))
-
-    def _on_deselect_all(self):
-        for var in self._tab_check_vars:
-            var.set(False)
-
-    def _on_select_visible(self):
-        """全选当前搜索可见的任务"""
-        query = self.task_search.get().lower()
-        for i, cb in enumerate(self._tab_checkboxes):
-            if i < len(self._all_tabs):
-                if query == "" or query in self._all_tabs[i]['display'].lower():
-                    self._tab_check_vars[i].set(True)
-
-    def _on_search_key(self, event=None):
-        """搜索过滤任务列表"""
-        query = self.task_search.get().lower()
-        for i, cb in enumerate(self._tab_checkboxes):
-            if i < len(self._all_tabs):
-                visible = query == "" or query in self._all_tabs[i]['display'].lower()
-                if visible:
-                    cb.grid()
-                else:
-                    cb.grid_remove()
-        if query:
-            self.btn_select_visible.grid()
-        else:
-            self.btn_select_visible.grid_remove()
-
-    def _on_toggle_log(self):
-        """折叠/展开日志区域"""
-        self.log_visible = not self.log_visible
-        if self.log_visible:
-            self.log_card.grid()
-            self.log_toggle_btn.configure(text="折叠日志")
-            self.main_frame.grid_rowconfigure(4, weight=1)
-        else:
-            self.log_card.grid_remove()
-            self.log_toggle_btn.configure(text="展开日志")
-            self.main_frame.grid_rowconfigure(4, weight=0)
-
-    def _on_auto_clicked(self):
-        if self._auto_running or self.btn_auto.cget("state") == "disabled":
-            return
-        selected = []
-        for i, tab in enumerate(self._all_tabs):
-            if self._tab_check_vars[i].get():
-                selected.append(tab)
-        if not selected:
-            gui_log_queue.put("没有勾选任何任务，请先勾选")
-            return
-        gui_log_queue.put(f"\n{'='*60}")
-        gui_log_queue.put(f"用户选择了 {len(selected)} 个任务，开始全自动处理...")
-        gui_log_queue.put(f"{'='*60}")
-        self._auto_running = True
-        self.btn_auto.configure(state="disabled", text="⏳ 自动处理中...")
-        self.btn_scan.configure(state="disabled")
-        self.btn_quick.configure(state="disabled")
-        self.status_label.configure(text="处理中，请勿操作浏览器", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._run_auto_task, args=(selected,), daemon=True).start()
-
-    def _run_auto_task(self, selected):
-        try:
-            self.solver.process_selected_tabs(selected)
-            gui_log_queue.put("\n全部选中任务处理完成！")
-            winsound.MessageBeep()
-        except Exception as e:
-            gui_log_queue.put(f"\n自动处理异常: {str(e)}")
-            logger.error(f"自动处理异常: {e}", exc_info=True)
-        finally:
-            self._auto_running = False
-            self.root.after(0, self._reset_auto_button)
-
-    def _reset_auto_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_auto.configure(state="normal", text="▶ 开始处理选中任务")
-        self.btn_scan.configure(state="normal", text=" 重新扫描", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.btn_quick.configure(state="normal", text="快速处理当前页", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.status_label.configure(text="任务完成", text_color=("#1f8a65", "#2fba8a"))
-        try: winsound.MessageBeep()
-        except: pass
-
-    def _on_quick_clicked(self):
-        if self._quick_running or self.btn_quick.cget("state") == "disabled":
-            return
-        gui_log_queue.put(f"\n开始处理当前停留的页面...")
-        self._quick_running = True
-        self.btn_quick.configure(state="disabled", text="⏳ 处理中...")
-        self.btn_scan.configure(state="disabled")
-        if self.btn_auto.winfo_ismapped():
-            self.btn_auto.configure(state="disabled")
-        self.status_label.configure(text="处理当前页...", text_color=("#f54e00", "#f54e00"))
-        self.progress_bar.grid()
-        self.progress_bar.start()
-        threading.Thread(target=self._run_quick_task, daemon=True).start()
-
-    def _run_quick_task(self):
-        self.solver.processed_hashes.clear()
-        try:
-            success = self.solver.solve_current_page()
-            if success:
-                gui_log_queue.put("\n当前页面处理完成！")
-            else:
-                gui_log_queue.put("\n当前页面没有需要处理的题目")
-        except Exception as e:
-            gui_log_queue.put(f"\n处理异常: {str(e)}")
-            logger.error(f"快速处理异常: {e}", exc_info=True)
-        finally:
-            self._quick_running = False
-            self.root.after(0, self._reset_quick_button)
-
-    def _reset_quick_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_quick.configure(state="normal", text="快速处理当前页", fg_color=("#ebeae5", "#2a2922"), text_color=("#26251e", "#e6e5e0"), hover_color=("#e1e0db", "#33322a"))
-        self.btn_scan.configure(state="normal", text="扫描任务列表", fg_color=("#f54e00", "#f54e00"), text_color=("#ffffff", "#ffffff"), hover_color=("#d94400", "#d94400"))
-        if self.btn_auto.winfo_ismapped():
-            self.btn_auto.configure(state="normal")
-        self.status_label.configure(text="就绪", text_color=("#1f8a65", "#2fba8a"))
-        try: winsound.MessageBeep()
-        except: pass
-
-    def _reset_scan_button(self):
-        self.progress_bar.stop()
-        self.progress_bar.grid_remove()
-        self.btn_scan.configure(state="normal", text="重新扫描", fg_color="#21262d", text_color="#c9d1d9", hover_color="#30363d")
-        self.status_label.configure(text="扫描失败，请确认已进入课程页面后重试")
-
-    def _on_debug_toggle(self):
-        global DEBUG_MODE
-        DEBUG_MODE = self.debug_var.get()
-        gui_log_queue.put(f"调试模式: {'开启' if DEBUG_MODE else '关闭'}")
-
-    def _poll_logs(self):
-        """跨线程日志渲染, 超出800行自动裁剪旧内容"""
-        max_lines = 800
-        while not gui_log_queue.empty():
-            msg = gui_log_queue.get()
-            self.log_area.configure(state="normal")
-            self.log_area.insert("end", msg + "\n")
-            line_count = int(self.log_area.index("end-1c").split(".")[0])
-            if line_count > max_lines:
-                self.log_area.delete("1.0", "200.0")
-            self.log_area.see("end")
-            self.log_area.configure(state="disabled")
-        self.root.after(100, self._poll_logs)
-
-    def on_quit_clicked(self):
-        """安全释放资源"""
-        gui_log_queue.put(" 正在关闭浏览器并释放资源...")
-        self.root.destroy()
-        try:
-            self.driver.quit()
-        except:
-            pass
-        sys.exit(0)
-
-
 class UCampusBot:
     """U校园机器人 - 组装所有组件"""
 
     def __init__(self, config_path: str = 'config.json', skip_check: bool = False):
         self.config = Config.from_json(config_path)
-        self.temp_dirs: List[str] = []
         self.driver = None
-        self.popup_watcher = None
 
         if not skip_check:
             self._ensure_environment()
@@ -5213,38 +4385,15 @@ class UCampusBot:
                     sys.exit(0)
 
                 elif choice == '2':
-                    driver_manager = DriverManager()
-                    target_dir = os.path.expandvars(r'%LOCALAPPDATA%\U校园AI答题')
-                    os.makedirs(target_dir, exist_ok=True)
-
-                    driver_path = checker.auto_download_driver(target_dir)
-                    if driver_path:
-                        print(" 驱动准备完成，请重新运行程序")
-                        input("按回车键退出...")
-                        sys.exit(0)
-
-                elif choice == '3':
                     if checker.auto_install_ffmpeg():
                         sys.exit(0)
 
-                elif choice == '4':
+                elif choice == '3':
                     if checker.add_ffmpeg_to_path():
                         sys.exit(0)
 
-                elif choice == '5':
-                    edge_path, driver_path, ffmpeg_path = checker.manual_specify_path()
-
-                    if edge_path and os.path.exists(edge_path):
-                        print(f" 已指定 Edge: {edge_path}")
-
-                    if driver_path:
-                        manager = DriverManager()
-                        saved_path = manager.save_driver(driver_path)
-                        print(f" 驱动已保存: {saved_path}")
-                        print("请重新运行程序")
-                        input("按回车键退出...")
-                        sys.exit(0)
-
+                elif choice == '4':
+                    ffmpeg_path = checker.manual_specify_path()
                     if ffmpeg_path:
                         bin_dir = os.path.dirname(ffmpeg_path)
                         checker._add_to_system_path(bin_dir)
@@ -5253,7 +4402,7 @@ class UCampusBot:
                         input("按回车键退出...")
                         sys.exit(0)
 
-                elif choice == '6':
+                elif choice == '5':
                     self._show_detailed_help()
                     input("\n按回车键退出...")
                     sys.exit(1)
@@ -5269,22 +4418,18 @@ class UCampusBot:
     【问题诊断】
 
     1. Edge 浏览器问题
-       原因：Edge 未安装或版本不匹配
+       原因：Edge 未安装
        解决：选择 [1] 自动安装，或访问 https://www.microsoft.com/edge
 
-    2. Edge 驱动问题
-       原因：msedgedriver.exe 未找到
-       解决：选择 [2] 自动下载，或手动放置到程序目录
-
-    3. FFmpeg 问题（语音识别必需）
+    2. FFmpeg 问题（语音识别必需）
        原因：未安装 FFmpeg 或未添加到系统 PATH
        解决：
-          - 方法A（推荐）：选择 [3] 自动下载安装（约130MB）
-          - 方法B：选择 [4] 将已安装的 FFmpeg 添加到 PATH
+          - 方法A（推荐）：选择 [2] 自动下载安装（约130MB）
+          - 方法B：选择 [3] 将已安装的 FFmpeg 添加到 PATH
           - 方法C：手动下载 https://ffmpeg.org/download.html
             解压后将 bin 目录添加到系统环境变量 PATH
 
-    4. 验证 FFmpeg 安装
+    3. 验证 FFmpeg 安装
        打开 CMD 输入: ffmpeg -version
        应显示版本信息，如 "ffmpeg version 6.0"
 
@@ -5303,58 +4448,15 @@ class UCampusBot:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-        temp_dir = tempfile.mkdtemp(prefix='ucampus_')
-        self.temp_dirs.append(temp_dir)
-        options.add_argument(f'--user-data-dir={temp_dir}')
+        options.add_argument(f'--user-data-dir={tempfile.mkdtemp(prefix="ucampus_")}')
 
-        driver = self._try_start_driver(options)
+        driver = webdriver.Edge(options=options)
 
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
         })
 
         return driver
-
-    def _try_start_driver(self, options) -> webdriver.Edge:
-        errors = []
-
-        try:
-            from selenium.webdriver.edge.service import Service
-            from webdriver_manager.microsoft import EdgeChromiumDriverManager
-
-            service = Service(EdgeChromiumDriverManager().install())
-            return webdriver.Edge(service=service, options=options)
-        except Exception as e:
-            errors.append(f"自动管理: {str(e)[:40]}")
-
-        manager = DriverManager()
-        user_driver = manager.get_driver_path()
-        if user_driver:
-            try:
-                from selenium.webdriver.edge.service import Service
-                service = Service(user_driver)
-                return webdriver.Edge(service=service, options=options)
-            except Exception as e:
-                errors.append(f"用户驱动: {str(e)[:40]}")
-
-        bundled = get_resource_path('msedgedriver.exe')
-        if os.path.exists(bundled):
-            try:
-                from selenium.webdriver.edge.service import Service
-                service = Service(bundled)
-                return webdriver.Edge(service=service, options=options)
-            except Exception as e:
-                errors.append(f"自带驱动: {str(e)[:40]}")
-
-        try:
-            return webdriver.Edge(options=options)
-        except Exception as e:
-            errors.append(f"系统PATH: {str(e)[:40]}")
-
-        print("\n 浏览器启动失败:")
-        for err in errors:
-            print(f"   - {err}")
-        raise Exception("无法启动 Edge 浏览器")
 
     def start(self):
         solver = AISolver(self.driver, self.config)
@@ -5364,7 +4466,7 @@ class UCampusBot:
         threading.Thread(target=self.popup_watcher.run, daemon=True).start()
         threading.Thread(target=self._background_login_flow, daemon=True).start()
 
-        self.gui.root.mainloop()
+        self.gui.mainloop()
 
         return True
 
@@ -5372,7 +4474,7 @@ class UCampusBot:
         gui_log_queue.put(" 正在与 U校园 建立连接，请稍候...")
         success = self._login()
         if success:
-            self.gui.root.after(0, self.gui.enable_scan_button)
+            self.gui.after(0, self.gui.enable_scan_button)
 
     def _login(self) -> bool:
         try:
@@ -5439,11 +4541,9 @@ class PopupWatcher:
 
     def __init__(self, driver):
         self.driver = driver
-        self.running = False
 
     def run(self):
-        self.running = True
-        while self.running:
+        while True:
             try:
                 self._click_known_buttons()
                 time.sleep(0.5)
@@ -5484,10 +4584,6 @@ class PopupWatcher:
         """
         self.driver.execute_script(js)
 
-    def stop(self):
-        self.running = False
-
-
 if __name__ == '__main__':
     print('*' * 25 + "Unipus-Helper" + '*' * 25)
 
@@ -5499,7 +4595,7 @@ if __name__ == '__main__':
         print("   - 语音识别需要 FFmpeg（约130MB，可自动安装）")
         print("   - 如检查通过但无法启动，使用 --skip-check 跳过")
 
-    logger, LOG_FILE = setup_logging()
+    logger = setup_logging()
 
     try:
         bot = UCampusBot(os.path.join(BASE_DIR, 'config.json'), skip_check=skip_check)

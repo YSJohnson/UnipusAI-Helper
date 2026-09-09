@@ -1,11 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
-binaries = []
-hiddenimports = ['AudioRecognizer', 'EnvironmentChecker', 'whisper', 'webdriver_manager', 'webdriver_manager.microsoft', 'webdriver_manager.core', 'selenium', 'selenium.webdriver', 'selenium.webdriver.edge', 'selenium.webdriver.edge.webdriver', 'selenium.webdriver.edge.service', 'selenium.webdriver.edge.options', 'openai', 'requests', 'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets', 'qfluentwidgets']
-tmp_ret = collect_all('qfluentwidgets')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+datas, binaries, hiddenimports = collect_all('qfluentwidgets')
 
 
 a = Analysis(

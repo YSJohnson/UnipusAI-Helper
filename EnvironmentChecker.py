@@ -1,32 +1,25 @@
-# ==================== 环境检测与驱动管理 ====================
+# ==================== 环境检测 ====================
 import os
-import sys
 import platform
 import tempfile
 import shutil
 import subprocess
-import time
 import zipfile
 import urllib.request
-from typing import Optional, Tuple, List
-from pathlib import Path
+from typing import Optional, List
 
 
 class EnvironmentChecker:
     """环境检测器"""
 
     EDGE_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/?linkid=2108834&Channel=Stable&language=zh-cn"
-    DRIVER_DOWNLOAD_URL = "https://developer.microsoft.com/en-us/microsoft-edge/tools/webdriver/"
     FFMPEG_DOWNLOAD_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 
     def __init__(self):
         self.issues: List[str] = []
         self.warnings: List[str] = []
-        self.edge_path: Optional[str] = None
-        self.edge_version: Optional[str] = None
         self.ffmpeg_path: Optional[str] = None
         self.ffprobe_path: Optional[str] = None
-        self.ffmpeg_in_path: bool = False
 
     def check_all(self) -> bool:
         """执行完整环境检查"""
@@ -40,9 +33,6 @@ class EnvironmentChecker:
 
         # 检查 FFmpeg（新增）
         self._check_ffmpeg()
-
-        # 检查网络
-        self._check_network()
 
         # 检查结果
         if self.issues:
@@ -88,29 +78,10 @@ class EnvironmentChecker:
 
         for path in possible_paths:
             if os.path.exists(path):
-                self.edge_path = path
-                self.edge_version = self._get_edge_version(path)
-                print(f"    Edge 浏览器: {self.edge_version}")
+                print(f"    Edge 浏览器: {path}")
                 return
 
         self.issues.append(" 未检测到 Microsoft Edge 浏览器")
-
-    def _get_edge_version(self, edge_path: str) -> str:
-        """获取 Edge 版本"""
-        try:
-            import win32api
-            info = win32api.GetFileVersionInfo(edge_path, '\\')
-            version = f"{info['FileVersionMS'] >> 16}.{info['FileVersionMS'] & 0xFFFF}.{info['FileVersionLS'] >> 16}.{info['FileVersionLS'] & 0xFFFF}"
-            return version
-        except:
-            try:
-                import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                     r"Software\Microsoft\Edge\BLBeacon")
-                version, _ = winreg.QueryValueEx(key, "version")
-                return version
-            except:
-                return "未知版本"
 
     # ==================== 新增：FFmpeg 检测 ====================
 
@@ -123,7 +94,6 @@ class EnvironmentChecker:
         if ffmpeg_in_path:
             self.ffmpeg_path = ffmpeg_in_path
             self.ffprobe_path = self._resolve_ffprobe_path(ffmpeg_in_path, prefer_path_lookup=True)
-            self.ffmpeg_in_path = True
             version = self._get_ffmpeg_version(ffmpeg_in_path)
             print(f"       FFmpeg 已添加到 PATH: {version}")
             print(f"         FFmpeg 路径: {ffmpeg_in_path}")
@@ -147,7 +117,6 @@ class EnvironmentChecker:
             if os.path.exists(path):
                 self.ffmpeg_path = path
                 self.ffprobe_path = self._resolve_ffprobe_path(path)
-                self.ffmpeg_in_path = False  # 安装了但未添加到 PATH
                 version = self._get_ffmpeg_version(path)
                 print(f"        FFmpeg 已安装但未添加到 PATH: {version}")
                 print(f"         FFmpeg 路径: {path}")
@@ -192,15 +161,7 @@ class EnvironmentChecker:
 
         return None
 
-    def _check_network(self):
-        """检查网络连接"""
-        try:
-            urllib.request.urlopen('https://msedgedriver.azureedge.net', timeout=5)
-            print("    网络连接正常")
-        except:
-            self.warnings.append("  网络连接异常，无法自动下载组件")
-
-    # ==================== 修复选项（添加 FFmpeg 选项）====================
+    # ==================== 修复选项 ====================
 
     def show_fix_guide(self):
         """显示修复指南"""
@@ -209,14 +170,13 @@ class EnvironmentChecker:
         print("=" * 60)
         print("\n请选择操作：")
         print("   [1] 自动下载并安装 Edge 浏览器")
-        print("   [2] 自动下载匹配版本的 Edge 驱动")
-        print("   [3] 自动下载并安装 FFmpeg（推荐）")  # 新增
-        print("   [4] 将 FFmpeg 添加到系统 PATH（如已安装）")  # 新增
-        print("   [5] 手动指定 Edge/驱动/FFmpeg 路径")
-        print("   [6] 显示详细帮助后退出")
+        print("   [2] 自动下载并安装 FFmpeg（推荐）")
+        print("   [3] 将 FFmpeg 添加到系统 PATH（如已安装）")
+        print("   [4] 手动指定 FFmpeg 路径")
+        print("   [5] 显示详细帮助后退出")
         print("   [Q] 退出程序")
 
-        choice = input("\n请输入选项 (1/2/3/4/5/6/Q): ").strip().upper()
+        choice = input("\n请输入选项 (1/2/3/4/5/Q): ").strip().upper()
         return choice
 
     # ==================== 新增：FFmpeg 自动安装 ====================
@@ -403,116 +363,15 @@ class EnvironmentChecker:
             print(f"    下载失败: {e}")
             return False
 
-    def auto_download_driver(self, target_dir: str) -> Optional[str]:
-        """自动下载匹配版本的驱动"""
-        if not self.edge_version:
-            print("    无法确定 Edge 版本")
-            return None
-
-        print(f"\n 正在下载 Edge 驱动（版本 {self.edge_version}）...")
-
-        try:
-            major_version = self.edge_version.split('.')[0]
-            zip_path = os.path.join(tempfile.gettempdir(), "edgedriver.zip")
-
-            # 尝试精确版本
-            download_url = f"https://msedgedriver.azureedge.net/{self.edge_version}/edgedriver_win64.zip"
-
-            try:
-                urllib.request.urlretrieve(download_url, zip_path)
-            except:
-                print(f"    精确版本下载失败，尝试主版本号...")
-                version_url = f"https://msedgedriver.azureedge.net/LATEST_RELEASE_{major_version}_WINDOWS"
-                with urllib.request.urlopen(version_url) as response:
-                    latest_version = response.read().decode('utf-8').strip()
-                download_url = f"https://msedgedriver.azureedge.net/{latest_version}/edgedriver_win64.zip"
-                urllib.request.urlretrieve(download_url, zip_path)
-
-            print("    解压驱动...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extract("msedgedriver.exe", target_dir)
-
-            os.remove(zip_path)
-
-            driver_path = os.path.join(target_dir, "msedgedriver.exe")
-            print(f"    驱动已保存: {driver_path}")
-            return driver_path
-
-        except Exception as e:
-            print(f"    下载失败: {e}")
-            return None
-
-    def manual_specify_path(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """手动指定路径（添加 FFmpeg）"""
+    def manual_specify_path(self) -> Optional[str]:
+        """手动指定 FFmpeg 路径"""
         print("\n" + "-" * 60)
         print("手动指定路径")
         print("-" * 60)
 
-        # Edge 路径
-        edge_path = input("Edge 浏览器路径（直接回车跳过）: ").strip()
-        if edge_path and not os.path.exists(edge_path):
-            print("    路径不存在")
-            edge_path = None
-
-        # 驱动路径
-        driver_path = input("msedgedriver.exe 路径（直接回车跳过）: ").strip()
-        if driver_path and not os.path.exists(driver_path):
-            print("    路径不存在")
-            driver_path = None
-
-        # FFmpeg 路径（新增）
         ffmpeg_path = input("ffmpeg.exe 路径（直接回车跳过）: ").strip()
         if ffmpeg_path and not os.path.exists(ffmpeg_path):
             print("    路径不存在")
             ffmpeg_path = None
 
-        return edge_path, driver_path, ffmpeg_path
-
-
-class DriverManager:
-    """驱动管理器（保持原有）"""
-
-    def __init__(self):
-        self.bundled_driver = self._find_bundled_driver()
-        self.downloaded_driver = self._find_downloaded_driver()
-
-    def _find_bundled_driver(self) -> Optional[str]:
-        possible_paths = [
-            get_resource_path('msedgedriver.exe'),
-            get_resource_path('driver/msedgedriver.exe'),
-            os.path.join(os.path.dirname(sys.executable), 'msedgedriver.exe'),
-        ]
-
-        for path in possible_paths:
-            if path and os.path.exists(path):
-                return path
-        return None
-
-    def _find_downloaded_driver(self) -> Optional[str]:
-        app_data = os.path.expandvars(r'%LOCALAPPDATA%\U校园AI答题')
-        driver_path = os.path.join(app_data, 'msedgedriver.exe')
-
-        if os.path.exists(driver_path):
-            return driver_path
-        return None
-
-    def get_driver_path(self) -> Optional[str]:
-        return self.bundled_driver or self.downloaded_driver
-
-    def save_driver(self, driver_path: str) -> str:
-        app_data = os.path.expandvars(r'%LOCALAPPDATA%\U校园AI答题')
-        os.makedirs(app_data, exist_ok=True)
-
-        target_path = os.path.join(app_data, 'msedgedriver.exe')
-        shutil.copy2(driver_path, target_path)
-        return target_path
-
-
-def get_resource_path(relative_path: str) -> str:
-    """获取资源路径"""
-    if hasattr(sys, '_MEIPASS'):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-    return os.path.join(base_path, relative_path)
+        return ffmpeg_path

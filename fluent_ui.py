@@ -33,17 +33,6 @@ class _MainThreadBridge(QObject):
     invoke = pyqtSignal(object)
 
 
-class _BoolVar:
-    def __init__(self, value=False):
-        self._value = bool(value)
-
-    def get(self):
-        return self._value
-
-    def set(self, value):
-        self._value = bool(value)
-
-
 class FluentModernGUI(MSFluentWindow):
     """Modern Fluent workbench for the existing UnipusAI automation workflow."""
 
@@ -58,7 +47,6 @@ class FluentModernGUI(MSFluentWindow):
         self._globals = app_globals
         self.app_version = app_globals.get("APP_VERSION", "")
         self._closing = False
-        self.root = self
 
         self.gui_log_queue = app_globals["gui_log_queue"]
         self.logger = app_globals.get("logger")
@@ -74,7 +62,6 @@ class FluentModernGUI(MSFluentWindow):
         self._all_tabs = []
         self._tab_widget_items = []
         self._selected_tab_keys = set()
-        self._tab_list_built = False
         self._auto_running = False
         self._quick_running = False
         self.is_dark = True
@@ -82,7 +69,6 @@ class FluentModernGUI(MSFluentWindow):
         self._panel_cards = []
         self._metric_boxes = []
         self._auto_total = 0
-        self._auto_completed = 0
 
         self._init_window()
         self._build_ui()
@@ -139,11 +125,10 @@ class FluentModernGUI(MSFluentWindow):
         top_layout.addWidget(self.status_pill)
         top_layout.addSpacing(22)
 
-        self.debug_var = _BoolVar(self._globals.get("DEBUG_MODE", False))
         top_layout.addWidget(self._label("调试模式", 14, "#a7b0bb", 600))
         self.debug_switch = SwitchButton()
         self.debug_switch.setText("")
-        self.debug_switch.setChecked(self.debug_var.get())
+        self.debug_switch.setChecked(bool(self._globals.get("DEBUG_MODE", False)))
         self.debug_switch.checkedChanged.connect(self._on_debug_toggle)
         top_layout.addWidget(self.debug_switch)
         top_layout.addSpacing(22)
@@ -414,7 +399,7 @@ class FluentModernGUI(MSFluentWindow):
         selected = len(self._selected_tab_keys)
         self.selected_label.setText(f"已选 {selected} / {total}")
         if self._auto_running:
-            self.task_value.value_label.setText(str(max(self._auto_total - self._auto_completed, 0)))
+            self.task_value.value_label.setText(str(self._auto_total))
         else:
             self.task_value.value_label.setText(str(selected))
 
@@ -427,9 +412,6 @@ class FluentModernGUI(MSFluentWindow):
     def mainloop(self):
         self.show()
         return self._qt_app.exec_()
-
-    def destroy(self):
-        self.close()
 
     def enable_scan_button(self):
         self.btn_scan.setEnabled(True)
@@ -444,15 +426,11 @@ class FluentModernGUI(MSFluentWindow):
         except Exception:
             pass
 
-    def _set_busy(self, busy: bool, indeterminate: bool = True):
+    def _set_busy(self, busy: bool):
         self.progress_ring.setVisible(busy)
         if busy:
-            if indeterminate:
-                self.progress_ring.setRange(0, 0)
-                self.progress_ring.resume()
-            else:
-                self.progress_ring.pause()
-                self.progress_ring.setRange(0, 100)
+            self.progress_ring.setRange(0, 0)
+            self.progress_ring.resume()
         else:
             self.progress_ring.pause()
             self.progress_ring.setRange(0, 100)
@@ -460,7 +438,6 @@ class FluentModernGUI(MSFluentWindow):
 
     def _start_auto_progress(self, total: int):
         self._auto_total = total
-        self._auto_completed = 0
         self.progress_ring.setVisible(True)
         self.progress_ring.pause()
         self.progress_ring.setRange(0, 100)
@@ -468,29 +445,12 @@ class FluentModernGUI(MSFluentWindow):
         self.selected_label.setText(f"进度 0 / {total}")
         self.task_value.value_label.setText(str(total))
 
-    def _update_auto_progress(self, completed: int, total: int, task_name: str = ""):
-        self._auto_total = total
-        self._auto_completed = min(max(completed, 0), total)
-        value = int((self._auto_completed / total) * 100) if total else 0
-        self.progress_ring.setVisible(True)
-        self.progress_ring.setRange(0, 100)
-        self.progress_ring.setValue(value)
-        remaining = max(total - self._auto_completed, 0)
-        self.task_value.value_label.setText(str(remaining))
-        self.selected_label.setText(f"进度 {self._auto_completed} / {total}")
-        if task_name and self._auto_completed < total:
-            self.status_label.setText(f"正在处理：{task_name}")
-
     def _finish_auto_progress(self):
-        self._auto_completed = self._auto_total
         self.progress_ring.setVisible(True)
         self.progress_ring.setRange(0, 100)
         self.progress_ring.setValue(100 if self._auto_total else 0)
         self.task_value.value_label.setText("0")
         self.selected_label.setText(f"进度 {self._auto_total} / {self._auto_total}")
-
-    def _solver_progress_callback(self, completed: int, total: int, task_name: str = ""):
-        self.after(0, lambda: self._update_auto_progress(completed, total, task_name))
 
     def _on_scan_clicked(self):
         if not self.btn_scan.isEnabled():
@@ -647,7 +607,6 @@ class FluentModernGUI(MSFluentWindow):
                 self._tab_widget_items.append({"index": idx, "key": key, "checkbox": checkbox})
 
         self._tab_list_layout.addStretch(1)
-        self._tab_list_built = True
         self.btn_auto.setEnabled(True)
         self.btn_auto.setText(f"处理选中任务 ({len(self._selected_tab_keys)})")
         self.btn_scan.setEnabled(True)
@@ -722,9 +681,7 @@ class FluentModernGUI(MSFluentWindow):
         self.gui_log_queue.put(f"{'=' * 60}")
         self._auto_running = True
         self._start_auto_progress(len(selected))
-        if hasattr(self.solver, "clear_stop"):
-            self.solver.clear_stop()
-        setattr(self.solver, "progress_callback", self._solver_progress_callback)
+        self.solver.clear_stop()
         self.btn_auto.setEnabled(False)
         self.btn_auto.setText("处理中...")
         self.btn_scan.setEnabled(False)
@@ -737,8 +694,7 @@ class FluentModernGUI(MSFluentWindow):
     def _on_stop_clicked(self):
         if not (self._auto_running or self._quick_running):
             return
-        if hasattr(self.solver, "request_stop"):
-            self.solver.request_stop()
+        self.solver.request_stop()
         self.btn_stop.setEnabled(False)
         self.btn_stop.setText("正在停止...")
         if self._auto_running:
@@ -751,7 +707,7 @@ class FluentModernGUI(MSFluentWindow):
     def _run_auto_task(self, selected):
         try:
             self.solver.process_selected_tabs(selected)
-            if hasattr(self.solver, "_should_stop") and self.solver._should_stop():
+            if self.solver._should_stop():
                 self.gui_log_queue.put("\n批量处理已停止。")
             else:
                 self.gui_log_queue.put("\n全部选中任务处理完成！")
@@ -774,7 +730,7 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_quick.setText("快速处理当前页")
         self.btn_stop.setEnabled(False)
         self.btn_stop.setText("停止")
-        stopped = hasattr(self.solver, "_should_stop") and self.solver._should_stop()
+        stopped = self.solver._should_stop()
         if stopped:
             self._set_status("已停止", "批量处理已停止。", "#ffb25f")
             InfoBar.info("已停止", "批量处理已停止。", duration=1800, position=InfoBarPosition.TOP_RIGHT, parent=self)
@@ -791,8 +747,7 @@ class FluentModernGUI(MSFluentWindow):
             return
         self.gui_log_queue.put("\n开始处理当前停留的页面...")
         self._quick_running = True
-        if hasattr(self.solver, "clear_stop"):
-            self.solver.clear_stop()
+        self.solver.clear_stop()
         self.btn_quick.setEnabled(False)
         self.btn_quick.setText("处理中...")
         self.btn_scan.setEnabled(False)
@@ -808,7 +763,7 @@ class FluentModernGUI(MSFluentWindow):
         self.solver.processed_hashes.clear()
         try:
             success = self.solver.solve_current_page()
-            if hasattr(self.solver, "_should_stop") and self.solver._should_stop():
+            if self.solver._should_stop():
                 self.gui_log_queue.put("\n当前页面处理已停止。")
             elif success:
                 self.gui_log_queue.put("\n当前页面处理完成！")
@@ -832,7 +787,7 @@ class FluentModernGUI(MSFluentWindow):
             self.btn_auto.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_stop.setText("停止")
-        stopped = hasattr(self.solver, "_should_stop") and self.solver._should_stop()
+        stopped = self.solver._should_stop()
         if stopped:
             self._set_status("已停止", "当前页面处理已停止。", "#ffb25f")
             InfoBar.info("已停止", "当前页面处理已停止。", duration=1800, position=InfoBarPosition.TOP_RIGHT, parent=self)
@@ -852,7 +807,6 @@ class FluentModernGUI(MSFluentWindow):
 
     def _on_debug_toggle(self, checked=None):
         checked = self.debug_switch.isChecked() if checked is None else bool(checked)
-        self.debug_var.set(checked)
         self._globals["DEBUG_MODE"] = checked
         self.gui_log_queue.put(f"调试模式: {'开启' if checked else '关闭'}")
 

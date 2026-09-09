@@ -85,9 +85,6 @@ def save_config(data: dict):
             token = token[1:-1].strip()
         out["token_full"] = token
 
-    out.pop("learning_strategy", None)
-    out.pop("timeout", None)
-
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
     return True
@@ -206,7 +203,7 @@ class ConfigEditor(QWidget):
         title.setObjectName("fieldTitle")
         return title
 
-    def _create_input(self, key, placeholder, password=False, multiline=False):
+    def _create_input(self, key, placeholder, multiline=False):
         if multiline:
             entry = PlainTextEdit()
             entry.setFixedHeight(110)
@@ -220,8 +217,8 @@ class ConfigEditor(QWidget):
         self.entries[key] = entry
         return entry
 
-    def _add_text_row(self, form, key, title, placeholder, password=False, multiline=False):
-        entry = self._create_input(key, placeholder, password=password, multiline=multiline)
+    def _add_text_row(self, form, key, title, placeholder, multiline=False):
+        entry = self._create_input(key, placeholder, multiline=multiline)
         form.addRow(self._field_label(title), entry)
 
     def _apply_theme(self):
@@ -357,6 +354,5 @@ class ConfigEditor(QWidget):
 
 
 if __name__ == "__main__":
-    app = QApplication.instance() or QApplication(sys.argv)
     editor = ConfigEditor()
     editor.run()
