@@ -391,10 +391,12 @@ class OpenAICompatibleClient:
         print(f"    新增{ack_label}（{len(content)}字符），当前共{len(self.accumulated_passages)}份上下文")
         return True
 
-    def ask(self, prompt: str, retry_count: int = 3) -> Optional[str]:
+    def ask(self, prompt: str, retry_count: int = 3, stop_requested: Optional[threading.Event] = None) -> Optional[str]:
         """发送问题并获取回答"""
         print(f"当前ai对话历史共{len(self.conversation_history)}条")
         for attempt in range(retry_count):
+            if stop_requested is not None and stop_requested.is_set():
+                return None
             try:
                 messages = [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
@@ -470,7 +472,12 @@ class OpenAICompatibleClient:
                     print("=" * 60 + "\n")
 
                 if attempt < retry_count - 1:
-                    time.sleep((2 ** attempt) + random.random())
+                    delay = (2 ** attempt) + random.random()
+                    if stop_requested is not None:
+                        if stop_requested.wait(delay):
+                            return None
+                    else:
+                        time.sleep(delay)
                 error_msg = str(e)
                 print(f"AI调用失败: {error_msg[:50]}")  # 控制台只显示简短信息
                 logger.error(f"详细错误: {error_msg}", exc_info=True)  # 详细堆栈保存到文件
@@ -3061,8 +3068,9 @@ class DiscussionBoardHandler(ContentHandler):
 class SelfCheckHandler(ContentHandler):
     """Self-check 词汇勾选处理器"""
 
-    def __init__(self, driver):
+    def __init__(self, driver, stop_requested: threading.Event):
         self.driver = driver
+        self.stop_requested = stop_requested
 
     def can_handle(self, question: Question) -> bool:
         return question.q_type == QuestionType.SELF_CHECK
@@ -3073,6 +3081,8 @@ class SelfCheckHandler(ContentHandler):
 
         row_count = len(question.element.find_elements(By.CSS_SELECTOR, 'tbody tr.ant-table-row:not(.category-name)'))
         for row_index in range(row_count):
+            if self.stop_requested.is_set():
+                return False
             try:
                 rows = question.element.find_elements(By.CSS_SELECTOR, 'tbody tr.ant-table-row:not(.category-name)')
                 if row_index >= len(rows):
@@ -3094,7 +3104,8 @@ class SelfCheckHandler(ContentHandler):
                     continue
 
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", icon)
-                time.sleep(0.1)
+                if self.stop_requested.wait(0.1):
+                    return False
 
                 if WebDriverHelper.safe_click(self.driver, icon):
                     clicked += 1
@@ -3107,7 +3118,8 @@ class SelfCheckHandler(ContentHandler):
                     clicked += 1
                     print(f"      JS勾选: {word or clicked}")
 
-                time.sleep(0.1)
+                if self.stop_requested.wait(0.1):
+                    return False
             except Exception as e:
                 print(f"      勾选失败: {str(e)[:50]}")
                 continue
@@ -3119,9 +3131,10 @@ class SelfCheckHandler(ContentHandler):
 class VideoHandler(ContentHandler):
     """视频处理器"""
 
-    def __init__(self, driver, config: Config):
+    def __init__(self, driver, config: Config, stop_requested: threading.Event):
         self.driver = driver
         self.config = config
+        self.stop_requested = stop_requested
         self.popup_monitor_thread = None
         self.stop_monitoring = threading.Event()
 
@@ -3137,6 +3150,8 @@ class VideoHandler(ContentHandler):
 
     def _play_video_and_handle_popups(self):
         """播放视频并自动处理弹窗选择题（供外部预处理调用）"""
+        if self.stop_requested.is_set():
+            return
         video_info = self._get_video_info()
         if not video_info:
             print("      未找到视频元素")
@@ -3150,7 +3165,8 @@ class VideoHandler(ContentHandler):
         else:
             self.current_video_url = video_url
             self.video_transcript = self._transcribe_video(video_url, duration)
-
+        if self.stop_requested.is_set():
+            return
         self.stop_monitoring.clear()
         self.popup_monitor_thread = threading.Thread(
             target=self._monitor_popup_questions,
@@ -3158,12 +3174,14 @@ class VideoHandler(ContentHandler):
         )
         self.popup_monitor_thread.start()
 
-        self._play_video(duration)
-
-        print("      视频播放完成")
-        self.stop_monitoring.set()
-        if self.popup_monitor_thread.is_alive():
-            self.popup_monitor_thread.join(timeout=5)
+        try:
+            self._play_video(duration)
+            if not self.stop_requested.is_set():
+                print("      视频播放完成")
+        finally:
+            self.stop_monitoring.set()
+            if self.popup_monitor_thread.is_alive():
+                self.popup_monitor_thread.join(timeout=1)
 
     def can_handle(self, question: Question) -> bool:
         return question.q_type == QuestionType.VIDEO
@@ -3222,6 +3240,7 @@ class VideoHandler(ContentHandler):
             return ""
 
     def _play_video(self, duration: float):
+        video = None
         try:
             video = self.driver.find_element(By.TAG_NAME, 'video')
 
@@ -3241,17 +3260,24 @@ class VideoHandler(ContentHandler):
                     arguments[0].play();
                 """, video)
                 print(f"      ⏳ 等待 10 秒...")
-                time.sleep(10)
+                self.stop_requested.wait(10)
 
         except Exception as e:
             print(f"       视频播放失败: {str(e)[:50]}")
+
+        finally:
+            if self.stop_requested.is_set() and video is not None:
+                try:
+                    self.driver.execute_script("arguments[0].pause();", video)
+                except Exception:
+                    pass
 
     def _monitor_popup_questions(self):
         print("      [监视器] 开始监视弹窗...")
         check_interval = 0.5
         processed_popups = set()
 
-        while not self.stop_monitoring.is_set():
+        while not self.stop_monitoring.is_set() and not self.stop_requested.is_set():
             try:
                 popup = self._find_popup_question()
 
@@ -3259,7 +3285,8 @@ class VideoHandler(ContentHandler):
                     popup_id = self._get_popup_id(popup)
 
                     if popup_id in processed_popups:
-                        time.sleep(0.5)
+                        if self.stop_requested.wait(0.5):
+                            break
                         continue
 
                     print("      [监视器]  检测到新弹窗题目！")
@@ -3275,14 +3302,17 @@ class VideoHandler(ContentHandler):
                         answer = self._random_select(question_data)
                         print(f"      [监视器]  随机选择: {answer}")
 
+                    if self.stop_requested.is_set() or self.stop_monitoring.is_set():
+                        break
                     success = self._click_option(popup, answer)
 
                     if success:
                         print(f"      [监视器]  已选择: {answer}")
                         processed_popups.add(popup_id)
-                        time.sleep(0.5)
+                        if self.stop_requested.wait(0.5) or self.stop_monitoring.is_set():
+                            break
                         self._click_submit_if_exists(popup)
-                        time.sleep(1.0)
+                        self.stop_requested.wait(1.0)
                     else:
                         print(f"      [监视器]  点击失败: {answer}")
 
@@ -3563,7 +3593,7 @@ class VideoHandler(ContentHandler):
 
         while time.time() - start_time < max_wait:
             try:
-                if self.stop_monitoring.is_set():
+                if self.stop_requested.is_set() or self.stop_monitoring.is_set():
                     break
 
                 current = self.driver.execute_script("return arguments[0].currentTime;", video)
@@ -3578,7 +3608,8 @@ class VideoHandler(ContentHandler):
                     print(f"      播放进度: {int(current)}/{int(duration)} 秒")
                     last_progress = elapsed
 
-                time.sleep(0.5)
+                if self.stop_requested.wait(0.5):
+                    break
 
             except:
                 break
@@ -3600,8 +3631,9 @@ class VideoHandler(ContentHandler):
 class FlashcardHandler(ContentHandler):
     """单词闪卡处理器 """
 
-    def __init__(self, driver):
+    def __init__(self, driver, stop_requested: threading.Event):
         self.driver = driver
+        self.stop_requested = stop_requested
 
     def can_handle(self, question: Question) -> bool:
         return question.q_type == QuestionType.VOCABULARY_FLASHCARD
@@ -3610,8 +3642,11 @@ class FlashcardHandler(ContentHandler):
         print("     处理单词闪卡...")
         max_cards = 100
         clicked = 0
-        time.sleep(2)
+        if self.stop_requested.wait(2):
+            return False
         for i in range(max_cards):
+            if self.stop_requested.is_set():
+                return False
             try:
                 next_btn = self._find_next_button()
                 if not next_btn:
@@ -3630,13 +3665,15 @@ class FlashcardHandler(ContentHandler):
                     "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
                     next_btn
                 )
-                time.sleep(0.5)
+                if self.stop_requested.wait(0.5):
+                    return False
                 try:
                     next_btn.click()
                 except:
                     self.driver.execute_script("arguments[0].click();", next_btn)
                 clicked += 1
-                time.sleep(0.5)
+                if self.stop_requested.wait(0.5):
+                    return False
                 current_word = self.driver.find_element(By.XPATH,
                                                         '//*[@id="question-vocabulary-base-id"]/div/div[2]/div')
                 print(f" 学习{current_word.text}")
@@ -3644,7 +3681,8 @@ class FlashcardHandler(ContentHandler):
                 error_msg = str(e)
                 print(f"      处理闪卡失败: {error_msg[:50]}")
                 logger.error(f"详细错误: {error_msg}", exc_info=True)
-                time.sleep(1)
+                if self.stop_requested.wait(1):
+                    return False
                 continue
 
         print(f"     单词闪卡完成，共 {clicked} 个")
@@ -3678,21 +3716,21 @@ class AISolver:
     def __init__(self, driver, config: Config):
         self.driver = driver
         self.config = config
+        self.stop_requested = threading.Event()
         self.ai_client = OpenAICompatibleClient(self.config)
         self.parser = QuestionParser(driver)
         self.prompt_builder = PromptBuilder(self.ai_client)
         self.executor = AnswerExecutor(driver)
-        self.video_handler = VideoHandler(driver, self.config)
+        self.video_handler = VideoHandler(driver, self.config, self.stop_requested)
         self.content_handlers: List[ContentHandler] = [
             self.video_handler,
-            FlashcardHandler(driver),
-            SelfCheckHandler(driver),
+            FlashcardHandler(driver, self.stop_requested),
+            SelfCheckHandler(driver, self.stop_requested),
             DiscussionBoardHandler(driver),
         ]
         self.processed_hashes: set = set()
         self._processed_video_tabs: set = set()
         self._processed_audio_tabs: set = set()
-        self.stop_requested = threading.Event()
 
     def request_stop(self):
         self.stop_requested.set()
@@ -3732,7 +3770,8 @@ class AISolver:
 
                 if task_idx > 0:
                     self.driver.get(course_home_url)
-                    time.sleep(3)
+                    if self.stop_requested.wait(3):
+                        break
                     self.ai_client.force_reset(f"{chapter_name}_{tab_name}")
 
                 if '_unit_idx' in tab:
@@ -3742,33 +3781,50 @@ class AISolver:
                                 (By.CLASS_NAME, 'unipus-tabs_unitTabScrollContainer__fXBxR'))
                         )
                         unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
-                        if tab['_unit_idx'] < len(unit_tabs):
-                            self.driver.execute_script("arguments[0].click();", unit_tabs[tab['_unit_idx']])
-                            time.sleep(1.2)
+                        if tab['_unit_idx'] >= len(unit_tabs):
+                            print("    目标Unit不存在，跳过")
+                            continue
+                        if self._should_stop():
+                            break
+                        self.driver.execute_script("arguments[0].click();", unit_tabs[tab['_unit_idx']])
+                        if self.stop_requested.wait(1.2):
+                            break
                     except Exception as e:
                         print(f"    切换Unit失败: {str(e)[:50]}")
+                        continue
 
                 chapter_clicked = False
                 try:
                     chapters = self.driver.find_elements(
                         By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN'
                     )
+                    name_occurrence = 0
                     for ch in chapters:
+                        if self._should_stop():
+                            break
                         try:
                             name_elem = ch.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
                             if name_elem.text.strip() == tab_name:
-                                self.driver.execute_script("arguments[0].click();", name_elem)
-                                chapter_clicked = True
-                                break
+                                if name_occurrence == tab.get('_name_occurrence', 0):
+                                    if self._should_stop():
+                                        break
+                                    self.driver.execute_script("arguments[0].click();", name_elem)
+                                    chapter_clicked = True
+                                    break
+                                name_occurrence += 1
                         except:
                             continue
                 except Exception as e:
                     print(f"    重新定位章节失败: {str(e)[:50]}")
 
+                if self._should_stop():
+                    break
                 if chapter_clicked:
-                    time.sleep(3)
+                    if self.stop_requested.wait(3):
+                        break
                     self._process_tab_with_accumulation(tab_name, task_idx, 0)
-                    time.sleep(2)
+                    if self.stop_requested.wait(2):
+                        break
                 else:
                     print(f"  点击章节失败，跳过")
 
@@ -3784,14 +3840,17 @@ class AISolver:
                 l1_tab = level1_tabs[l1_idx]
                 print(f"\n  [{task_idx+1}/{len(selected_tabs)}] 一级Tab: {l1_tab['title']}")
 
+                if self._should_stop():
+                    break
                 if not WebDriverHelper.safe_click(self.driver, l1_tab['element']):
                     print(f"  点击一级Tab失败，跳过")
                     continue
-                time.sleep(1.5)
-
+                if self.stop_requested.wait(1.5):
+                    break
                 if l2_idx < 0:
                     self._process_tab_with_accumulation(l1_tab['title'], l1_idx, 0)
-                    time.sleep(2)
+                    if self.stop_requested.wait(2):
+                        break
                 else:
                     level2_tabs = self._get_level2_tabs()
                     if l2_idx >= len(level2_tabs):
@@ -3801,26 +3860,36 @@ class AISolver:
                     l2_tab = level2_tabs[l2_idx]
                     print(f"    二级Tab: {l2_tab['title']}")
 
+                    if self._should_stop():
+                        break
                     if not WebDriverHelper.safe_click(self.driver, l2_tab['element']):
                         print(f"  点击二级Tab失败，跳过")
                         continue
-                    time.sleep(1.5)
-
+                    if self.stop_requested.wait(1.5):
+                        break
                     combined_name = f"{l1_tab['title']}_{l2_tab['title']}"
                     self._process_tab_with_accumulation(combined_name, l1_idx, l2_idx)
-                    time.sleep(2)
-
+                    if self.stop_requested.wait(2):
+                        break
         print(f"\n{'=' * 60}")
-        print(f"全部 {len(selected_tabs)} 个任务处理完毕")
+        print("批量处理已停止" if self._should_stop() else f"全部 {len(selected_tabs)} 个任务处理完毕")
         print(f"{'=' * 60}")
 
     def _process_tab_with_accumulation(self, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
         """处理Tab - 累积原文模式，包含视频/音频预处理"""
 
+        if self._should_stop():
+            return False
         self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx)
+        if self._should_stop():
+            return False
         self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx)
+        if self._should_stop():
+            return False
 
         current_passage = self._extract_passage()
+        if self._should_stop():
+            return False
         if current_passage:
             self.ai_client.add_passage_if_new(current_passage)
 
@@ -3829,6 +3898,8 @@ class AISolver:
         )
 
     def _process_current_tab_content(self, chapter_name: str, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
+        if self._should_stop():
+            return False
         direction_part = self._generate_content_hash_from_direction()
         if direction_part == "empty":
             direction_part = "no_direction"
@@ -3853,8 +3924,14 @@ class AISolver:
                 return False
 
             self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx)
+            if self._should_stop():
+                return False
             self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx)
+            if self._should_stop():
+                return False
             questions, directions = self.parser.parse_all()
+            if self._should_stop():
+                return False
             print(f"\n    处理第 {page_num} 页题目...")
             print(f"    找到 {len(questions)} 个可见题目")
 
@@ -3869,10 +3946,16 @@ class AISolver:
             special_handled = False
             self_check_handled = False
             for q in questions:
+                if self._should_stop():
+                    return False
                 for handler in self.content_handlers:
+                    if self._should_stop():
+                        return False
                     if handler.can_handle(q):
                         print(f"     使用 {handler.__class__.__name__} 处理")
                         handler.handle(q)
+                        if self._should_stop():
+                            return False
                         special_handled = True
                         if q.q_type == QuestionType.SELF_CHECK:
                             self_check_handled = True
@@ -3891,12 +3974,17 @@ class AISolver:
             if normal_questions:
                 print(f"    共 {len(normal_questions)} 道题目需要回答")
                 prompt = self.prompt_builder.build(normal_questions, directions)
-                ai_response = self.ai_client.ask(prompt)
-
+                if self._should_stop():
+                    return False
+                ai_response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+                if self._should_stop():
+                    return False
                 if ai_response:
                     success_count = 0
 
                     for q in normal_questions:
+                        if self._should_stop():
+                            return False
                         if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
                                         QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
                                         QuestionType.VOCABULARY_TEST]:
@@ -3916,20 +4004,27 @@ class AISolver:
                     total_answered += success_count
                     print(f"    本页成功填写 {success_count}/{len(normal_questions)} 题")
 
+            if self._should_stop():
+                return False
             if self_check_handled and not normal_questions and self.executor.submit():
                 self._wait_for_submit_complete()
+                if self._should_stop():
+                    return False
                 self._handle_confirm_dialog()
-
             next_btn = self._find_next_question_button()
             if next_btn:
                 print(f"    点击下一题...")
                 pre_click_signature = current_signature
 
+                if self._should_stop():
+                    return False
                 if not WebDriverHelper.safe_click(self.driver, next_btn):
                     print(f"    点击下一题失败")
                     break
 
                 if not self._wait_for_content_change(pre_click_signature, timeout=5):
+                    if self._should_stop():
+                        return False
                     print(f"    内容未变化，可能已到最后一页")
                     break
 
@@ -3940,10 +4035,13 @@ class AISolver:
                     break
                 continue
 
+            if self._should_stop():
+                return False
             if normal_questions and self.executor.submit():
                 self._wait_for_submit_complete()
+                if self._should_stop():
+                    return False
                 self._handle_confirm_dialog()
-
             print(f"    没有更多题目了")
             break
         print(f"    总共回答 {total_answered} 题")
@@ -4004,7 +4102,7 @@ class AISolver:
         )
 
         print(f"\n{'=' * 60}")
-        print(" 当前页面处理完毕")
+        print(" 当前页面处理已停止" if self._should_stop() else " 当前页面处理完毕")
         print(f"{'=' * 60}")
         return success
 
@@ -4166,10 +4264,13 @@ class AISolver:
             buttons = self.driver.find_elements(By.TAG_NAME, 'button')
             for btn in buttons:
                 text = btn.text.strip()
+                if self._should_stop():
+                    return False
                 if any(k in text for k in ['确认', '确定', '我知道了', '继续', 'OK']):
                     if btn.is_displayed():
                         btn.click()
-                        time.sleep(1)
+                        if self.stop_requested.wait(1):
+                            return False
                         return True
         except:
             pass
@@ -4178,6 +4279,8 @@ class AISolver:
 
     def _preprocess_audio_if_needed(self, tab_name: str, l1_idx: int, l2_idx: int):
         """检测并预处理音频：下载+转录，将转录文本注入 AI 上下文"""
+        if self._should_stop():
+            return
         if self._has_video_on_page():
             return
 
@@ -4197,6 +4300,8 @@ class AISolver:
             print("   检测到音频，开始预处理（下载+转录）...")
             transcript = self.video_handler.transcriber.transcribe(audio_url, language="en")
 
+            if self._should_stop():
+                return
             if transcript:
                 self.ai_client.add_audio_transcript_if_new(transcript)
                 print(f"   已将音频转录（{len(transcript)}字符）加入上下文")
@@ -4253,6 +4358,8 @@ class AISolver:
 
     def _preprocess_video_if_needed(self, tab_name: str, l1_idx: int, l2_idx: int):
         """检测并预处理视频：播放、转录、处理弹窗，将转录文本注入 AI 上下文"""
+        if self._should_stop():
+            return
         if not self._has_video_on_page():
             return
 
@@ -4266,6 +4373,8 @@ class AISolver:
             print("   检测到视频，开始预处理（播放+转录）...")
             self.video_handler._play_video_and_handle_popups()
 
+            if self._should_stop():
+                return
             transcript = self.video_handler.video_transcript
             if transcript:
                 self.ai_client.add_video_transcript_if_new(transcript)
@@ -4294,10 +4403,11 @@ class AISolver:
           2. 或等待 '提交成功' / '保存成功' 等提示出现
           3. 最少睡眠 1.5 秒兜底
         """
-        time.sleep(1.5)  # 最小等待：服务端至少需要 1-2 秒处理
+        if self.stop_requested.wait(1.5):
+            return
         start = time.time()
 
-        while time.time() - start < timeout:
+        while time.time() - start < timeout and not self._should_stop():
             try:
                 submit_btn = self._find_visible_submit_button()
                 if submit_btn is None:
@@ -4312,7 +4422,8 @@ class AISolver:
             except:
                 pass
 
-            time.sleep(0.5)
+            if self.stop_requested.wait(0.5):
+                return
 
         print(f"   等待超时（{timeout}s），继续执行")
 
@@ -4342,7 +4453,7 @@ class AISolver:
         start_time = time.time()
         check_interval = 0.5
 
-        while time.time() - start_time < timeout:
+        while time.time() - start_time < timeout and not self._should_stop():
             try:
                 questions, _ = self.parser.parse_all()
                 current_signature = self._generate_questions_signature(questions)
@@ -4354,7 +4465,8 @@ class AISolver:
             except Exception as e:
                 logger.debug(f"等待内容变化时出错: {e}")
 
-            time.sleep(check_interval)
+            if self.stop_requested.wait(check_interval):
+                return False
 
         print(f"         等待内容变化超时")
         return False

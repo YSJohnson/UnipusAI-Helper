@@ -698,11 +698,11 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_stop.setEnabled(False)
         self.btn_stop.setText("正在停止...")
         if self._auto_running:
-            self._set_status("正在停止", "会在当前步骤结束后停止批量处理。", "#ffb25f")
-            self.gui_log_queue.put("已请求停止批量处理，会在当前步骤结束后退出。")
+            self._set_status("正在停止", "正在中断处理；进行中的请求需等待返回。", "#ffb25f")
+            self.gui_log_queue.put("已请求停止批量处理，不再继续填写或提交。")
         else:
-            self._set_status("正在停止", "会在当前步骤结束后停止当前页处理。", "#ffb25f")
-            self.gui_log_queue.put("已请求停止当前页处理，会在当前步骤结束后退出。")
+            self._set_status("正在停止", "正在中断处理；进行中的请求需等待返回。", "#ffb25f")
+            self.gui_log_queue.put("已请求停止当前页处理，不再继续填写或提交。")
 
     def _run_auto_task(self, selected):
         try:
