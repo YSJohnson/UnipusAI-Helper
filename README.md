@@ -53,7 +53,7 @@ UnipusAI-Helper/
 ## 运行环境
 
 - Windows 10/11
-- Python 3.8+
+- Python 3.10 及以上（3.12 与 3.13 已验证）
 - Microsoft Edge
 - FFmpeg
 - OpenAI 兼容大模型接口
