@@ -3796,14 +3796,14 @@ class AISolver:
                 chapter_clicked = False
                 try:
                     chapters = self.driver.find_elements(
-                        By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN'
+                        By.CSS_SELECTOR, '[class*="courses-unit_taskItemInnerLayout__"], [class*="courses-unit_nodeItemInnerLayout__"]'
                     )
                     name_occurrence = 0
                     for ch in chapters:
                         if self._should_stop():
                             break
                         try:
-                            name_elem = ch.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
+                            name_elem = ch.find_element(By.CSS_SELECTOR, '[class*="courses-unit_taskTypeName__"], [class*="courses-unit_nodeTypeName__"]')
                             if name_elem.text.strip() == tab_name:
                                 if name_occurrence == tab.get('_name_occurrence', 0):
                                     if self._should_stop():
