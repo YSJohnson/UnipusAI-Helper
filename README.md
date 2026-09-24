@@ -19,7 +19,7 @@
 
 ## 简介
 
-`UnipusAI-Helper` 是从早期 `UnipusAI_Plus` 重构而来的桌面版工具，当前版本为 `3.5.0`，主程序为 `UnipusAI_Helper.py`，配置编辑器为 `config_editor.py`，界面为 Fluent 风格。项目重点在于更稳定的 GUI 体验、多任务的批量处理、单页面的手动处理。
+`UnipusAI-Helper` 是从早期 `UnipusAI_Plus` 重构而来的桌面版工具，当前版本为 `3.6.0`，主程序为 `UnipusAI_Helper.py`，配置编辑器为 `config_editor.py`，界面为 Fluent 风格。项目重点在于更稳定的 GUI 体验、多任务的批量处理、单页面的手动处理。
 
 ---
 
@@ -58,38 +58,30 @@ UnipusAI-Helper/
 - FFmpeg
 - OpenAI 兼容大模型接口
 
-安装依赖：
-
-```bash
-pip install -r requirements.txt
-```
+> [!IMPORTANT]
+> 从v3.5之后不再提供Windows exe打包。项目依赖本地 Whisper 和 PyTorch，打包后体积较大，单文件程序还存在启动缓慢及 DLL 兼容风险。请克隆仓库并通过 Python 源码运行；首次启动本地语音识别时还可能下载 Whisper `base` 模型，请预留网络流量和磁盘空间。
 
 ---
 
 ## 使用方法
 
-### 方式一：直接下载 Release（适合小白）
+### 源码运行
 
-如果只是使用，不打算自己改代码，直接在 GitHub 的 `Releases` 页面下载打包好的主程序和配置编辑器即可。
-
-1. 下载并解压发布包。
-2. 运行配置编辑器并填写配置。
-3. 启动主程序。
-
-### 方式二：源码运行
-
-```bash
+```powershell
 git clone https://github.com/YSJohnson/UnipusAI-Helper.git
 cd UnipusAI-Helper
-pip install -r requirements.txt
-python config_editor.py
-python UnipusAI_Helper.py
+py -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe config_editor.py
+.venv\Scripts\python.exe UnipusAI_Helper.py
 ```
+
+如果系统没有 `py` 命令，可将创建虚拟环境的命令改为 `python -m venv .venv`。先运行配置编辑器生成 `config.json`，保存后再启动主程序。
 
 如需跳过环境检查：
 
-```bash
-python UnipusAI_Helper.py --skip-check
+```powershell
+.venv\Scripts\python.exe UnipusAI_Helper.py --skip-check
 ```
 
 ---
@@ -113,35 +105,35 @@ python UnipusAI_Helper.py --skip-check
 }
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `username` | U 校园 AI 版账号 |
-| `password` | U 校园 AI 版密码 |
-| `url` | 登录入口，默认即可 |
-| `api_key` | 大模型接口密钥 |
-| `base_url` | OpenAI 兼容接口地址 |
-| `model` | 模型名称 |
-| `max_tokens` | 最大 token 数，默认即可 |
-| `temperature` | 生成温度，默认即可 |
-| `token_full` | 浏览器本地存储中的 `__token`，用于绕过平台的反作弊系统 |
-| `debug_mode` | 是否开启调试日志 |
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `username` | 是 | U 校园 AI 版账号，用于自动登录 |
+| `password` | 是 | U 校园 AI 版密码，用于自动登录 |
+| `url` | 否 | 登录入口，留空或保持默认值即可 |
+| `api_key` | 是 | 大模型接口密钥 |
+| `base_url` | 是 | OpenAI 兼容接口地址，例如 `https://api.siliconflow.cn/v1` |
+| `model` | 是 | 接口支持的模型名称 |
+| `max_tokens` | 否 | 最大 token 数，保持配置编辑器生成的默认数值即可 |
+| `temperature` | 否 | 生成温度，保持默认数值即可 |
+| `token_full` | 否 | 认证兜底；支持旧版完整 `__token` JSON 或 U校园 5.0 的 JWT，正常登录时留空 |
+| `debug_mode` | 否 | 是否开启调试日志，默认 `false` |
 
-> 脚本不限制大模型提供商，所以理论上所有支持 OpenAI 兼容接口的提供商都支持。目前测试过 DeepSeek、硅基流动、Kimi 兼容接口。
 
-## 获取 `token_full`
 
-1. 在浏览器中手动登录 U 校园 AI 版。
-2. 打开 F12 开发者工具，进入 `Console` / `控制台`。
-3. 输入并执行：
+## 获取 `token_full`（可选）
+从3.6.0版本之后不再强制需要手动获取token_full 程序会自己处理 此处仅保留为降级备选方案
 
-```javascript
-localStorage.getItem('__token')
-```
+正常情况下程序会保留本次 SSO 登录生成的认证信息，`token_full` 留空即可。仅当正常登录后仍提示缺少认证信息时，再手动配置以下任一种值：
 
-4. 将结果填写到配置文件的 `token_full`。
+`token_full` 是沿用旧版本的字段名，保存的是认证凭据，并不是独立的反作弊开关。程序仍需完成账号密码、验证码和服务端 SSO 校验；登录成功后优先使用平台签发的 `jwt` cookie。
+
+- 旧版课程页的完整 token：登录后执行 `localStorage.getItem('__token')`。
+- U校园 5.0 门户的 JWT：登录 `https://ucloud.unipus.cn/` 后执行 `JSON.parse(localStorage.getItem('PORTAL_STATE_PERSISTENT')).Authorization`。
+
+将控制台返回的结果直接粘贴到配置编辑器。程序会区分两种格式，不会把裸 JWT 写入只接受完整 JSON 对象的旧版 `__token`。
 
 > [!IMPORTANT]
-> 由于 token 的值必须是字符串类型，获取的 token_full 不能直接使用，你必须在所有内部的双引号前加反斜杠（`\`）进行转义，否则会破坏 JSON 的语法结构。如果使用配置编辑器 `config_editor.py` 保存配置，程序会自动处理 JSON 转义问题；如果手动编辑 `config.json`，需要特别注意这一点。
+> 手动编辑 `config.json` 时还需保证内容是合法 JSON；建议直接使用配置编辑器可自动处理字符串转义。
 
 ---
 
@@ -235,6 +227,16 @@ localStorage.getItem('__token')
 
 ## 更新日志
 
+### 2026-09-24
+
+- 版本号更新至 `3.6.0`，适配 U校园 AI版 5.0。
+- 修复 U校园 5.0 SSO 登录流程：等待可交互的账号和密码输入框，并点击可视的协议勾选控件，避免 `element not interactable`。
+- 修复登录后停留在 `home?ticket=...` 并持续加载的问题：识别平台签发的 `jwt` cookie，随后进入不带一次性 ticket 的 `/home`。
+- 调整认证状态同步：优先保留本次登录会话，兼容旧版完整 `__token` 和 5.0 JWT，避免空值或过期配置覆盖有效认证。
+- 将 `token_full` 调整为可选认证兜底；正常 SSO 登录不再要求手动复制 token。
+- 登录地址未显示账号表单时自动回退默认 SSO 入口。
+- 修复普通运行信息被错误记录为 `ERROR` 的日志级别问题，并补充登录认证回归检查。
+
 ### 2026-07-05
 
 - 版本号更新至 `3.5.0`，窗口标题和界面版本标识改为读取统一版本常量。
@@ -264,7 +266,8 @@ localStorage.getItem('__token')
 
 ### 登录后白屏或状态异常
 
-- 通常是 `token_full` 过期或格式错误，需要重新获取并更新。
+- 程序会等待 SSO 完成换票，并自动移除已消费的一次性 `ticket` 后再进入 `/home`。
+- 若仍提示认证失败，先将 `token_full` 留空重试；仅在需要时按上文重新获取认证值。
 
 ### API 调用失败
 
@@ -281,8 +284,15 @@ localStorage.getItem('__token')
 
 ## 致谢
 
-感谢优秀的开源土壤。感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者：Zzj-klwgxdz。  
-感谢原作者提供的强大解析器框架与思路，特别是其针对 U 校园 AI 版的反作弊绕过机制。
+感谢优秀的开源土壤。
+感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者：Zzj-klwgxdz。这是纯命令行 + 原生 HTTP 实现的Rust版U校园 AI 版刷课脚本。  
+感谢原作者提供的强大解析器框架与思路，特别是其针对 U 校园 AI 版登录认证状态的处理机制。
+
+---
+
+## Star⭐ 承蒙厚爱
+
+[![Star History Chart](https://api.star-history.com/svg?repos=YSJohnson/UnipusAI-Helper&type=Date)](https://www.star-history.com/#YSJohnson/UnipusAI-Helper&Date)
 
 ---
 

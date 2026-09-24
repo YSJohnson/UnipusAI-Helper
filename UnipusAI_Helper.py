@@ -27,7 +27,11 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.5.0"
+APP_VERSION = "3.6.0"
+
+DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
+UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
+
 
 def setup_logging():
     """配置日志系统：控制台简洁输出 + 文件详细记录 + UI队列同步"""
@@ -84,9 +88,9 @@ def setup_logging():
 
         def write(self, text):
             if text.strip():
-                if any(x in text for x in ['', 'Error', 'Exception', 'Traceback']):
+                if any(x in text for x in ['Error', 'Exception', 'Traceback']):
                     self.logger.error(text.strip())
-                elif any(x in text for x in ['', 'Warning']):
+                elif 'Warning' in text:
                     self.logger.warning(text.strip())
                 else:
                     self.logger.info(text.strip())
@@ -119,16 +123,58 @@ class Config:
         global DEBUG_MODE
         DEBUG_MODE = data.get("debug_mode", False)
         return cls(
-            url=data.get("url"),
+            url=data.get("url") or DEFAULT_LOGIN_URL,
             username=data.get("username"),
             password=data.get("password"),
-            token_full=data.get("token_full"),
+            token_full=data.get("token_full") or "",
             api_key=data.get("api_key"),
             base_url=data.get("base_url", "https://api.moonshot.cn/v1"),
             model=data.get("model", "kimi-k2-turbo-preview"),
             temperature=data.get("temperature", 0.3),
             max_tokens=data.get("max_tokens", 2000),
         )
+
+
+def _parse_auth_token(raw: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Return (legacy __token JSON, JWT) for either supported config format."""
+    parsed = raw if isinstance(raw, dict) else None
+    token = "" if parsed is not None else str(raw or "").strip()
+
+    for _ in range(2):
+        if parsed is not None or not token:
+            break
+        try:
+            decoded = json.loads(token)
+        except (TypeError, ValueError):
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+                token = token[1:-1].strip()
+                continue
+            break
+        if isinstance(decoded, str):
+            token = decoded.strip()
+        else:
+            parsed = decoded
+
+    if isinstance(parsed, dict):
+        token_info = parsed.get("tokenInfo")
+        jwt = parsed.get("jwt") or parsed.get("Authorization")
+        if not jwt and isinstance(token_info, dict):
+            jwt = token_info.get("jwt")
+        if isinstance(jwt, str) and jwt.lower().startswith("bearer "):
+            jwt = jwt[7:].strip()
+        if not isinstance(jwt, str) or jwt.count(".") != 2:
+            return None, None
+
+        legacy_keys = {"rt", "jwt", "rtExpire", "jwtExpire"}
+        legacy = json.dumps(parsed, ensure_ascii=False, separators=(",", ":")) \
+            if legacy_keys.issubset(parsed) else None
+        return legacy, jwt
+
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    if token.count(".") == 2 and all(token.split(".")):
+        return None, token
+    return None, None
 
 
 class QuestionType(Enum):
@@ -4590,33 +4636,60 @@ class UCampusBot:
 
     def _login(self) -> bool:
         try:
-            self.driver.get(self.config.url)
-            time.sleep(3)
-            username = WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, '//*[@id="username"]')))
-            password = self.driver.find_element(By.XPATH, '//*[@id="password"]')
-            agreement_check = WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, '//*[@id="agreement"]')))
-            username.send_keys(self.config.username)
-            password.send_keys(self.config.password)
-            if not agreement_check.is_selected():
-                agreement_check.click()
+            login_url = self.config.url or DEFAULT_LOGIN_URL
+            self.driver.get(login_url)
+            try:
+                username = WebDriverWait(self.driver, 8).until(
+                    EC.element_to_be_clickable((By.ID, 'username')))
+            except TimeoutException:
+                authenticated = False
+                if self.driver.current_url.startswith("https://ucloud.unipus.cn/"):
+                    try:
+                        WebDriverWait(self.driver, 45).until(self._has_live_auth)
+                        authenticated = True
+                    except TimeoutException:
+                        pass
 
-            login_btn = self.driver.find_element(By.XPATH,
-                                                 '//*[@id="rc-tabs-0-panel-1"]/form/div[4]/div/div/div/div/button')
-            login_btn.click()
+                if authenticated:
+                    username = None
+                    gui_log_queue.put(" 检测到已有 U校园 登录会话，继续使用当前会话。")
+                elif login_url != DEFAULT_LOGIN_URL:
+                    gui_log_queue.put(" 登录地址未显示账号表单，正在使用兼容登录入口...")
+                    self.driver.get(DEFAULT_LOGIN_URL)
+                    username = WebDriverWait(self.driver, 120).until(
+                        EC.element_to_be_clickable((By.ID, 'username')))
+                else:
+                    raise
 
-            gui_log_queue.put(" 如果遇到验证码，请在弹出的浏览器中手动进行人机验证。")
-            gui_log_queue.put("⏳ 正在智能轮询登录状态...")
+            if username is not None:
+                password = WebDriverWait(self.driver, 20).until(
+                    EC.element_to_be_clickable((By.ID, 'password')))
+                agreement_check = self.driver.find_element(By.ID, 'agreement')
+                username.clear()
+                username.send_keys(self.config.username)
+                password.clear()
+                password.send_keys(self.config.password)
+                if not agreement_check.is_selected():
+                    agreement_control = WebDriverWait(self.driver, 20).until(
+                        EC.element_to_be_clickable((
+                            By.CSS_SELECTOR,
+                            'label.usso-agreements-checkbox .usso-checkbox'
+                        )))
+                    agreement_control.click()
 
-            for _ in range(60):
-                time.sleep(2)
-                current_url = self.driver.current_url
-                if "course" in current_url or "home" in current_url or "space" in current_url or "student" in current_url:
-                    break
+                login_btn = WebDriverWait(self.driver, 20).until(
+                    EC.element_to_be_clickable((
+                        By.CSS_SELECTOR,
+                        '[id^="rc-tabs-"][id$="-panel-1"] form button'
+                    )))
+                login_btn.click()
+
+                gui_log_queue.put(" 如果遇到验证码，请在弹出的浏览器中手动进行人机验证。")
+                gui_log_queue.put("⏳ 正在智能轮询登录状态...")
+                WebDriverWait(self.driver, 120).until(
+                    lambda driver: driver.current_url.startswith("https://ucloud.unipus.cn/"))
 
             self.anti_anti_cheat()
-            time.sleep(3)
 
             try:
                 zhidaole_button = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.XPATH,
@@ -4642,10 +4715,117 @@ class UCampusBot:
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return False
 
+    def _sync_auth_state(self, legacy_token: Optional[str], configured_jwt: Optional[str]) -> Dict[str, Any]:
+        """同步旧版存储、新版门户状态和共享 JWT cookie。"""
+        cookie = self.driver.get_cookie("jwt") or {}
+        cookie_jwt = cookie.get("value") or ""
+        return self.driver.execute_script("""
+            const configuredLegacy = arguments[0];
+            const configuredJwt = arguments[1];
+            const cookieJwt = arguments[2] || '';
+            let legacy = null;
+            const legacyRaw = localStorage.getItem('__token');
+            if (legacyRaw) {
+                try { legacy = JSON.parse(legacyRaw); }
+                catch (_) { localStorage.removeItem('__token'); }
+            }
+
+            let portal = {};
+            try { portal = JSON.parse(localStorage.getItem('PORTAL_STATE_PERSISTENT') || '{}') || {}; }
+            catch (_) {}
+
+            const liveJwt = legacy && legacy.jwt;
+            const portalJwt = portal.Authorization || (portal.tokenInfo && portal.tokenInfo.jwt);
+            const existingJwt = liveJwt || portalJwt || cookieJwt || '';
+            let jwt = existingJwt || configuredJwt || '';
+            let source = liveJwt ? 'legacy' : portalJwt ? 'portal' : cookieJwt ? 'cookie' : configuredJwt ? 'configured' : 'none';
+
+            if (!existingJwt && configuredLegacy) {
+                try {
+                    legacy = JSON.parse(configuredLegacy);
+                    jwt = legacy.jwt || jwt;
+                    source = 'configured-legacy';
+                    localStorage.setItem('__token', JSON.stringify(legacy));
+                } catch (_) {}
+            }
+
+            if (jwt) {
+                if (!portalJwt) {
+                    portal.Authorization = jwt;
+                    portal.tokenInfo = Object.assign({}, portal.tokenInfo || {}, {jwt});
+                    localStorage.setItem('PORTAL_STATE_PERSISTENT', JSON.stringify(portal));
+                }
+                if (!cookieJwt) {
+                    document.cookie = 'jwt=' + jwt + '; domain=.unipus.cn; path=/; Secure; SameSite=None';
+                }
+            }
+
+            return {
+                source,
+                hasLegacy: !!(legacy && legacy.jwt),
+                hasPortal: !!(portal.Authorization || (portal.tokenInfo && portal.tokenInfo.jwt))
+            };
+        """, legacy_token, configured_jwt, cookie_jwt)
+
+    @staticmethod
+    def _has_live_auth(driver) -> bool:
+        cookie = driver.get_cookie("jwt") or {}
+        if cookie.get("value"):
+            return True
+        try:
+            return bool(driver.execute_script("""
+                let legacy = null;
+                let portal = null;
+                try { legacy = JSON.parse(localStorage.getItem('__token') || 'null'); } catch (_) {}
+                try { portal = JSON.parse(localStorage.getItem('PORTAL_STATE_PERSISTENT') || 'null'); } catch (_) {}
+                return !!((legacy && legacy.jwt) ||
+                    (portal && (portal.Authorization || (portal.tokenInfo && portal.tokenInfo.jwt))));
+            """))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _home_ready(driver) -> bool:
+        try:
+            cookie = driver.get_cookie("jwt") or {}
+            return bool(driver.execute_script("""
+                if (location.hostname !== 'ucloud.unipus.cn') return false;
+                let legacy = null;
+                let portal = null;
+                try { legacy = JSON.parse(localStorage.getItem('__token') || 'null'); } catch (_) {}
+                try { portal = JSON.parse(localStorage.getItem('PORTAL_STATE_PERSISTENT') || 'null'); } catch (_) {}
+                const loading = document.querySelector('#root-loading');
+                const loadingVisible = loading && getComputedStyle(loading).display !== 'none';
+                const root = document.querySelector('#root');
+                const rendered = !!(root && (root.innerText || '').trim().length > 20);
+                const authenticated = !!((legacy && legacy.jwt) ||
+                    (portal && (portal.Authorization || (portal.tokenInfo && portal.tokenInfo.jwt))) || arguments[0]);
+                return authenticated && rendered && !loadingVisible;
+            """, cookie.get("value") or ""))
+        except Exception:
+            return False
+
     def anti_anti_cheat(self):
-        """注入token绕过防作弊检测"""
-        self.driver.execute_script('window.localStorage.setItem("__token", `{}`);'.format(self.config.token_full))
-        self.driver.get("https://ucloud.unipus.cn/home")
+        """优先使用本次 SSO 会话，并兼容旧版完整 token 与新版 JWT。"""
+        legacy_token, configured_jwt = _parse_auth_token(self.config.token_full)
+        if self.config.token_full and not configured_jwt:
+            print(" 配置的 token_full 格式无效，改用本次登录会话")
+
+        try:
+            WebDriverWait(self.driver, 45).until(self._has_live_auth)
+        except TimeoutException:
+            if not configured_jwt:
+                raise
+            print(" 未检测到实时登录凭据，使用配置中的 token")
+
+        state = self._sync_auth_state(legacy_token, configured_jwt)
+        print(f" 登录认证来源: {state.get('source', 'unknown')}")
+
+        # Remove the one-time ticket from the URL; a consumed ticket can leave the SPA loading forever.
+        self.driver.get(UCLOUD_HOME_URL)
+        WebDriverWait(self.driver, 45).until(self._home_ready)
+        self._sync_auth_state(legacy_token, configured_jwt)
+
 
 
 class PopupWatcher:

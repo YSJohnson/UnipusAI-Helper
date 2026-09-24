@@ -1,8 +1,89 @@
-from types import SimpleNamespace
+import json
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import UnipusAI_Helper as app
+
+
+def test_auth_token_formats_are_kept_separate():
+    jwt = "header.payload.signature"
+    legacy = {
+        "rt": "refresh",
+        "jwt": jwt,
+        "rtExpire": 1,
+        "jwtExpire": 2,
+        "effectiveTime": 3,
+        "links": {},
+    }
+
+    legacy_json, parsed_jwt = app._parse_auth_token(json.dumps(legacy))
+    assert json.loads(legacy_json) == legacy
+    assert parsed_jwt == jwt
+
+    assert app._parse_auth_token(f"Bearer {jwt}") == (None, jwt)
+    assert app._parse_auth_token(json.dumps(jwt)) == (None, jwt)
+    assert app._parse_auth_token(json.dumps(json.dumps(legacy))) == (
+        json.dumps(legacy, separators=(",", ":")), jwt)
+    assert app._parse_auth_token(json.dumps({"Authorization": jwt})) == (None, jwt)
+    assert app._parse_auth_token("not-a-token") == (None, None)
+
+
+
+def test_cookie_is_live_auth_signal_without_configured_token():
+    driver = Mock()
+    driver.get_cookie.return_value = {"value": "header.payload.signature"}
+    driver.execute_script.return_value = False
+
+    assert app.UCampusBot._has_live_auth(driver) is True
+    driver.execute_script.assert_not_called()
+
+
+def test_custom_portal_url_falls_back_to_sso():
+    driver = Mock(current_url="https://ucloud.unipus.cn/")
+
+    def navigate(url):
+        driver.current_url = url
+
+    driver.get.side_effect = navigate
+    username = Mock()
+    password = Mock()
+    agreement = Mock()
+    agreement.is_selected.return_value = False
+    agreement_control = Mock()
+    login_button = Mock()
+    driver.find_element.return_value = agreement
+
+    wait = Mock()
+    wait.until.side_effect = [
+        app.TimeoutException(),
+        app.TimeoutException(),
+        username,
+        password,
+        agreement_control,
+        login_button,
+        True,
+        app.TimeoutException(),
+        app.TimeoutException(),
+    ]
+
+    bot = app.UCampusBot.__new__(app.UCampusBot)
+    bot.driver = driver
+    bot.config = SimpleNamespace(
+        url="https://ucloud.unipus.cn/",
+        username="user",
+        password="password",
+    )
+    bot.anti_anti_cheat = Mock()
+
+    with patch.object(app, "WebDriverWait", return_value=wait):
+        assert bot._login() is True
+
+    assert driver.get.call_args_list[-1].args[0] == app.DEFAULT_LOGIN_URL
+    username.send_keys.assert_called_once_with("user")
+    password.send_keys.assert_called_once_with("password")
+    agreement_control.click.assert_called_once()
+    bot.anti_anti_cheat.assert_called_once()
 
 
 def test_answer_executor_returns_bool():
@@ -109,6 +190,9 @@ def test_stop_interrupts_flashcard_and_video_waits():
 
 
 if __name__ == "__main__":
+    test_auth_token_formats_are_kept_separate()
+    test_cookie_is_live_auth_signal_without_configured_token()
+    test_custom_portal_url_falls_back_to_sso()
     test_answer_executor_returns_bool()
     test_selected_duplicate_task_uses_scanned_occurrence()
     test_stop_after_ai_response_skips_answer_and_submit()

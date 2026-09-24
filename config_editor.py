@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "username": "",
     "password": "",
     "url": "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome",
+    "token_full": "",
     "api_key": "",
     "base_url": "",
     "model": "",
@@ -162,8 +163,8 @@ class ConfigEditor(QWidget):
         self._add_text_row(
             form,
             "token_full",
-            "Token (反作弊)",
-            "从浏览器控制台获取 localStorage.getItem('__token')",
+            "Token（可选）",
+            "留空使用登录会话；也可粘贴 __token 或 5.0 Authorization",
             multiline=True,
         )
 
