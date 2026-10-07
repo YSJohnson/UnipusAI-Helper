@@ -101,6 +101,91 @@ def test_answer_executor_returns_bool():
         app.WebDriverHelper.safe_click = safe_click
 
 
+def test_multiple_choice_detection_and_execution():
+    choice = Mock()
+    choice.get_attribute.return_value = 'question-common-abs-choice multipleChoice'
+    title = SimpleNamespace(text='Which statements are correct?')
+    choice.find_element.return_value = title
+    container = Mock()
+    container.get_attribute.return_value = 'layout-container'
+
+    def find_elements(_, selector):
+        if selector == '.question-common-abs-choice' or '.multipleChoice' in selector:
+            return [choice]
+        if selector == '.ques-title':
+            return [title]
+        return []
+
+    container.find_elements.side_effect = find_elements
+    options = [app.Option(letter, letter, letter) for letter in 'ABCD']
+    with patch.object(app.VocabularyTestStrategy, '_extract_options', return_value=options):
+        assert app.VocabularyTestStrategy().can_parse(container, Mock()) is False
+        question = app.StandardChoiceStrategy().parse(container, Mock(), 1, 'Listen and choose the best answer.')
+        assert question.q_type == app.QuestionType.MULTIPLE_CHOICE
+
+        container.find_elements.side_effect = lambda _, selector: [choice] if selector == '.question-common-abs-choice' else []
+        question = app.StandardChoiceStrategy().parse(container, Mock(), 1, 'Listen and choose two correct answers.')
+        assert question.q_type == app.QuestionType.MULTIPLE_CHOICE
+        options.append(app.Option('E', 'epsilon', 'E'))
+        question = app.StandardChoiceStrategy().parse(container, Mock(), 1, 'Choose the best answer.')
+        assert question.q_type == app.QuestionType.SINGLE_CHOICE  # Five options alone do not mean multi-select.
+
+    solver = app.AISolver.__new__(app.AISolver)
+    assert solver._extract_single_answer('1. BCE\n2. H', 1) == 'BCE'
+    assert solver._extract_single_answer('1. BCE 2. H', 2) == 'H'
+    assert solver._extract_single_answer('11. A\n1. BCE', 1) == 'BCE'
+    assert solver._extract_single_answer('2. E', 1) == ''
+    assert solver._extract_single_answer('BCE\nH', 2) == 'H'
+
+    executor = app.AnswerExecutor(None)
+    question = app.Question(1, 'Select all that apply', app.QuestionType.MULTIPLE_CHOICE, None,
+                            options=[app.Option(letter, letter, letter, letter == 'A') for letter in 'ABCDEFGHIJ'])
+    answer = solver._extract_single_answer('1. b,c,e,j', 1)
+    with patch.object(app.WebDriverHelper, 'safe_click', return_value=True) as click:
+        assert executor.execute(question, answer) is True
+        assert [call.args[1] for call in click.call_args_list] == ['A', 'B', 'C', 'E', 'J']
+        assert [opt.letter for opt in question.options if opt.is_selected] == ['B', 'C', 'E', 'J']
+        click.reset_mock()
+        assert executor.execute(question, 'BB C E J') is True
+        click.assert_not_called()
+        assert executor.execute(question, 'BZ') is False
+        assert executor.execute(question, 'Because this is correct') is False
+        click.assert_not_called()
+
+    question.options = [app.Option(letter, letter, letter) for letter in 'ABCDE']
+    with patch.object(app.WebDriverHelper, 'safe_click', side_effect=[True, True, False]):
+        assert executor.execute(question, 'BCE') is False  # Partial selection is not success.
+    question.q_type = app.QuestionType.SINGLE_CHOICE
+    with patch.object(app.WebDriverHelper, 'safe_click', return_value=True) as click:
+        assert executor.execute(question, 'BCE') is False
+        click.assert_not_called()
+        assert executor.execute(question, 'E') is True
+        assert click.call_args.args[1] == 'E'
+
+
+def test_failed_choice_answer_does_not_submit_or_advance():
+    solver = app.AISolver.__new__(app.AISolver)
+    solver.stop_requested = Event()
+    solver.processed_hashes = set()
+    solver._generate_content_hash_from_direction = Mock(return_value='page')
+    solver._preprocess_video_if_needed = Mock()
+    solver._preprocess_audio_if_needed = Mock()
+    solver.parser = Mock()
+    solver.parser.parse_all.return_value = ([app.Question(1, 'Select all', app.QuestionType.MULTIPLE_CHOICE, None)], '')
+    solver.content_handlers = []
+    solver.prompt_builder = Mock()
+    solver.ai_client = Mock()
+    solver.executor = Mock()
+    solver.executor.execute.return_value = False
+    solver._find_next_question_button = Mock()
+    for response in ('1. BCE', None):
+        solver.processed_hashes.clear()
+        solver.ai_client.ask.return_value = response
+        assert solver._process_current_tab_content('chapter', 'task', 0, 0) is False
+        solver.executor.submit.assert_not_called()
+        solver._find_next_question_button.assert_not_called()
+
+
 def test_selected_duplicate_task_uses_scanned_occurrence():
     unit = Mock()
     names = [SimpleNamespace(text=name) for name in ("Vocabulary", "Reading", "Vocabulary", "Vocabulary")]
@@ -194,6 +279,8 @@ if __name__ == "__main__":
     test_cookie_is_live_auth_signal_without_configured_token()
     test_custom_portal_url_falls_back_to_sso()
     test_answer_executor_returns_bool()
+    test_multiple_choice_detection_and_execution()
+    test_failed_choice_answer_does_not_submit_or_advance()
     test_selected_duplicate_task_uses_scanned_occurrence()
     test_stop_after_ai_response_skips_answer_and_submit()
     test_stop_interrupts_flashcard_and_video_waits()

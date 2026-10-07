@@ -534,6 +534,20 @@ class OpenAICompatibleClient:
 class QuestionParserStrategy(ABC):
     """题目解析策略基类"""
 
+    @staticmethod
+    def _is_multiple_choice(container, directions: str = "") -> bool:
+        class_name = (container.get_attribute('class') or '').lower()
+        if 'multiplechoice' in class_name or 'multiple-choice' in class_name:
+            return True
+        if container.find_elements(By.CSS_SELECTOR,
+                                   'input[type="checkbox"], [role="checkbox"], .multipleChoice, '
+                                   '[class*="MultipleChoice"], [class*="multiple-choice"]'):
+            return True
+        instructions = ' '.join([directions, *[e.text for e in container.find_elements(By.CSS_SELECTOR, '.ques-title')]])
+        return bool(re.search(
+            r'多选|\b(?:choose|select|check|tick|mark)\s+(?:all|two|three|four|five|six|seven|eight|nine|ten|[2-9]|multiple|more than one)\b',
+            instructions, re.IGNORECASE))
+
     @abstractmethod
     def can_parse(self, container, driver) -> bool:
         """是否能解析该容器"""
@@ -1011,6 +1025,8 @@ class VocabularyTestStrategy(QuestionParserStrategy):
     """词汇测试题解析策略"""
 
     def can_parse(self, container, driver) -> bool:
+        if self._is_multiple_choice(container):
+            return False
         options = self._extract_options(container, driver)
         if len(options) < 2:
             return False
@@ -1215,18 +1231,12 @@ class StandardChoiceStrategy(QuestionParserStrategy):
         vocab_strategy = VocabularyTestStrategy()
         options = vocab_strategy._extract_options(container, driver)
 
-        checkboxes = container.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"]')
         is_listening_choice = self._is_listening_choice_page(driver, directions)
         is_video_choice = self._is_video_choice_page(driver, directions)
-        container_class = (container.get_attribute('class') or '').lower()
-        explicit_multi = bool(checkboxes) or 'multiplechoice' in container_class or '多选' in text
-        is_multi = (
-                explicit_multi or
-                (len(options) > 4 and not is_listening_choice and not is_video_choice)
-        )
-        if is_video_choice and not explicit_multi:
+        is_multi = self._is_multiple_choice(container, directions)
+        if is_video_choice and not is_multi:
             q_type = QuestionType.VIDEO_CHOICE
-        elif is_listening_choice and not explicit_multi:
+        elif is_listening_choice and not is_multi:
             q_type = QuestionType.LISTENING_CHOICE
         else:
             q_type = QuestionType.MULTIPLE_CHOICE if is_multi else QuestionType.SINGLE_CHOICE
@@ -2157,9 +2167,12 @@ class AnswerExecutor:
         return executor(question, answer)
 
     def _fill_single_choice(self, q: Question, answer: str) -> bool:
-        answer_letter = self._extract_letter(answer)
-        if not answer_letter:
+        valid_letters = [opt.letter or chr(65 + idx) for idx, opt in enumerate(q.options)]
+        letters = self._parse_choice_letters(answer, valid_letters)
+        if len(letters) != 1:
+            print(f"\t单选题需要一个有效选项，收到: {answer}")
             return False
+        answer_letter = letters[0]
 
         print(f"\t寻找选项: {answer_letter}")
         print(f"\t可用选项: {[opt.letter for opt in q.options]}")
@@ -2181,17 +2194,17 @@ class AnswerExecutor:
         return False
 
     def _fill_multiple_choice(self, q: Question, answer: str) -> bool:
-        letters = re.findall(r'[A-D]', answer.upper())
-        selected = []
-
-        for letter in letters:
-            for opt in q.options:
-                if opt.letter.upper() == letter and not opt.is_selected:
-                    if WebDriverHelper.safe_click(self.driver, opt.element):
-                        selected.append(letter)
-                    break
-
-        return bool(selected)
+        letters = self._parse_choice_letters(answer, [opt.letter for opt in q.options])
+        if not letters:
+            print(f"\t多选题答案没有有效的选项组合: {answer}")
+            return False
+        for opt in q.options:
+            should_select = opt.letter.upper() in letters
+            if opt.is_selected != should_select:
+                if not WebDriverHelper.safe_click(self.driver, opt.element):
+                    return False
+                opt.is_selected = should_select
+        return True
 
     def _fill_sorting(self, q: Question, answer: str) -> bool:
         order = self._parse_sorting_order(answer, [opt.letter for opt in q.options])
@@ -2450,27 +2463,28 @@ class AnswerExecutor:
 
         return success_count > 0
 
-    def _extract_answer_by_number(self, answer: str, question_number: int) -> str:
-        answer = self._normalize_answer_labels(answer)
-        label_prefix = rf'(?:{self.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?'
-        number_prefix = self._number_prefix_pattern(question_number)
-        next_prefix = rf'(?<![$\w])(?:{self.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?(?:{self.NUMBER_PREFIX_PATTERN})'
-        pattern = rf'{label_prefix}{number_prefix}\s*(.+?)(?=\s*{next_prefix}\s*|$)'
+    @classmethod
+    def _extract_answer_by_number(cls, answer: str, question_number: int) -> str:
+        answer = cls._normalize_answer_labels(answer)
+        label_prefix = rf'(?:{cls.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?'
+        number_prefix = cls._number_prefix_pattern(question_number)
+        next_prefix = rf'(?<![$\w])(?:{cls.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?(?:{cls.NUMBER_PREFIX_PATTERN})'
+        pattern = rf'(?<![$\w]){label_prefix}{number_prefix}\s*(.+?)(?=\s*{next_prefix}\s*|$)'
         match = re.search(pattern, answer, re.DOTALL)
         if match:
-            return self._clean_extracted_answer(match.group(1))
+            return cls._clean_extracted_answer(match.group(1))
 
         lines = [l.strip() for l in answer.split('\n') if l.strip()]
         for line in lines:
             clean = re.sub(
-                rf'^(?:{self.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?(?:{self.NUMBER_PREFIX_PATTERN})\s*',
+                rf'^(?:{cls.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?(?:{cls.NUMBER_PREFIX_PATTERN})\s*',
                 '',
                 line,
                 flags=re.I
             ).strip()
             if clean and not re.match(r'^\d', clean):
-                if re.match(rf'^(?:{self.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?{number_prefix}', line, re.I):
-                    return self._clean_extracted_answer(clean)
+                if re.match(rf'^(?:{cls.ANSWER_LABEL_PATTERN}\s*[：:]\s*)?{number_prefix}', line, re.I):
+                    return cls._clean_extracted_answer(clean)
 
         return ""
 
@@ -2755,10 +2769,14 @@ class AnswerExecutor:
 
         return False
 
-    @staticmethod
-    def _extract_letter(answer: str) -> Optional[str]:
-        match = re.search(r'[A-D]', answer.upper())
-        return match.group() if match else None
+    @classmethod
+    def _parse_choice_letters(cls, answer: str, valid_letters: List[str]) -> List[str]:
+        answer = cls._clean_extracted_answer(answer).rstrip('.。').upper()
+        if not re.fullmatch(r'[A-Z][A-Z\s,，、/;&+]*', answer):
+            return []
+        letters = list(dict.fromkeys(re.findall(r'[A-Z]', answer)))
+        valid = {letter.upper() for letter in valid_letters}
+        return letters if set(letters) <= valid else []
 
     @staticmethod
     def _parse_banked_answer(answer: str, expected_count: int) -> List[str]:
@@ -4049,6 +4067,12 @@ class AISolver:
 
                     total_answered += success_count
                     print(f"    本页成功填写 {success_count}/{len(normal_questions)} 题")
+                    if success_count != len(normal_questions):
+                        print("    本页未完整填写，停止当前任务，请检查答案和选项状态")
+                        return False
+                else:
+                    print("    AI 未返回答案，停止当前任务")
+                    return False
 
             if self._should_stop():
                 return False
@@ -4094,17 +4118,14 @@ class AISolver:
         return True
 
     def _extract_single_answer(self, ai_response: str, question_number: int) -> str:
-        pattern = rf'{question_number}\s*[.、\)\]]\s*([A-D]+)'
-        match = re.search(pattern, ai_response, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
-
+        answer = AnswerExecutor._extract_answer_by_number(ai_response, question_number)
+        if answer:
+            return answer
+        if re.search(AnswerExecutor.NUMBER_PREFIX_PATTERN, ai_response, re.IGNORECASE):
+            return ""
         lines = [l.strip() for l in ai_response.split('\n') if l.strip()]
-        if question_number <= len(lines):
-            line = lines[question_number - 1]
-            letters = re.findall(r'[A-D]', line.upper())
-            return ''.join(letters) if letters else line
-
+        if 1 <= question_number <= len(lines):
+            return lines[question_number - 1]
         return ""
 
     def _generate_questions_signature(self, questions: List[Question]) -> str:
