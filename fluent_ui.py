@@ -505,15 +505,15 @@ class FluentModernGUI(MSFluentWindow):
                 except Exception:
                     unit_tab.click()
                 time.sleep(0.8)
-                chapters = self.driver.find_elements(self.By.CLASS_NAME, "courses-unit_taskItemInnerLayout__DTYuN")
+                chapters = self.driver.find_elements(self.By.CSS_SELECTOR, '[class*="courses-unit_taskItemInnerLayout__"], [class*="courses-unit_nodeItemInnerLayout__"]')
                 for chapter in chapters:
                     try:
-                        name_elem = chapter.find_element(self.By.CLASS_NAME, "courses-unit_taskTypeName__99BXj")
+                        name_elem = chapter.find_element(self.By.CSS_SELECTOR, '[class*="courses-unit_taskTypeName__"], [class*="courses-unit_nodeTypeName__"]')
                         name = name_elem.text.strip()
                         if not name:
                             continue
                         try:
-                            chapter.find_element(self.By.CLASS_NAME, "courses-unit_taskRequireIcon__zZldK")
+                            chapter.find_element(self.By.CSS_SELECTOR, '[class*="courses-unit_taskRequireIcon__"], [class*="courses-unit_nodeRequireIcon__"]')
                             is_compulsory = True
                         except self.NoSuchElementException:
                             is_compulsory = False
