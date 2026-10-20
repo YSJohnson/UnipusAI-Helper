@@ -8,12 +8,16 @@ from datetime import datetime
 from enum import Enum, auto
 from glob import glob
 from typing import List, Optional, Dict, Any, Tuple, Callable
+from urllib.parse import unquote, urlsplit
 
 from openai import OpenAI
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import (NoSuchElementException, TimeoutException,
+                                        StaleElementReferenceException,
+                                        SessionNotCreatedException, WebDriverException)
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from fluent_ui import FluentModernGUI
@@ -22,6 +26,54 @@ if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def ensure_writable_temp_dir() -> str:
+    """确保 TEMP/TMP 指向可写目录。
+
+    Windows 上系统临时目录可能不可写（受限用户、策略重定向、沙箱环境等），
+    此时 Chromium/Edge 启动会报
+    "cannot create temp dir for unpacking extensions"。
+    这里按「系统 TEMP/TMP → tempfile 默认 → 程序目录 logs/tmp」顺序挑第一个可写的，
+    并同步写回 os.environ，供后续启动的浏览器进程继承。
+    """
+    candidates = []
+    for name in ('TEMP', 'TMP'):
+        value = os.environ.get(name)
+        if value and value not in candidates:
+            candidates.append(value)
+    local_appdata = os.environ.get('LOCALAPPDATA')
+    if local_appdata:
+        app_temp = os.path.join(local_appdata, 'UnipusAI-Helper', 'tmp')
+        if app_temp not in candidates:
+            candidates.append(app_temp)
+    program_temp = os.path.join(BASE_DIR, 'logs', 'tmp')
+    if program_temp not in candidates:
+        candidates.append(program_temp)
+    workspace_temp = os.path.join(BASE_DIR, '.tmp')
+    if workspace_temp not in candidates:
+        candidates.append(workspace_temp)
+
+    original_temp = os.environ.get('TEMP', '')
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe = os.path.join(candidate, f'.ucampus_write_probe_{os.getpid()}')
+            with open(probe, 'w', encoding='utf-8') as handle:
+                handle.write('ok')
+            os.remove(probe)
+        except Exception:
+            continue
+        os.environ['TEMP'] = candidate
+        os.environ['TMP'] = candidate
+        try:
+            tempfile.tempdir = candidate
+        except Exception:
+            pass
+        if original_temp and os.path.abspath(original_temp) != os.path.abspath(candidate):
+            print(f" 系统临时目录不可写，已切换到: {candidate}")
+        return candidate
+    return ''
 
 gui_log_queue = queue.Queue()
 
@@ -195,6 +247,7 @@ class QuestionType(Enum):
     LISTENING_FILL_IN = auto()
     LISTENING_CHOICE = auto()
     VIDEO_CHOICE = auto()
+    TRUE_FALSE = auto()  # 判断题（course-v3 播放器 T/F）
 
 
 @dataclass
@@ -218,6 +271,13 @@ class Question:
     banked_options: List[str] = field(default_factory=list)
     banked_blanks: List[Dict] = field(default_factory=list)
     directions: str = ""
+    group: Any = None  # course-v3 题目组容器（提交单位）
+    needs_upload: bool = False  # course-v3 需要上传附件的题型
+    blank_count: int = 0  # course-v3 下拉空位可能没有 input
+
+    @property
+    def answer_count(self) -> int:
+        return self.blank_count or len(self.inputs)
 
     def is_interactive(self) -> bool:
         """是否有交互元素"""
@@ -383,6 +443,7 @@ class OpenAICompatibleClient:
         self.config = config
         self.client = OpenAI(api_key=config.api_key, base_url=config.base_url)
         self.conversation_history: List[Dict] = []
+        self.material_messages: List[Dict] = []  # 材料独立保留，不随问答窗口裁剪
         self.current_chapter_id: Optional[str] = None
         self.accumulated_passages: set = set()  # 已累积的原文哈希，防重复
 
@@ -394,6 +455,7 @@ class OpenAICompatibleClient:
     def force_reset(self, chapter_id: str):
         """强制清空所有历史，无论章节是否相同"""
         self.conversation_history = []
+        self.material_messages = []
         self.current_chapter_id = chapter_id
         self.accumulated_passages = set()
         print(f" 强制重置章节: {chapter_id[:50]}")
@@ -428,8 +490,8 @@ class OpenAICompatibleClient:
             "role": "user",
             "content": f"【{label} {material_index}】\n\n{content}\n\n请理解以上内容，等待后续问题。"
         }
-        self.conversation_history.append(passage_msg)
-        self.conversation_history.append({
+        self.material_messages.append(passage_msg)
+        self.material_messages.append({
             "role": "assistant",
             "content": f"我已理解{ack_label} {material_index}。请提出问题。"
         })
@@ -438,14 +500,20 @@ class OpenAICompatibleClient:
         return True
 
     def ask(self, prompt: str, retry_count: int = 3, stop_requested: Optional[threading.Event] = None) -> Optional[str]:
-        """发送问题并获取回答"""
+        """发送问题并获取回答
+
+        推理型模型（如 deepseek-flash）可能把 max_tokens 全部消耗在 reasoning 上，
+        导致 content 为空且 finish_reason=length；这里自动放宽预算重试一次。
+        """
         print(f"当前ai对话历史共{len(self.conversation_history)}条")
+        max_tokens = self.config.max_tokens
         for attempt in range(retry_count):
             if stop_requested is not None and stop_requested.is_set():
                 return None
             try:
                 messages = [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
+                    *getattr(self, 'material_messages', []),
                     *self.conversation_history,
                     {"role": "user", "content": prompt}
                 ]
@@ -456,7 +524,7 @@ class OpenAICompatibleClient:
                     print(f"   base_url: {self.config.base_url}")
                     print(f"   model:    {self.config.model}")
                     print(f"   temperature: {self.config.temperature}")
-                    print(f"   max_tokens:  {self.config.max_tokens}")
+                    print(f"   max_tokens:  {max_tokens}")
                     print(f"   消息条数: {len(messages)}")
                     for i, msg in enumerate(messages):
                         role = msg["role"]
@@ -469,25 +537,34 @@ class OpenAICompatibleClient:
                     model=self.config.model,
                     messages=messages,
                     temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens
+                    max_tokens=max_tokens
                 )
 
-                answer = response.choices[0].message.content.strip()
+                finish_reason = response.choices[0].finish_reason
+                answer = (response.choices[0].message.content or "").strip()
 
                 if DEBUG_MODE:
                     print("\n" + "=" * 60)
                     print(" [DEBUG] API 响应详情")
                     print(f"   model:        {response.model}")
-                    print(f"   finish_reason:{response.choices[0].finish_reason}")
+                    print(f"   finish_reason:{finish_reason}")
                     print(f"   usage:        {response.usage}")
                     print(f"   answer:       {answer[:500]}{'...' if len(answer) > 500 else ''}")
                     print("=" * 60 + "\n")
 
+                if not answer:
+                    if finish_reason == 'length' and max_tokens < 32768:
+                        max_tokens = min(max_tokens * 2, 32768)
+                        print(f"推理耗尽 token（finish_reason=length），放宽 max_tokens 到 "
+                              f"{max_tokens} 重试")
+                        continue
+                    print(f"模型返回空内容（finish_reason={finish_reason}）")
+                    return None
+
                 self.conversation_history.append({"role": "user", "content": prompt})
                 self.conversation_history.append({"role": "assistant", "content": answer})
 
-                if len(self.conversation_history) > 22:
-                    self.conversation_history = self.conversation_history[:2] + self.conversation_history[-20:]
+                self.conversation_history = self.conversation_history[-20:]
 
                 print(f"AI回答: {answer}")
                 return answer
@@ -1912,6 +1989,7 @@ class PromptBuilder:
             QuestionType.DROPDOWN_SELECT: self._build_dropdown_select,
             QuestionType.SINGLE_CHOICE: self._build_single_choice,
             QuestionType.MULTIPLE_CHOICE: self._build_multiple_choice,
+            QuestionType.TRUE_FALSE: self._build_true_false,
             QuestionType.SORTING: self._build_sorting,
             QuestionType.FILL_IN: self._build_fill_in,
             QuestionType.TEXT: self._build_text,
@@ -2045,10 +2123,22 @@ class PromptBuilder:
         lines.append("")
         return lines
 
+    def _build_true_false(self, q: Question) -> List[str]:
+        lines = [
+            f"{q.number}. 【判断】{q.text}",
+            "   请根据材料/音频/视频内容判断正误，只回答 T（正确）或 F（错误）。",
+            "",
+        ]
+        return lines
+
     def _build_fill_in(self, q: Question) -> List[str]:
         lines = [f"{q.number}. 【填空】{q.text}"]
         if len(q.inputs) > 1:
             lines.append(f"   （共 {len(q.inputs)} 个空）")
+        if q.banked_options:
+            lines.append(f"   可选词: {', '.join(q.banked_options)}")
+            lines.append("   （只能从可选词中选择；必要时改变词形：单复数/时态/词性/派生词）")
+            lines.append("   （若空位位于句子开头，首字母必须大写，否则会扣分）")
         lines.append("")
         return lines
 
@@ -2108,6 +2198,9 @@ class PromptBuilder:
         if QuestionType.FILL_IN in type_counts:
             lines.append("填空题: 1.答案1 2.答案2 ...")
 
+        if QuestionType.TRUE_FALSE in type_counts:
+            lines.append("判断题: 每题回答 T 或 F，如：1.T 2.F")
+
         if QuestionType.TEXT in type_counts:
             lines.append("简答题: 1.答案内容...")
 
@@ -2121,6 +2214,19 @@ class PromptBuilder:
         return lines
 
     def _build_dropdown_select(self, q: Question) -> List[str]:
+        # course-v3 的下拉填空没有旧版的 banked_blanks（上下文按空位拆好），
+        # 题面和空号都在 q.text 里，此时退回填空式提示词，否则模型看不到题目。
+        if not q.banked_blanks:
+            lines = [f"{q.number}. 【选择填空】{q.text}"]
+            total = q.answer_count or len(re.findall(r'\(\d+\)', q.text)) or 1
+            lines.append(f"   （共 {total} 个空，按空号 1..{total} 顺序作答）")
+            if q.banked_options:
+                lines.append(f"   可选选项: {', '.join(q.banked_options)}")
+                lines.append("   （只能从选项中选择；必要时按语法改变词形，句首记得大写）")
+            lines.append("   要求：按顺序给出答案，格式：1.答案1 2.答案2 ...")
+            lines.append("")
+            return lines
+
         lines = [
             f"{q.number}. 【选择填空】请从选项中选择合适的词填入空白处：",
             f"   可选选项: {', '.join(q.banked_options)}",
@@ -3103,6 +3209,1434 @@ class AnswerExecutor:
             return False
 
 
+# ============================================================================
+# 新版 ipublish 播放器（course-v3 教材）适配
+# ----------------------------------------------------------------------------
+# 新农科大学英语等 course-v3 教材的题目不在顶层文档里：
+#
+#   ucontent.unipus.cn/_ipublishpc_default/pc.html      ← 播放器外壳（顶层文档）
+#     └─ iframe#ipublish-pc-book-easy-iframe
+#          └─ ipub.unipus.cn/learner/textbook/book/...  ← 题目 DOM（内容层）
+#
+# 旧版 .layoutBody-container / .question-common-abs-* 在顶层文档里全部失效，
+# 内容层改用 data-ipublish-* 标记：
+#
+#   [data-ipublish-question-group-type="fill_blanks_group"]      题目组（提交单位）
+#   [data-question-id][data-ipublish-question-type]              单题
+#   span[data-dig-empty-id] > input[class*="answer_answerInput"] 填空空位
+#   [data-option-value]                                          选词候选
+#   div[class*="strongItem"]                                     单选选项字母
+#   div[class*="answer_optionTF"]                                判断 T/F 选项
+#   [data-ipublish-event-type="question-submit"]                 组内提交（已作答后变「重新作答」）
+#
+# CSS Modules 类名带 __hash 后缀（甚至含 +），只能按片段匹配，
+# 例如 input[class*="answer_answerInput"]，不能写 input.answer_answerInput。
+# ============================================================================
+
+
+class PublishPlayer:
+    """course-v3 ipublish 播放器：外壳/内容层切换与题目组状态判断。"""
+
+    FRAME_CSS = (
+        'iframe#ipublish-pc-book-easy-iframe',
+        'iframe[id*="ipublish"][id*="iframe"]',
+        'iframe[src*="ipub.unipus.cn"]',
+    )
+    SHELL_HOST_HINT = 'ucontent.unipus.cn'
+    SHELL_PATH_HINT = 'publishpc_default'
+
+    GROUP_CSS = '[data-ipublish-question-group-type]'
+    QUESTION_CSS = '[data-question-id]'
+    SUBMIT_CSS = '[data-ipublish-event-type="question-submit"]'
+
+    SUBMITTED_KEYWORDS = ('重新作答', '已提交', '查看答案', '已批改')
+
+    @staticmethod
+    def reset(driver) -> None:
+        """回到顶层文档；没有 iframe 或已被清理时静默忽略。"""
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+
+    @classmethod
+    def find_frame(cls, driver):
+        """在顶层文档定位内容 iframe，找不到返回 None。"""
+        cls.reset(driver)
+        for css in cls.FRAME_CSS:
+            try:
+                frames = driver.find_elements(By.CSS_SELECTOR, css)
+            except Exception:
+                continue
+            if frames:
+                return frames[0]
+        return None
+
+    @classmethod
+    def has_content_frame(cls, driver) -> bool:
+        return cls.find_frame(driver) is not None
+
+    @classmethod
+    def is_publish_page(cls, driver) -> bool:
+        """当前页面是否为新版 ipublish 播放器（course-v3）。
+
+        判定条件（满足其一）：
+        1. 地址是播放器外壳（ucontent.unipus.cn + _ipublishpc_default）；
+        2. 内容 iframe 里确实有 ipublish 的题目组/提交按钮标记。
+
+        第 2 条要求真的看到标记，避免旧教材页面上恰好嵌了 ipub 域名的
+        iframe 时被误判成 course-v3，把旧版解析流程顶掉。
+        """
+        try:
+            url = driver.current_url or ''
+        except Exception:
+            url = ''
+        if cls.SHELL_HOST_HINT in url and cls.SHELL_PATH_HINT in url:
+            return True
+
+        frame = cls.find_frame(driver)
+        if frame is None:
+            return False
+        try:
+            driver.switch_to.frame(frame)
+            try:
+                return bool(driver.find_elements(By.CSS_SELECTOR, cls.GROUP_CSS)
+                            or driver.find_elements(By.CSS_SELECTOR, cls.SUBMIT_CSS))
+            finally:
+                cls.reset(driver)
+        except Exception:
+            cls.reset(driver)
+            return False
+
+    @staticmethod
+    def button_text(element) -> str:
+        """读取按钮/标签文本，兼容只有内部 span 有文字的实现。"""
+        text = ''
+        try:
+            text = element.text or ''
+        except Exception:
+            text = ''
+        if not text:
+            try:
+                text = element.get_attribute('innerText') or ''
+            except Exception:
+                text = ''
+        if not text:
+            try:
+                # 折叠面板中的已完成组没有 innerText，仍应识别「重新作答」。
+                text = element.get_attribute('textContent') or ''
+            except Exception:
+                text = ''
+        return re.sub(r'\s+', '', text)
+
+
+class PublishFrameContext:
+    """进入 ipublish 内容 iframe 的上下文管理器，退出时回到顶层文档。"""
+
+    def __init__(self, driver):
+        self.driver = driver
+        self.entered = False
+
+    def __enter__(self):
+        self.entered = self.enter()
+        return self
+
+    def __exit__(self, *_exc):
+        PublishPlayer.reset(self.driver)
+        return False
+
+    def enter(self) -> bool:
+        for _ in range(3):
+            frame = PublishPlayer.find_frame(self.driver)
+            if frame is None:
+                return False
+            try:
+                self.driver.switch_to.frame(frame)
+                self.entered = True
+                return True
+            except Exception:
+                time.sleep(0.5)
+        return False
+
+
+@dataclass(frozen=True)
+class PublishTaskScope:
+    """同一 iframe 中当前目录任务的正文范围；保存锚点以兼容批改后的 DOM 重建。"""
+
+    document_url: str
+    start_anchor: str = ''
+    end_anchor: str = ''
+    title: str = ''
+    block_only: bool = False
+
+    @classmethod
+    def capture(cls, driver, anchor: str = ''):
+        """调用前进入内容层。无法确认任务边界时抛错，禁止退回整单元作答。"""
+        state = driver.execute_script("""
+            const anchor = arguments[0] || decodeURIComponent(location.hash.slice(1));
+            const url = location.href.split('#')[0];
+            const find = id => document.getElementById(id) ||
+                [...document.querySelectorAll('[data-lexical-node-anchor]')]
+                    .find(el => el.dataset.lexicalNodeAnchor === id);
+            if (!anchor) {
+                if (document.querySelector('[data-lexical-node-type="heading"], [data-marker-id*="#"]'))
+                    return {error: '没有当前任务锚点'};
+                return {document_url: url};
+            }
+            const start = find(anchor);
+            if (!start) return {error: '找不到当前任务正文锚点: ' + anchor};
+            const title = (start.innerText || start.textContent || '').trim();
+            if (!/^H[1-6]$/.test(start.tagName)) {
+                if (start.matches('[data-lexical-node-type="question-block"], ' +
+                                  '[data-ipublish-question-group-type]'))
+                    return {document_url: url, start_anchor: anchor, title, block_only: true};
+                return {error: '当前任务锚点不是可识别的章节标题或题块'};
+            }
+            const root = start.closest('.editor-content') || document.body;
+            const rank = Number(start.tagName.slice(1));
+            const end = [...root.querySelectorAll('h1,h2,h3,h4,h5,h6')].find(el =>
+                !el.closest('[data-ipublish-question-group-type]') &&
+                Number(el.tagName.slice(1)) <= rank &&
+                (start.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING));
+            const endAnchor = end && (end.dataset.lexicalNodeAnchor || end.id);
+            if (end && !endAnchor) return {error: '下一任务标题缺少定位锚点'};
+            return {document_url: url, start_anchor: anchor, end_anchor: endAnchor || '', title};
+        """, anchor)
+        if not state or state.get('error'):
+            raise ValueError((state or {}).get('error', '无法读取当前任务范围'))
+        return cls(**state)
+
+    def select(self, driver, groups: List[Dict]) -> List[Dict]:
+        """校验文档与边界后筛选组；忽略视口位置，折叠题也按正文所属任务判断。"""
+        result = driver.execute_script("""
+            const [url, startId, endId, blockOnly, groups] = arguments;
+            const find = id => document.getElementById(id) ||
+                [...document.querySelectorAll('[data-lexical-node-anchor]')]
+                    .find(el => el.dataset.lexicalNodeAnchor === id);
+            if (location.href.split('#')[0] !== url) return null;
+            const start = startId ? find(startId) : null, end = endId ? find(endId) : null;
+            if ((startId && !start) || (endId && !end)) return null;
+            if (end && !(start.compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING))
+                return null;
+            return groups.map(group => {
+                if (!group.isConnected) return false;
+                if (!start) return true;
+                if (blockOnly) return start === group || start.contains(group);
+                return (start === group || start.contains(group) ||
+                    !!(start.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING)) &&
+                    (!end || !!(group.compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING));
+            });
+        """, self.document_url, self.start_anchor, self.end_anchor, self.block_only,
+             [state['element'] for state in groups])
+        if result is None:
+            raise ValueError('当前任务文档或边界已变化，停止作答以免越界')
+        return [state for state, included in zip(groups, result) if included]
+
+
+class PublishQuestionParser:
+    """course-v3 播放器题目解析：按 data-ipublish-* 标记读取题目组。"""
+
+    GROUP_KINDS = {
+        'single_choice_group': 'choice',
+        'multiple_choice_group': 'choice',
+        'multi_choice_group': 'choice',
+        'true_false_group': 'true_false',
+        'fill_blanks_group': 'fill',
+        'fill_blanks_choice_group': 'fill',
+        'fill_blanks_dropdown_group': 'dropdown',
+        'short_answer_group': 'text',
+        'translation_group': 'text',
+        'writing_group': 'text',
+        'multi_media_upload_group': 'upload',
+        'rich_text_read_group': 'skip',
+        'discussion_group': 'skip',
+        'text_match_group': 'skip',
+        'oral_personal_state_group': 'skip',
+    }
+
+    QUESTION_TYPE_KINDS = {
+        'single_choice': 'choice',
+        'multiple_choice': 'choice',
+        'true_false': 'true_false',
+        'fill_blanks': 'fill',
+        'fill_blanks_choice': 'fill',
+        'fill_blanks_dropdown': 'dropdown',
+        'short_answer': 'text',
+        'translation': 'text',
+        'writing': 'text',
+    }
+    CHOICE_HEADER_SKIP = 'strongListView'
+    EXPLANATION_PLACEHOLDERS = ('请输入',)
+    TITLE_NOISE_WORDS = ('自动判题', 'AI判题', 'AI 判题', '计分', '已提交', '重新作答', '提交')
+    TRUE_FALSE_LABELS = {'T': ('T', 'TRUE', '正确'), 'F': ('F', 'FALSE', '错误')}
+
+    def __init__(self, driver):
+        self.driver = driver
+        self.unsupported: List[str] = []
+        self.passages: List[str] = []
+
+    # ---- 题目组 ---------------------------------------------------------
+    @classmethod
+    def classify_group(cls, group_type: str) -> str:
+        return cls.GROUP_KINDS.get((group_type or '').strip(), 'unknown')
+
+    def collect_groups(self) -> List[Dict[str, Any]]:
+        """读取内容层全部题目组（调用前需已进入内容 iframe）。"""
+        groups = []
+        try:
+            elements = self.driver.find_elements(By.CSS_SELECTOR, PublishPlayer.GROUP_CSS)
+        except Exception:
+            return groups
+        for element in elements:
+            group_type = (element.get_attribute('data-ipublish-question-group-type') or '').strip()
+            if not group_type:
+                continue
+            try:
+                visible = element.is_displayed()
+            except Exception:
+                visible = False
+            groups.append({
+                'element': element,
+                'type': group_type,
+                'kind': self.classify_group(group_type),
+                'visible': visible,
+            })
+        return groups
+
+    def submit_button(self, group):
+        try:
+            buttons = group.find_elements(By.CSS_SELECTOR, PublishPlayer.SUBMIT_CSS)
+        except Exception:
+            return None
+        for button in buttons:
+            try:
+                if button.is_displayed():
+                    return button
+            except Exception:
+                continue
+        return buttons[0] if buttons else None
+
+    def group_submitted(self, group) -> bool:
+        """已批改/已提交的题目组不再重复作答。"""
+        button = self.submit_button(group)
+        if button is None:
+            return False
+        text = PublishPlayer.button_text(button)
+        return any(keyword in text for keyword in PublishPlayer.SUBMITTED_KEYWORDS)
+
+    def group_key(self, group) -> str:
+        """题目组指纹：组 id + 题目 id，用于去重。"""
+        group_id = group.get_attribute('id') or ''
+        group_type = group.get_attribute('data-ipublish-question-group-type') or ''
+        question_ids = []
+        for node in self._question_nodes(group):
+            try:
+                question_ids.append(node.get_attribute('data-question-id') or '')
+            except Exception:
+                continue
+        if not group_id and not question_ids:
+            return f'{group_type}:{self.element_text(group, 120)}'
+        return f'{group_type}:{group_id}:{",".join(question_ids)}'
+
+    # ---- 文本工具 -------------------------------------------------------
+    @staticmethod
+    def clean_text(text: str, limit: Optional[int] = 4000) -> str:
+        text = re.sub(r'[ \t]+', ' ', text or '')
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()[:limit]
+
+    def element_text(self, element, limit: Optional[int] = 4000) -> str:
+        text = ''
+        try:
+            text = element.text or ''
+        except Exception:
+            text = ''
+        if not text.strip():
+            try:
+                text = self.driver.execute_script(
+                    'return arguments[0] && arguments[0].innerText ? arguments[0].innerText : "";',
+                    element) or ''
+            except Exception:
+                text = ''
+        return self.clean_text(text, limit)
+
+    def _stem_text(self, node, skip_class: str = '') -> str:
+        """题目正文：Lexical 只读编辑器里的文本块（跳过选项区/理由框）。"""
+        try:
+            contents = node.find_elements(By.CSS_SELECTOR, '.editor-content')
+        except Exception:
+            contents = []
+        parts = []
+        for content in contents:
+            if skip_class:
+                try:
+                    ancestor = content.find_elements(
+                        By.XPATH, f'ancestor::*[contains(@class, "{skip_class}")]')
+                    if ancestor:
+                        continue
+                except Exception:
+                    pass
+            text = self.element_text(content, limit=None)
+            if text and text not in parts:
+                parts.append(text)
+        return self.clean_text('\n\n'.join(parts), limit=None) if parts else self._fallback_text(node)
+
+    def _fallback_text(self, node) -> str:
+        return self._dom_text(node, limit=None)
+
+    def _dom_text(self, node, numbered: bool = False, limit: Optional[int] = 4000) -> str:
+        """剔除作答 UI，保留段落/表格边界；脱离文档的 clone.innerText 会粘连文本。"""
+        script = """
+        var node = arguments[0];
+        if (!node) { return ""; }
+        var clone = node.cloneNode(true);
+        if (arguments[1]) {
+            clone.querySelectorAll('span[data-dig-empty-id]').forEach((blank, i) => {
+                blank.replaceWith(document.createTextNode('(' + (i + 1) + ')'));
+            });
+        }
+        var drop = '[class*="options"], [class*="ListView"], [class*="shortAnswerWrap"], ' +
+                   'textarea, input, button, [data-ipublish-event-type], ' +
+                   '[class*="answerPreview"], [class*="upload"], [class*="title-content"], ' +
+                   '[data-option-value], [class*="answerContent"], audio, video, ' +
+                   'script, style, [aria-hidden="true"]';
+        clone.querySelectorAll(drop).forEach(function (el) { el.remove(); });
+        function text(el) {
+            if (el.nodeType === Node.TEXT_NODE) return el.textContent;
+            if (el.nodeType !== Node.ELEMENT_NODE) return '';
+            if (el.tagName === 'BR') return '\\n';
+            const children = Array.from(el.childNodes).map(text).join('');
+            if (/^(TD|TH)$/.test(el.tagName)) return children.trim() + '\\t';
+            if (/^(P|DIV|H[1-6]|LI|TR|TABLE|UL|OL|BLOCKQUOTE)$/.test(el.tagName))
+                return '\\n' + children + '\\n';
+            return children;
+        }
+        return text(clone);
+        """
+        try:
+            text = self.driver.execute_script(script, node, numbered) or ''
+        except Exception:
+            text = ''
+        # 表格的单元格使用分隔符，避免列标题和答案空位粘在一起。
+        text = re.sub(r'\t[ \t]*\n', '\n', text).replace('\t', ' | ')
+        return self.clean_text(text, limit)
+
+    def group_direction(self, group) -> str:
+        """收集组标题及小题外的公共题面，不混入各题选项或已答内容。"""
+        text = ''
+        try:
+            titles = group.find_elements(
+                By.CSS_SELECTOR, '[class*="title-content"], [class*="titleContent"]')
+        except Exception:
+            titles = []
+        for title in titles:
+            text = self.element_text(title, 300)
+            if text:
+                break
+        for word in self.TITLE_NOISE_WORDS:
+            text = text.replace(word, '')
+        text = re.sub(r'得分[：:]\s*\d+(?:\.\d+)?\s*分', '', text)
+        text = re.sub(r'小题\s*\d+', '', text)
+        text = re.sub(r'^\s*\d+\s*分\s*$', '', text)
+        title = re.sub(r'\s+', ' ', text).strip()
+        try:
+            introductions = self.driver.execute_script("""
+                const group = arguments[0];
+                return Array.from(group.querySelectorAll('.editor-content'))
+                    .filter(el => !el.closest('[data-question-id]') &&
+                        el.closest('[data-ipublish-question-group-type]') === group)
+                    .map(el => el.innerText || '').filter(text => text.trim());
+            """, group) or []
+        except Exception:
+            introductions = []
+        preceding = self._preceding_direction(group)
+        parts = list(dict.fromkeys([part for part in [preceding, title, *introductions] if part]))
+        return self.clean_text('\n'.join(parts), 12000)
+
+    def _preceding_direction(self, group) -> str:
+        """Lexical 题块前连续的正文/提示块也是题面，不能只读组内的作答占位语。"""
+        try:
+            blocks = self.driver.execute_script("""
+                const block = arguments[0].closest('[data-lexical-node-type="question-block"]');
+                const parts = [];
+                for (let el = block && block.previousElementSibling; el && parts.length < 12;
+                     el = el.previousElementSibling) {
+                    const type = el.getAttribute('data-lexical-node-type') || '';
+                    if (!/^(base-paragraph|paragraph|highlight-block|table|list)$/.test(type) &&
+                        !/^(P|TABLE|UL|OL|BLOCKQUOTE)$/.test(el.tagName)) break;
+                    if (el.querySelector('[data-ipublish-question-group-type]')) break;
+                    parts.unshift(el);
+                }
+                return parts;
+            """, group) or []
+            return '\n\n'.join(filter(None, (self._dom_text(block, limit=12000) for block in blocks)))
+        except Exception:
+            return ''
+
+    # ---- 题目节点 -------------------------------------------------------
+    def _question_nodes(self, group) -> List[Any]:
+        """组内最外层题目节点（排除带 data-option-value 的候选项）。"""
+        nodes = []
+        try:
+            candidates = group.find_elements(By.CSS_SELECTOR, PublishPlayer.QUESTION_CSS)
+        except Exception:
+            return nodes
+        for node in candidates:
+            try:
+                if node.get_attribute('data-option-value'):
+                    continue
+                if node.find_elements(
+                        By.XPATH, 'ancestor::*[@data-question-id][not(@data-option-value)]'):
+                    continue
+            except Exception:
+                continue
+            nodes.append(node)
+        return nodes
+
+    @staticmethod
+    def _question_type(node) -> str:
+        try:
+            tagged = node.find_elements(By.CSS_SELECTOR, '[data-ipublish-question-type]')
+        except Exception:
+            tagged = []
+        for element in tagged:
+            value = (element.get_attribute('data-ipublish-question-type') or '').strip()
+            if value:
+                return value
+        try:
+            return (node.get_attribute('data-ipublish-question-type') or '').strip()
+        except Exception:
+            return ''
+
+    # ---- 解析入口 -------------------------------------------------------
+    def parse_group(self, group, group_type: str, start_number: int = 1) -> List[Question]:
+        """解析单个题目组；不支持的题型记入 unsupported 并返回空列表。"""
+        kind = self.classify_group(group_type)
+        if kind == 'unknown':
+            # 播放器新增了未登记的组类型时，退回题目自身的 data-ipublish-question-type
+            kind = self._kind_from_questions(group)
+        if kind == 'choice':
+            return self._parse_choices(group, group_type, start_number)
+        if kind == 'true_false':
+            return self._parse_true_false(group, start_number)
+        if kind == 'fill':
+            return self._parse_fill_blanks(group, start_number, dropdown=False)
+        if kind == 'dropdown':
+            return self._parse_fill_blanks(group, start_number, dropdown=True)
+        if kind == 'text':
+            return self._parse_text(group, start_number)
+        if kind != 'skip':
+            self.unsupported.append(group_type)
+        return []
+
+    def _kind_from_questions(self, group) -> str:
+        for node in self._question_nodes(group):
+            kind = self.QUESTION_TYPE_KINDS.get(self._question_type(node))
+            if kind:
+                return kind
+        return 'unknown'
+
+    def collect_passages(self, groups: List[Dict[str, Any]]) -> List[str]:
+        """收集阅读材料，作为 AI 上下文。"""
+        passages = []
+        for state in groups:
+            if state['type'] != 'rich_text_read_group':
+                continue
+            text = self._dom_text(state['element'], limit=None)
+            if len(text) >= 80:
+                passages.append(text)
+        self.passages = passages
+        return passages
+
+    # ---- 各题型 ---------------------------------------------------------
+    def _parse_choices(self, group, group_type: str, start_number: int) -> List[Question]:
+        questions = []
+        multiple = 'multiple' in group_type or 'multi_choice' in group_type
+        for node in self._question_nodes(group):
+            text = self._stem_text(node, skip_class=self.CHOICE_HEADER_SKIP)
+            options = self._choice_options(node)
+            if not text or not options:
+                continue
+            questions.append(Question(
+                number=start_number + len(questions),
+                text=text,
+                q_type=QuestionType.MULTIPLE_CHOICE if multiple else QuestionType.SINGLE_CHOICE,
+                element=node,
+                options=options,
+                group=group,
+            ))
+        return questions
+
+    def _choice_options(self, node) -> List[Option]:
+        options = []
+        try:
+            rows = node.find_elements(By.CSS_SELECTOR, '[class*="strongListView"]')
+        except Exception:
+            rows = []
+        for row in rows:
+            try:
+                letter_element = row.find_element(By.CSS_SELECTOR, '[class*="strongItem"]')
+            except Exception:
+                continue
+            letter = self.element_text(letter_element, 8).strip().strip('.、):：')
+            option_text = ''
+            for content in row.find_elements(By.CSS_SELECTOR, '.editor-content'):
+                option_text = self.element_text(content)
+                if option_text:
+                    break
+            if not letter:
+                letter = chr(65 + len(options))
+            try:
+                classes = ((letter_element.get_attribute('class') or '') + ' ' +
+                           (row.get_attribute('class') or '')).lower()
+            except Exception:
+                classes = ''
+            options.append(Option(
+                letter=letter.upper(),
+                text=option_text,
+                element=letter_element,
+                is_selected='selected' in classes or 'sele' in classes,
+            ))
+        return options
+
+    def _parse_true_false(self, group, start_number: int) -> List[Question]:
+        questions = []
+        for node in self._question_nodes(group):
+            text = self._stem_text(node, skip_class='answer_shortAnswerWrap')
+            options = self._true_false_options(node)
+            if not text or not options:
+                continue
+            questions.append(Question(
+                number=start_number + len(questions),
+                text=text,
+                q_type=QuestionType.TRUE_FALSE,
+                element=node,
+                options=options,
+                group=group,
+            ))
+        return questions
+
+    def _true_false_options(self, node) -> List[Option]:
+        options = []
+        try:
+            rows = node.find_elements(By.CSS_SELECTOR, 'div[class*="answer_option"]')
+        except Exception:
+            rows = []
+        for row in rows:
+            label = self.element_text(row, 12).strip().upper()
+            letter = ''
+            for candidate, labels in self.TRUE_FALSE_LABELS.items():
+                if label in labels:
+                    letter = candidate
+                    break
+            if not letter:
+                continue
+            if any(option.letter == letter for option in options):
+                continue
+            try:
+                classes = (row.get_attribute('class') or '').lower()
+            except Exception:
+                classes = ''
+            options.append(Option(
+                letter=letter,
+                text='True' if letter == 'T' else 'False',
+                element=row,
+                is_selected='select' in classes or 'active' in classes,
+            ))
+        return options
+
+    def _parse_fill_blanks(self, group, start_number: int,
+                           dropdown: bool = False) -> List[Question]:
+        nodes = self._question_nodes(group) or [group]
+        questions = []
+        for node in nodes:
+            text = self._numbered_stem_text(node) or self._stem_text(node)
+            if not text:
+                continue
+            questions.append(Question(
+                number=start_number + len(questions),
+                text=text,
+                q_type=QuestionType.DROPDOWN_SELECT if dropdown else QuestionType.FILL_IN,
+                element=node,
+                inputs=self._blank_inputs(node),
+                banked_options=self._banked_options(node),
+                group=group,
+                blank_count=len(node.find_elements(By.CSS_SELECTOR, 'span[data-dig-empty-id]')),
+            ))
+        return questions
+
+    def _numbered_stem_text(self, node) -> str:
+        """填空/下拉题：把每个空位替换成 (N) 标记，保证 AI 能对上空号。"""
+        return self._dom_text(node, numbered=True, limit=None)
+
+    def _parse_text(self, group, start_number: int) -> List[Question]:
+        questions = []
+        for node in self._question_nodes(group):
+            # TEXT 组的第一段 .editor-content 往往只是「请在此处作答」，
+            # 真正题面在组内其他块里，所以优先取整组文本（已剔除按钮/输入框）。
+            text = self._fallback_text(node) or self._stem_text(node)
+            areas = self._answer_textareas(node)
+            if not text or not areas:
+                continue
+            questions.append(Question(
+                number=start_number + len(questions),
+                text=text,
+                q_type=QuestionType.TEXT,
+                element=node,
+                inputs=areas,
+                group=group,
+            ))
+        return questions
+
+    def _blank_inputs(self, node) -> List[Any]:
+        inputs = []
+        try:
+            blanks = node.find_elements(By.CSS_SELECTOR, 'span[data-dig-empty-id]')
+        except Exception:
+            blanks = []
+        for blank in blanks:
+            try:
+                inputs.extend(blank.find_elements(By.CSS_SELECTOR, 'input'))
+            except Exception:
+                continue
+        if inputs and len(inputs) >= len(blanks):
+            return inputs
+        # 空位里的输入框没有被完整识别（结构被重排或空位里没有 input）时，
+        # 按 DOM 顺序直接取所有填空框，避免少数空位漏填。
+        try:
+            all_inputs = node.find_elements(
+                By.CSS_SELECTOR, 'input[class*="answer_answerInput"]')
+        except Exception:
+            all_inputs = []
+        return all_inputs or inputs
+
+    def _banked_options(self, node) -> List[str]:
+        options = []
+        try:
+            chips = node.find_elements(By.CSS_SELECTOR, '[data-option-value]')
+        except Exception:
+            chips = []
+        for chip in chips:
+            try:
+                value = (chip.get_attribute('data-option-value') or '').strip()
+            except Exception:
+                value = ''
+            if value and value not in options:
+                options.append(value)
+        return options
+
+    def _answer_textareas(self, node) -> List[Any]:
+        try:
+            areas = node.find_elements(By.CSS_SELECTOR, 'textarea')
+        except Exception:
+            return []
+        answer_areas = []
+        for area in areas:
+            try:
+                placeholder = (area.get_attribute('placeholder') or '').strip()
+            except Exception:
+                placeholder = ''
+            if placeholder in self.EXPLANATION_PLACEHOLDERS:
+                continue
+            answer_areas.append(area)
+        return answer_areas or areas
+
+
+class PublishAnswerExecutor(AnswerExecutor):
+    """course-v3 作答执行器：复用基础填写，补充判断题、下拉填空与组内提交。"""
+
+    RULE_POPUP_TEXTS = ('我知道了', '知道了', '确定')
+    last_rejection = ''  # 最近一次提交被平台拒绝时的提示文案
+
+    def reveal_group(self, group, stop_requested: Optional[threading.Event] = None) -> bool:
+        """从外向内点击折叠标题，使隐藏题块真正可见，不修改页面的 hidden 状态。"""
+        try:
+            contents = self.driver.execute_script("""
+                const contents = [];
+                for (let el = arguments[0].parentElement; el; el = el.parentElement) {
+                    if (el.matches('[data-lexical-node-type="collapsible-content"]'))
+                        contents.unshift(el);
+                }
+                return contents;
+            """, group) or []
+            for content in contents:
+                if stop_requested is not None and stop_requested.is_set():
+                    return False
+                head = self.driver.execute_script("""
+                    const content = arguments[0];
+                    const style = getComputedStyle(content);
+                    if (!content.hasAttribute('hidden') && style.display !== 'none' &&
+                        style.contentVisibility !== 'hidden') return null;
+                    return Array.from(content.parentElement.children).find(el =>
+                        el.matches('[data-lexical-node-type="collapsible-head"], summary')) || null;
+                """, content)
+                if head is None:
+                    continue
+                if not WebDriverHelper.safe_click(self.driver, head):
+                    return False
+                WebDriverWait(self.driver, 2).until(lambda driver: driver.execute_script("""
+                    const el = arguments[0], s = getComputedStyle(el);
+                    return !el.hasAttribute('hidden') && s.display !== 'none' &&
+                        s.contentVisibility !== 'hidden';
+                """, content))
+            return True
+        except Exception:
+            return False
+
+    def execute(self, question: Question, answer: str) -> bool:
+        if question.q_type == QuestionType.TRUE_FALSE:
+            return self._fill_true_false(question, answer)
+        if question.q_type == QuestionType.DROPDOWN_SELECT:
+            return self._fill_publish_dropdown(question, answer)
+        return super().execute(question, answer)
+
+    def _fill_fill_in(self, q: Question, answer: str) -> bool:
+        if q.blank_count and q.blank_count != len(q.inputs):
+            print("\t空位与输入框数量不一致，不填写该题")
+            return False
+        return self._fill_required_inputs(q.inputs, self._parse_banked_answer(answer, len(q.inputs)))
+
+    def _fill_text(self, q: Question, answer: str) -> bool:
+        if len(q.inputs) <= 1:
+            return super()._fill_text(q, answer)
+        return self._fill_required_inputs(q.inputs, self._parse_banked_answer(answer, len(q.inputs)))
+
+    def _fill_required_inputs(self, inputs: List[Any], answers: List[str]) -> bool:
+        """整题的所有空位均有答案且实际写入成功，才能交给上层提交。"""
+        if not inputs or len(answers) != len(inputs) or not all(answers):
+            print("\t答案不完整，不填写该题")
+            return False
+        for index, (inp, answer) in enumerate(zip(inputs, answers), 1):
+            print(f"\t空{index}: {answer[:80]}")
+            if not self._fill_text_input_verified(inp, answer):
+                print(f"\t空{index}: 写入后校验失败")
+                return False
+        return True
+
+    def _fill_text_input_verified(self, inp, ans: str) -> bool:
+        """course-v3 填空必须用真实键盘输入才会计分。
+
+        真机上直接 JS 赋值虽然能通过回读校验，但平台评分读到的是 0 分；
+        所以键盘输入失败时重试一次，仍失败则阻止整组提交。
+        """
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", inp)
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+        for _ in range(2):
+            if self._type_by_keyboard(inp, ans):
+                return True
+        print("\t真实键盘输入失败，不提交该题目组")
+        return False
+
+    def _type_by_keyboard(self, inp, ans: str) -> bool:
+        """聚焦输入框，用真实按键清空后逐字输入。"""
+        try:
+            self.driver.execute_script("arguments[0].focus();", inp)
+            time.sleep(0.2)
+            inp.send_keys(Keys.CONTROL, 'a')
+            inp.send_keys(Keys.DELETE)
+            current = inp.get_attribute('value') or ''
+            for _ in range(len(current)):
+                inp.send_keys(Keys.BACKSPACE)
+            inp.send_keys(ans)
+            inp.send_keys(Keys.TAB)
+            time.sleep(0.2)
+            return self._input_value_matches(inp, ans)
+        except Exception:
+            return False
+
+    # ---- 判断题 ---------------------------------------------------------
+    @staticmethod
+    def normalize_true_false(answer: str) -> str:
+        """把 T/F、True/False、正确/错误 统一成 T 或 F。"""
+        raw = (answer or '').strip()
+        if '正确' in raw or raw in ('对', '是', '√'):
+            return 'T'
+        if '错误' in raw or raw in ('错', '否', '×', '不对'):
+            return 'F'
+        text = re.sub(r'^[\d\s.、):：\]]+', '', raw.upper())
+        # 只认独立出现的 T/F，避免把 "IT IS CHEAP" 里的 T 当成答案
+        match = re.search(r'(?<![A-Z])(TRUE|FALSE|T|F)(?![A-Z])', text)
+        if not match:
+            return ''
+        return 'T' if match.group(1) in ('TRUE', 'T') else 'F'
+
+    def _fill_true_false(self, question: Question, answer: str) -> bool:
+        letter = self.normalize_true_false(answer)
+        if not letter:
+            print(f"\t判断题答案无法识别: {str(answer)[:40]!r}")
+            return False
+        for option in question.options:
+            if option.letter.upper() == letter:
+                print(f"\t选择 {option.letter}（{option.text}）")
+                return WebDriverHelper.safe_click(self.driver, option.element)
+        return False
+
+    # ---- 下拉填空 -------------------------------------------------------
+    def _fill_publish_dropdown(self, question: Question, answer: str) -> bool:
+        blanks = self._dropdown_blanks(question)
+        if not blanks:
+            return self._fill_fill_in(question, answer)
+        answers = self._parse_banked_answer(answer, len(blanks))
+        if len(answers) != len(blanks) or not all(answers):
+            print("\t下拉填空答案不完整，不填写该题")
+            return False
+        filled = 0
+        for blank, value in zip(blanks, answers):
+            if value and self._select_dropdown_value(blank, value):
+                filled += 1
+        if filled < len(blanks):
+            print(f"\t下拉填空仅选中 {filled}/{len(blanks)} 个")
+            return False
+        return True
+
+    def _dropdown_blanks(self, question: Question) -> List[Any]:
+        try:
+            return question.element.find_elements(
+                By.CSS_SELECTOR, 'span[data-dig-empty-id]')
+        except Exception:
+            return []
+
+    def _select_dropdown_value(self, blank, value: str) -> bool:
+        """一个空位：可输入就直接写入，否则点开下拉弹层按文本选择。
+
+        course-v3 的下拉空位是 .digEmptySelectView_selectTrigger，
+        选项要点开触发器后才会渲染到弹层里。
+        """
+        trigger = self._dropdown_trigger(blank)
+        if trigger is not None:
+            if self._select_trigger_option(trigger, value):
+                return True
+
+        optional_inputs = []
+        try:
+            elements = blank.find_elements(By.CSS_SELECTOR, 'input, textarea, select')
+        except Exception:
+            elements = []
+        for element in elements:
+            try:
+                tag = (element.tag_name or '').lower()
+                readonly = (element.get_attribute('readonly') or '').strip().lower()
+                disabled = (element.get_attribute('disabled') or '').strip().lower()
+            except Exception:
+                continue
+            if tag == 'select':
+                if self._select_native_option(element, value):
+                    return True
+                continue
+            if readonly in ('true', 'readonly') or disabled == 'true':
+                continue
+            optional_inputs.append(element)
+
+        for element in optional_inputs:
+            if self._fill_text_input_verified(element, value):
+                return True
+
+        if not WebDriverHelper.safe_click(self.driver, trigger or blank):
+            return False
+        time.sleep(0.6)
+        if self._click_dropdown_option(value):
+            return True
+        for element in optional_inputs:
+            if self._fill_text_input_verified(element, value):
+                return True
+        try:
+            ActionChains(self.driver).send_keys('\ue00c').perform()  # ESC 收起弹层
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _dropdown_trigger(blank):
+        """course-v3 下拉空位的可点击触发器。"""
+        selectors = (
+            '[class*="selectTrigger"]',
+            '[class*="digEmptySelectView"]',
+            '[role="combobox"]',
+            '[class*="select"]',
+        )
+        for css in selectors:
+            try:
+                candidates = blank.find_elements(By.CSS_SELECTOR, css)
+            except Exception:
+                continue
+            for element in candidates:
+                try:
+                    if element.is_displayed():
+                        return element
+                except Exception:
+                    continue
+        return None
+
+    DROPDOWN_POPUP_CSS = ('[class*="digEmptySelectView_dropdownContent"], '
+                          '[class*="digEmptySelectView_dropdown"]')
+
+    def _visible_dropdown_popup(self):
+        """当前可见的下拉弹层容器。"""
+        try:
+            candidates = self.driver.find_elements(By.CSS_SELECTOR,
+                                                   self.DROPDOWN_POPUP_CSS)
+        except Exception:
+            return None
+        for element in candidates:
+            try:
+                rect = element.rect
+                if element.is_displayed() and rect.get('height', 0) > 10:
+                    return element
+            except Exception:
+                continue
+        return None
+
+    def _nearest_dropdown_trigger(self, popup):
+        """离弹层最近的下拉触发器（用于点开关闭弹层）。"""
+        try:
+            popup_rect = popup.rect
+            triggers = self.driver.find_elements(
+                By.CSS_SELECTOR, '[class*="selectTrigger"], [role="combobox"]')
+        except Exception:
+            return None
+        best = None
+        best_distance = None
+        for trigger in triggers:
+            try:
+                if not trigger.is_displayed():
+                    continue
+                rect = trigger.rect
+                distance = (abs(rect['x'] - popup_rect['x'])
+                            + abs(rect['y'] - popup_rect['y']))
+            except Exception:
+                continue
+            if best_distance is None or distance < best_distance:
+                best, best_distance = trigger, distance
+        return best
+
+    def _wait_dropdown_popup(self, timeout: float = 1.6):
+        """轮询等待下拉弹层出现。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            popup = self._visible_dropdown_popup()
+            if popup is not None:
+                return popup
+            time.sleep(0.12)
+        return None
+
+    def _dropdown_chevron(self, trigger):
+        try:
+            return trigger.find_element(By.CSS_SELECTOR,
+                                        '[class*="close-icon"], [class*="icon"]')
+        except Exception:
+            return None
+
+    def _js_mouse_click(self, element) -> None:
+        """用 JS 派发完整鼠标事件序列（原生点击被遮挡时兜底）。"""
+        self.driver.execute_script("""
+        const el = arguments[0];
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (type) {
+            el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
+        });
+        """, element)
+
+    def _close_visible_dropdowns(self, max_rounds: int = 4) -> None:
+        """收起当前打开的下拉弹层。真机上 ESC 无效，只能再点一次触发器。"""
+        for round_index in range(max_rounds):
+            popup = self._visible_dropdown_popup()
+            if popup is None:
+                return
+            trigger = self._nearest_dropdown_trigger(popup)
+            if trigger is None:
+                return
+            if DEBUG_MODE:
+                try:
+                    text = PublishPlayer.button_text(trigger)
+                except Exception:
+                    text = ''
+                print(f" [dd] 关闭弹层 第{round_index + 1}轮: trigger={text!r} "
+                      f"h={popup.rect.get('height')}")
+            try:
+                ActionChains(self.driver).move_to_element(trigger).pause(0.15).click().perform()
+            except Exception:
+                WebDriverHelper.safe_click(self.driver, trigger)
+            time.sleep(0.55)
+            if self._visible_dropdown_popup() is None:
+                return
+            # ActionChains 被遮挡时用 JS 事件再切换一次
+            try:
+                self._js_mouse_click(trigger)
+            except Exception:
+                return
+            time.sleep(0.55)
+
+    def _open_dropdown(self, trigger) -> bool:
+        """点开下拉弹层：多种点击方式轮试，每次都验证弹层是否真的出现。"""
+        self._close_visible_dropdowns()
+        chevron = self._dropdown_chevron(trigger)
+        targets = [trigger]
+        if chevron is not None:
+            targets.append(chevron)
+        for target in targets:
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+                    target)
+                time.sleep(0.2)
+            except Exception:
+                pass
+            strategies = (
+                ('actionchains', lambda t=target: ActionChains(self.driver)
+                    .move_to_element(t).pause(0.2).click().perform()),
+                ('native', lambda t=target: t.click()),
+                ('js-events', lambda t=target: self._js_mouse_click(t)),
+            )
+            for name, action in strategies:
+                try:
+                    action()
+                except Exception as exc:
+                    if DEBUG_MODE:
+                        print(f" [dd] {name} 点击失败: {str(exc).splitlines()[0][:60]}")
+                    continue
+                if self._wait_dropdown_popup(1.3) is not None:
+                    if DEBUG_MODE:
+                        print(f" [dd] 弹层已打开（{name}）")
+                    return True
+        if DEBUG_MODE:
+            print(" [dd] 所有打开方式都没能打开弹层")
+        return False
+
+    def _dropdown_options_from_popup(self) -> List[str]:
+        popup = self._visible_dropdown_popup()
+        if popup is None:
+            return []
+        options = []
+        try:
+            items = popup.find_elements(By.CSS_SELECTOR, '[class*="optionItem"]')
+        except Exception:
+            items = []
+        for item in items:
+            try:
+                if not item.is_displayed():
+                    continue
+                text = re.sub(r'\s+', ' ', item.text or '').strip()
+            except Exception:
+                continue
+            if text and 2 < len(text) <= 160 and text not in options:
+                options.append(text)
+        return options
+
+    def collect_dropdown_options(self, blank) -> List[str]:
+        """点开一个下拉空位，抓取弹层容器里的候选选项。
+
+        真机确认：弹层是 body 下的 .digEmptySelectView_dropdownContent，
+        每个空位给出的是同一组候选；ESC 收不起来，只能再点触发器。
+        """
+        trigger = self._dropdown_trigger(blank)
+        if trigger is None:
+            if DEBUG_MODE:
+                print(" [dd] 没找到下拉触发器")
+            return []
+        popup = self._visible_dropdown_popup()
+        if popup is None:
+            if not self._open_dropdown(trigger):
+                return []
+            popup = self._visible_dropdown_popup()
+        options = self._dropdown_options_from_popup() if popup is not None else []
+        if DEBUG_MODE:
+            print(f" [dd] 候选数量: {len(options)}")
+        self._close_visible_dropdowns()
+        return options[:20]
+
+    def _select_trigger_option(self, trigger, value: str) -> bool:
+        """点开下拉触发器，在弹层里选择与答案文本匹配的选项，并校验回显。"""
+        target = re.sub(r'\s+', '', value or '').lower()
+        if not target:
+            return False
+        try:
+            current = re.sub(r'\s+', '', PublishPlayer.button_text(trigger)).lower()
+        except Exception:
+            current = ''
+        if current == target:
+            return True
+
+        if not self._open_dropdown(trigger):
+            return False
+        popup = self._visible_dropdown_popup()
+        if popup is None:
+            return False
+        items = []
+        try:
+            items = popup.find_elements(By.CSS_SELECTOR, '[class*="optionItem"]')
+        except Exception:
+            items = []
+
+        match = None
+        for item in items:
+            try:
+                if not item.is_displayed():
+                    continue
+                text = re.sub(r'\s+', '', PublishPlayer.button_text(item)).lower()
+            except Exception:
+                continue
+            if not text:
+                continue
+            if text == target:
+                match = item
+                break
+        chosen = match
+        if chosen is None:
+            self._close_visible_dropdowns()
+            return False
+
+        clicked = False
+        try:
+            ActionChains(self.driver).move_to_element(chosen).pause(0.15).click().perform()
+            clicked = True
+        except Exception:
+            clicked = WebDriverHelper.safe_click(self.driver, chosen)
+        time.sleep(0.5)
+        try:
+            updated = re.sub(r'\s+', '', PublishPlayer.button_text(trigger)).lower()
+        except Exception:
+            updated = ''
+        if not clicked or updated != target:
+            # 选项点击被遮挡时用 JS 事件兜底
+            try:
+                self._js_mouse_click(chosen)
+                clicked = True
+            except Exception:
+                pass
+            time.sleep(0.5)
+            try:
+                updated = re.sub(r'\s+', '', PublishPlayer.button_text(trigger)).lower()
+            except Exception:
+                updated = ''
+        self._close_visible_dropdowns()
+        if not clicked:
+            return False
+        return updated == target
+
+    @staticmethod
+    def _select_native_option(select, value: str) -> bool:
+        target = re.sub(r'\s+', '', value or '').lower()
+        if not target:
+            return False
+        try:
+            options = select.find_elements(By.TAG_NAME, 'option')
+        except Exception:
+            return False
+        for option in options:
+            text = re.sub(r'\s+', '', PublishPlayer.button_text(option)).lower()
+            if not text:
+                continue
+            if text == target:
+                try:
+                    option.click()
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    def _click_dropdown_option(self, value: str) -> bool:
+        target = re.sub(r'\s+', '', (value or '')).lower()
+        if not target:
+            return False
+        selectors = (
+            '[role="option"]',
+            '.ant-select-item-option',
+            '[class*="option"]',
+            '[class*="OptionItem"]',
+            'li',
+        )
+        for css in selectors:
+            try:
+                candidates = self.driver.find_elements(By.CSS_SELECTOR, css)
+            except Exception:
+                continue
+            for element in candidates[:300]:
+                try:
+                    if not element.is_displayed():
+                        continue
+                    text = re.sub(r'\s+', '', PublishPlayer.button_text(element)).lower()
+                except Exception:
+                    continue
+                if text == target:
+                    if WebDriverHelper.safe_click(self.driver, element):
+                        return True
+        return False
+
+    # ---- 组内提交 -------------------------------------------------------
+    def find_submit_button(self, group):
+        if group is None:
+            return None
+        try:
+            buttons = group.find_elements(By.CSS_SELECTOR, PublishPlayer.SUBMIT_CSS)
+        except Exception:
+            return None
+        for button in buttons:
+            try:
+                if button.is_displayed():
+                    return button
+            except Exception:
+                continue
+        return buttons[0] if buttons else None
+
+    @staticmethod
+    def button_is_submitted(button) -> bool:
+        text = PublishPlayer.button_text(button)
+        return any(keyword in text for keyword in PublishPlayer.SUBMITTED_KEYWORDS)
+
+    REJECTION_HINTS = ('正确率未达到', '正确率不足', '正确率未达', '未达到60%', '未达到 60%')
+
+    def rejection_message(self) -> str:
+        """提交后被平台拒绝时的顶部提示（如「客观题正确率未达到60%」）。
+
+        注意：只认否定句（未达到/不足），不能把「本单元学习规则」弹窗里的
+        「客观题正确率60%」过关条件误判成拒绝。
+        """
+        script = """
+        const hints = arguments[0];
+        const out = [];
+        for (const el of document.querySelectorAll('body *')) {
+            if (el.children.length > 2) continue;
+            const t = (el.innerText || '').trim();
+            if (!t || t.length > 120) continue;
+            if (!hints.some(h => t.indexOf(h) >= 0)) continue;
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            out.push(t.replace(/\\s+/g, ' ').slice(0, 120));
+            if (out.length >= 2) break;
+        }
+        return out;
+        """
+        messages = []
+        try:
+            messages = self.driver.execute_script(script, list(self.REJECTION_HINTS)) or []
+        except Exception:
+            messages = []
+        if not messages:
+            # 提示也可能挂在外壳层
+            in_content = False
+            try:
+                in_content = self.driver.execute_script('return window !== window.top;') is True
+                PublishPlayer.reset(self.driver)
+                messages = self.driver.execute_script(script, list(self.REJECTION_HINTS)) or []
+            except Exception:
+                messages = []
+            finally:
+                if in_content:
+                    PublishFrameContext(self.driver).enter()
+        return ' | '.join(messages)
+
+    def submit(self, group=None, timeout: float = 20.0, resolver=None) -> bool:
+        """提交一个 course-v3 题目组，并等待进入已批改状态。
+
+        平台在客观题正确率不足 60% 时会拒绝提交并弹 toast，
+        这种情况记录到 self.last_rejection，由上层决定是否继续。
+        resolver: 可选的「按 key 重新定位题目组」回调；批改后 DOM 会重渲染，
+        提交前的元素引用会失效，需要用新元素判断按钮是否变成「重新作答」。
+        """
+        self.last_rejection = ''
+        if group is None:
+            return False
+        button = self.find_submit_button(group)
+        if button is None:
+            print("\t未找到该题目组的提交按钮")
+            return False
+        if self.button_is_submitted(button):
+            return True
+        print("\t点击「提交」...")
+        if not WebDriverHelper.safe_click(self.driver, button):
+            print("\t点击提交按钮失败")
+            return False
+        return self.wait_graded(group, timeout, resolver)
+
+    def wait_graded(self, group, timeout: float = 20.0, resolver=None) -> bool:
+        """等待题目组进入已批改状态：按钮变「重新作答」或出现答案预览。"""
+        deadline = time.time() + timeout
+        current = group
+        while time.time() < deadline:
+            if resolver is not None:
+                try:
+                    # 批改可能重载 iframe；resolver 必须始终在内容层执行。
+                    PublishFrameContext(self.driver).enter()
+                    fresh = resolver()
+                    if fresh is not None:
+                        current = fresh
+                except Exception:
+                    pass
+            try:
+                button = self.find_submit_button(current)
+                if button is not None and self.button_is_submitted(button):
+                    return True
+                if current.find_elements(By.CSS_SELECTOR, '[class*="answerPreview"]'):
+                    return True
+            except StaleElementReferenceException:
+                current = group
+            except Exception:
+                pass
+            rejection = self.rejection_message()
+            if rejection:
+                self.last_rejection = rejection
+                print(f"\t平台拒绝提交：{rejection}")
+                return False
+            time.sleep(0.5)
+        print("\t提交后未检测到已批改状态，请人工确认")
+        return False
+
+    # ---- 外壳层弹窗 -----------------------------------------------------
+    def dismiss_rules_popup(self, max_candidates: int = 400) -> bool:
+        """关闭「本单元学习规则」弹窗：挂在外壳层，且只认真实鼠标点击。"""
+        PublishPlayer.reset(self.driver)
+        # 一次浏览器端查询定位规则弹窗及按钮，避免全页逐元素往返 WebDriver。
+        script = r"""
+        const labels = arguments[0], limit = arguments[1];
+        const visible = el => {
+            const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 &&
+                style.display !== 'none' && style.visibility !== 'hidden';
+        };
+        const textOf = el => (el.innerText || '').replace(/\s+/g, '');
+        const selectors = ['.ipublish-modal', '[role="dialog"]', '[class*="modal"], [class*="dialog"]'];
+        for (const selector of selectors) {
+            for (const modal of [...document.querySelectorAll(selector)].slice(0, limit)) {
+                if (!visible(modal) || !textOf(modal).includes('单元学习规则')) continue;
+                if (arguments[2]) return true;
+                for (const css of ['button, [role="button"], [class*="btn"]', 'a, span, div']) {
+                    const buttons = [...modal.querySelectorAll(css)].slice(0, limit);
+                    for (const button of buttons) {
+                        if (visible(button) && !button.disabled && labels.includes(textOf(button))) {
+                            return button;
+                        }
+                    }
+                }
+            }
+        }
+        return arguments[2] ? false : null;
+        """
+        try:
+            button = self.driver.execute_script(script, list(self.RULE_POPUP_TEXTS),
+                                                max_candidates, False)
+            if button is None:
+                return False
+        except Exception:
+            return False
+        try:
+            ActionChains(self.driver).move_to_element(button).click().perform()
+        except Exception:
+            if not WebDriverHelper.safe_click(self.driver, button):
+                return False
+        try:
+            WebDriverWait(self.driver, 2, poll_frequency=0.1).until(
+                lambda driver: not driver.execute_script(
+                    script, list(self.RULE_POPUP_TEXTS), max_candidates, True))
+        except Exception:
+            return False
+        print("    已关闭「本单元学习规则」弹窗")
+        return True
+
+
 class ContentHandler(ABC):
     """内容处理器基类"""
 
@@ -3785,6 +5319,8 @@ class AISolver:
         self.parser = QuestionParser(driver)
         self.prompt_builder = PromptBuilder(self.ai_client)
         self.executor = AnswerExecutor(driver)
+        self.publish_parser = PublishQuestionParser(driver)
+        self.publish_executor = PublishAnswerExecutor(driver)
         self.video_handler = VideoHandler(driver, self.config, self.stop_requested)
         self.content_handlers: List[ContentHandler] = [
             self.video_handler,
@@ -3795,6 +5331,9 @@ class AISolver:
         self.processed_hashes: set = set()
         self._processed_video_tabs: set = set()
         self._processed_audio_tabs: set = set()
+        self._publish_processed_groups: set = set()
+        self._publish_scope: Optional[PublishTaskScope] = None
+        self._publish_scope_url: str = ''
 
     def request_stop(self):
         self.stop_requested.set()
@@ -3819,6 +5358,7 @@ class AISolver:
 
         self.ai_client.start_new_chapter(chapter_name)
         self.processed_hashes.clear()
+        self._publish_processed_groups = set()
 
         course_home_url = self.driver.current_url
 
@@ -3944,6 +5484,11 @@ class AISolver:
 
         if self._should_stop():
             return False
+        if self._is_publish_page():
+            print("    检测到新版 ipublish 播放器，跳过旧版音视频预处理")
+            return self._process_current_tab_content(
+                self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
+            )
         self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx)
         if self._should_stop():
             return False
@@ -3977,6 +5522,9 @@ class AISolver:
             return False
 
         self.processed_hashes.add(content_hash)
+
+        if self._is_publish_page():
+            return self._process_publish_content(tab_name)
 
         page_num = 1
         total_answered = 0
@@ -4117,6 +5665,587 @@ class AISolver:
         print(f"    总共回答 {total_answered} 题")
         return True
 
+    # ---- 新版 ipublish 播放器（course-v3）---------------------------------
+    def _is_publish_page(self) -> bool:
+        """当前页面是否为新版 ipublish 播放器；无 driver 时安全返回 False。"""
+        driver = getattr(self, 'driver', None)
+        if driver is None:
+            return False
+        try:
+            return PublishPlayer.is_publish_page(driver)
+        except Exception:
+            return False
+
+    def _process_publish_content(self, task_name: str = '') -> bool:
+        """只处理当前打开的目录任务；批量任务切换由勾选列表控制。"""
+        print("    检测到新版 ipublish 播放器（course-v3），启用专用适配流程")
+        self.publish_executor.dismiss_rules_popup()
+        if not self._publish_prepare_scope(task_name):
+            return False
+
+        handled = 0
+        skipped = 0
+        rejected = 0
+        idle_reveals = 0
+        while not self._should_stop():
+            result = self._publish_process_next_group()
+            if result == 'error':
+                return False
+            if result == 'answered':
+                handled += 1
+                idle_reveals = 0
+                if handled >= 80:
+                    print("    已处理 80 个题目组，停止当前任务")
+                    break
+                continue
+            if result == 'skipped':
+                skipped += 1
+                idle_reveals = 0
+                continue
+            if result == 'rejected':
+                rejected += 1
+                idle_reveals = 0
+                continue
+
+            # 只在当前任务边界内补充懒加载，不点击「下一节」进入未勾选任务。
+            self.publish_executor.dismiss_rules_popup()
+            if idle_reveals < 25 and self._publish_reveal_more_groups():
+                idle_reveals += 1
+                continue
+            break
+
+        if handled:
+            print(f"    新版播放器共提交 {handled} 个题目组")
+        if rejected:
+            print(f"    另有 {rejected} 个题目组因正确率不足 60% 被平台拒绝提交")
+        if skipped:
+            print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
+        if not handled and not skipped and not rejected:
+            print("    当前任务没有待自动作答的题目组（已完成或需人工处理），不进入其他任务")
+        return not self._should_stop()
+
+    def _publish_prepare_scope(self, task_name: str = '', timeout: float = 8.0) -> bool:
+        self._publish_scope = None
+        deadline = time.monotonic() + timeout
+        reason = '未能进入任务内容'
+        while not self._should_stop() and time.monotonic() < deadline:
+            try:
+                route = self._publish_current_url()
+                frame = PublishPlayer.find_frame(self.driver)
+                if frame is None:
+                    raise ValueError('无法定位内容 iframe')
+                anchor = unquote(urlsplit(frame.get_attribute('src') or '').fragment)
+                with PublishFrameContext(self.driver) as context:
+                    if not context.entered:
+                        raise ValueError('未能进入内容 iframe')
+                    scope = PublishTaskScope.capture(self.driver, anchor)
+                    if '/course-v3:' in route and not scope.start_anchor:
+                        raise ValueError('新版任务没有明确的正文锚点')
+                    if task_name and not task_name.startswith('quick_current_page_') and scope.title:
+                        normalize = lambda text: re.sub(r'\s+', ' ', text).strip().casefold()
+                        if normalize(task_name) != normalize(scope.title):
+                            raise ValueError(f'打开的任务“{scope.title}”与勾选的“{task_name}”不一致')
+                    if self._publish_current_url() != route:
+                        raise ValueError('任务仍在切换中')
+                    self._publish_scope = scope
+                    self._publish_scope_url = route
+                    print(f"    作答范围：{scope.title or '当前独立题目页'}，到本任务末尾即停止")
+                    return True
+            except Exception as exc:
+                reason = str(exc)
+            if self.stop_requested.wait(0.2):
+                return False
+        print(f"    无法确认当前任务范围：{reason}，停止当前任务")
+        return False
+
+    def _publish_scoped_groups(self, groups: List[Dict]) -> List[Dict]:
+        scope = getattr(self, '_publish_scope', None)
+        if scope is None:
+            return groups
+        # 播放器会随题块状态自动更新外壳路由，不能用它重新划定作答范围。
+        # 始终使用最初的正文锚点；select 同时校验 iframe 文档和边界是否仍有效。
+        return scope.select(self.driver, groups)
+
+    def _publish_group_in_scope(self, group) -> bool:
+        try:
+            return bool(self._publish_scoped_groups([{'element': group}]))
+        except Exception as exc:
+            print(f"    题组范围校验失败：{exc}")
+            return False
+
+    def _publish_reveal_more_groups(self) -> bool:
+        """仅滚动到本任务最后一个题块，检查范围内是否出现更多题组。"""
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return False
+            try:
+                groups = self._publish_scoped_groups(self.publish_parser.collect_groups())
+                before = len(groups)
+                if not groups:
+                    return False
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'end', inline: 'nearest'});",
+                    groups[-1]['element'])
+                if self.stop_requested.wait(1.2):
+                    return False
+                after = len(self._publish_scoped_groups(self.publish_parser.collect_groups()))
+            except Exception:
+                return False
+            if after > before:
+                print(f"    滚动加载出更多题目组: {before} -> {after}")
+                return True
+            return False
+
+    def _publish_process_next_group(self) -> str:
+        """在当前页处理下一个待作答题目组，返回 answered / done / error。"""
+        # 切单元后可能再次弹出「本单元学习规则」，每组开始前先顺手关掉
+        self.publish_executor.dismiss_rules_popup()
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                print("    未能进入 ipublish 内容 iframe")
+                return 'error'
+
+            parser = self.publish_parser
+            groups = parser.collect_groups()
+            if not groups:
+                print("    内容层没有找到题目组（可能仍在加载）")
+                return 'done'
+
+            try:
+                scoped_groups = self._publish_scoped_groups(groups)
+            except ValueError as exc:
+                print(f"    {exc}")
+                return 'error'
+
+            for passage in parser.collect_passages(groups):
+                self.ai_client.add_passage_if_new(passage)
+
+            pending = None
+            for state in scoped_groups:
+                if state['kind'] in ('skip', 'upload'):
+                    if state['kind'] == 'upload':
+                        print(f"    跳过需要手动上传附件的题目组: {state['type']}")
+                    continue
+                if parser.group_submitted(state['element']):
+                    continue
+                key = parser.group_key(state['element'])
+                if key in self._publish_processed_groups:
+                    continue
+                pending = (state, key)
+                break
+
+            if pending is None:
+                return 'done'
+
+            state, key = pending
+            outcome = self._publish_answer_group(state['element'], state['type'], key)
+            if outcome == 'submitted':
+                return 'answered'
+            if outcome == 'rejected':
+                return 'rejected'
+            if outcome == 'skipped':
+                return 'skipped'
+            return 'error'
+
+    def _publish_answer_group(self, group, group_type: str, key: str):
+        """作答并提交一个题目组（调用前需已在内容 iframe 内）。
+
+        返回 'submitted' / 'skipped' / False。
+        """
+        parser = self.publish_parser
+        if not self._publish_group_in_scope(group):
+            print("    题目组不在当前勾选任务内，不作答")
+            return False
+        if not self.publish_executor.reveal_group(group, self.stop_requested):
+            print("    未能展开题目所在的折叠面板，停止当前任务")
+            return False
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", group)
+        except Exception:
+            pass
+        time.sleep(0.4)
+
+        # 播放器是懒渲染：没滚到可视区时组内只有占位 DOM（innerText 为空）。
+        # 必须先等它真正挂载，否则会对着空组填答案、提交也等不到已批改状态。
+        if not self._publish_wait_group_rendered(group):
+            print("    题目组滚动后仍未渲染，跳过该组（下次再处理）")
+            self._publish_processed_groups.add(key)
+            return 'skipped'
+
+        direction = parser.group_direction(group)
+        unsupported_before = len(parser.unsupported)
+        questions = parser.parse_group(group, group_type, 1)
+        if len(parser.unsupported) > unsupported_before:
+            print(f"    暂不支持自动作答的题型: {parser.unsupported[-1]}")
+
+        print(f"\n    题目组 {group_type}：{len(questions)} 道题")
+        if not questions:
+            print("    该题目组没有可解析的题目，跳过")
+            self._publish_processed_groups.add(key)
+            return 'skipped'
+        nodes = parser._question_nodes(group)
+        if nodes and len(questions) != len(nodes):
+            print("    本组有小题未能解析，不提交，请检查页面结构")
+            return False
+
+        prompt = self.prompt_builder.build(questions, direction)
+        prompt += self._publish_fill_format_hint(questions)
+        if group_type == 'fill_blanks_dropdown_group':
+            prompt += self._publish_dropdown_options_prompt(questions)
+        ai_response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+        if self._should_stop():
+            return False
+        if not ai_response:
+            print("    AI 未返回答案")
+            return False
+
+        filled = 0
+        blank_offset = 0
+        for question in questions:
+            if self._should_stop() or not self._publish_group_in_scope(group):
+                return False
+            answer = self._publish_answer_text(question, ai_response, blank_offset)
+            if question.q_type == QuestionType.FILL_IN:
+                answer = self._normalize_fill_answer_capitalization(question, answer)
+            if answer and self.publish_executor.execute(question, answer):
+                filled += 1
+            if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
+                blank_offset += question.answer_count or 1
+        print(f"    本组填写 {filled}/{len(questions)} 题")
+
+        if filled != len(questions):
+            print("    本组未完整填写，不提交，停止当前任务以免留下半成品")
+            return False
+
+        if self._should_stop():
+            return False
+
+        # 提交前退出内容层：切单元后「本单元学习规则」弹窗可能再次出现，
+        # 它会挡住提交按钮（它在外壳层，只有真实鼠标点击才有效）。
+        PublishPlayer.reset(self.driver)
+        popup_closed = self.publish_executor.dismiss_rules_popup()
+        if popup_closed:
+            print("    提交前已关闭「本单元学习规则」弹窗")
+
+        with PublishFrameContext(self.driver) as submit_context:
+            if not submit_context.entered:
+                print("    提交前未能重新进入内容 iframe")
+                return False
+            submit_group = group
+            if popup_closed:
+                # 关弹窗会重排外壳 DOM，重新定位一次更稳；定位不到就沿用原元素
+                relocated = self._publish_find_group_by_key(key)
+                if relocated is not None:
+                    submit_group = relocated
+            if not self._publish_wait_group_rendered(submit_group, timeout=6):
+                print("    提交前题目组未渲染，跳过该组")
+                self._publish_processed_groups.add(key)
+                return 'skipped'
+            if not self._publish_group_in_scope(submit_group):
+                print("    提交前任务边界校验失败，不提交")
+                return False
+            button = self.publish_executor.find_submit_button(submit_group)
+            print(f"    提交按钮状态: text={PublishPlayer.button_text(button)!r} "
+                  f"displayed={button.is_displayed() if button is not None else None}")
+            submitted_before = self._publish_submitted_count()
+            group_index = self._publish_group_index(key)
+            if self._should_stop():
+                return False
+            submitted_ok = self.publish_executor.submit(
+                submit_group,
+                timeout=30.0,
+                resolver=lambda: (self._publish_find_group_by_key(key)
+                                  or self._publish_group_at(group_index)))
+            if not submitted_ok:
+                rejection = getattr(self.publish_executor, 'last_rejection', '')
+                if rejection:
+                    print(f"    平台拒绝提交（{rejection}），该组保持未提交状态并继续后面题目")
+                    self._publish_processed_groups.add(key)
+                    return 'rejected'
+                # 批改后组 id/key 可能变化，用「已批改组数量是否增加」兜底确认
+                if self._publish_submitted_count() > submitted_before:
+                    print("    已批改题目组数量增加，判定提交成功")
+                    submitted_ok = True
+            if not submitted_ok:
+                # 主观题批改后播放器可能重载内容（iframe 文档换了），
+                # 旧元素全部失效，这里退出重进后再确认一次。
+                submitted_ok = self._publish_confirm_graded_after_reload(group_index, key)
+                if submitted_ok:
+                    print("    重新进入播放器后确认已批改")
+            if not submitted_ok:
+                print("    提交失败或未进入已批改状态")
+                return False
+
+        self._publish_processed_groups.add(key)
+        print("    本组已提交")
+        return 'submitted'
+
+    def _publish_confirm_graded_after_reload(self, index: int, key: str) -> bool:
+        """退出并重新进入内容 iframe，再确认该组是否已批改。"""
+        PublishPlayer.reset(self.driver)
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return False
+            fresh = self._publish_find_group_by_key(key) or self._publish_group_at(index)
+            if fresh is None or not self._publish_group_in_scope(fresh):
+                return False
+            if self.publish_parser.group_submitted(fresh):
+                return True
+            try:
+                text = fresh.text or ''
+            except Exception:
+                text = ''
+            return '得分' in text and '重新作答' in text
+
+    def _publish_find_group_by_key(self, key: str):
+        parser = self.publish_parser
+        for state in self._publish_scoped_groups(parser.collect_groups()):
+            if parser.group_key(state['element']) == key:
+                return state['element']
+        return None
+
+    def _publish_group_index(self, key: str) -> int:
+        """题目组在当前页的顺序下标；批改后组 id 会变，用下标做兜底定位。"""
+        parser = self.publish_parser
+        try:
+            for index, state in enumerate(parser.collect_groups()):
+                if parser.group_key(state['element']) == key:
+                    return index
+        except Exception:
+            pass
+        return -1
+
+    def _publish_group_at(self, index: int):
+        if index < 0:
+            return None
+        try:
+            groups = self.publish_parser.collect_groups()
+        except Exception:
+            return None
+        if 0 <= index < len(groups):
+            return groups[index]['element']
+        return None
+
+    def _publish_submitted_count(self) -> int:
+        """当前页已批改（按钮为「重新作答」）的题目组数量。"""
+        parser = self.publish_parser
+        try:
+            groups = self._publish_scoped_groups(parser.collect_groups())
+        except Exception:
+            return 0
+        count = 0
+        for state in groups:
+            try:
+                if parser.group_submitted(state['element']):
+                    count += 1
+            except Exception:
+                continue
+        return count
+
+    def _publish_dropdown_options_prompt(self, questions: List[Question]) -> str:
+        """下拉填空：尽力抓取每个空位的候选列表，供模型按原样选择。"""
+        if not questions:
+            return ''
+        lines = []
+        offset = 0
+        for question in questions:
+            blanks = self.publish_executor._dropdown_blanks(question)
+            for index, blank in enumerate(blanks, offset + 1):
+                try:
+                    options = self.publish_executor.collect_dropdown_options(blank)
+                except Exception:
+                    options = []
+                print(f"    空{index} 候选抓取: {len(options)} 个")
+                if options:
+                    lines.append(f"   空{index} 候选: {' / '.join(options)}")
+            offset += question.answer_count or len(blanks) or 1
+        if not lines:
+            return ''
+        return ("\n【空位候选】每个空只能从下列候选中选择，尽量按原样（含大小写）作答：\n"
+                + "\n".join(lines) + "\n")
+
+    def _publish_fill_format_hint(self, questions: List[Question]) -> str:
+        """一个题目组里有多道填空时，要求按整组空号连续编号，避免题号/空号混在一起。"""
+        fill_questions = [q for q in questions
+                          if q.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT)]
+        total_blanks = sum(q.answer_count or 1 for q in fill_questions)
+        if len(fill_questions) < 2 or total_blanks < 2:
+            return ''
+        ranges = []
+        offset = 0
+        for question in fill_questions:
+            count = question.answer_count or 1
+            ranges.append(f"小题{question.number} 的局部空号 1..{count} 对应整组空号 "
+                          f"{offset + 1}..{offset + count}")
+            offset += count
+        return (
+            "\n【本题组格式】\n"
+            f"本题目组共 {len(fill_questions)} 道小题、{total_blanks} 个空，"
+            f"请按空号 1..{total_blanks} 连续编号作答，"
+            "不要按小题再分组，也不要在答案里加括号或额外题号，"
+            "例如：1.answer1 2.answer2 3.answer3\n"
+            + '\n'.join(ranges) + '\n'
+        )
+
+    def _publish_wait_group_rendered(self, group, timeout: float = 12.0) -> bool:
+        """等题目组真正渲染：innerText 非空即视为已挂载。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._should_stop():
+                return False
+            try:
+                length = self.driver.execute_script(
+                    "return arguments[0] ? (arguments[0].innerText || '').length : 0;", group)
+            except Exception:
+                length = 0
+            if length:
+                return True
+            if self.stop_requested.wait(0.5):
+                return False
+        return False
+
+    def _publish_answer_text(self, question: Question, ai_response: str,
+                             blank_offset: int = 0) -> str:
+        if question.q_type in (QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
+                               QuestionType.TRUE_FALSE):
+            return self._extract_single_answer(ai_response, question.number)
+        answer = ai_response
+        if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
+            answer = self._sanitize_fill_answer(answer)
+            if blank_offset:
+                return self._shift_blank_answer(answer, blank_offset,
+                                                question.answer_count or 1)
+        return answer
+
+    @staticmethod
+    def _sanitize_fill_answer(answer: str) -> str:
+        """去掉「1. (1) Iraq」这种题号后紧跟空号括号的重复编号。"""
+        cleaned = re.sub(r'(?<=\d\.)\s*\(\s*\d+\s*\)', ' ', answer or '')
+        return re.sub(r'[ \t]+', ' ', cleaned).strip()
+
+    def _normalize_fill_answer_capitalization(self, question: Question, answer: str) -> str:
+        """句首空自动补首字母大写（平台按正确率判分，大小写也算分）。"""
+        count = question.answer_count or 1
+        values = AnswerExecutor._parse_banked_answer(answer, count)
+        if not values or not any(values):
+            return answer
+        values = self._capitalize_sentence_initial_answers(question.text, values)
+        return ' '.join(f'{index + 1}.{value}'
+                        for index, value in enumerate(values) if value)
+
+    @staticmethod
+    def _capitalize_sentence_initial_answers(text: str, values: List[str]) -> List[str]:
+        result = []
+        for index, value in enumerate(values, 1):
+            marker = f'({index})'
+            position = (text or '').find(marker)
+            needs_capital = position == 0
+            if position < 0:
+                result.append(value)
+                continue
+            if not needs_capital:
+                prefix = text[:position].rstrip()
+                needs_capital = (not prefix) or prefix[-1] in '.!?;:。！？；：'
+            if needs_capital and value and value[0].isalpha():
+                value = value[0].upper() + value[1:]
+            result.append(value)
+        return result
+
+    @staticmethod
+    def _shift_blank_answer(answer: str, offset: int, count: int) -> str:
+        """同组多道填空题：把第 offset+1..offset+count 个空映射回 1..count。
+
+        course-v3 的题目组里可能有多道填空，AI 一次给的是整组空号；
+        每道题只能拿自己那一段，否则第二题会重复第一题的答案。
+        """
+        parsed = AnswerExecutor._parse_banked_answer(answer, offset + count)
+        values = parsed[offset:offset + count]
+        return ' '.join(f'{index + 1}.{value}'
+                        for index, value in enumerate(values) if value)
+
+    def _publish_advance_page(self) -> bool:
+        """尝试切换到下一节，返回是否真的切换成功。"""
+        before_url = self._publish_current_url()
+        before_text = self._publish_content_length()
+        if not self._publish_click_next():
+            return False
+
+        for _ in range(20):
+            if self._should_stop():
+                return False
+            if self._publish_current_url() != before_url:
+                return True
+            after_text = self._publish_content_length()
+            if after_text and after_text != before_text:
+                return True
+            time.sleep(0.5)
+        print("    点击下一节后内容未变化")
+        return False
+
+    def _publish_current_url(self) -> str:
+        try:
+            return self.driver.current_url or ''
+        except Exception:
+            return ''
+
+    def _publish_content_length(self) -> int:
+        """内容层可见文本长度，用于判断是否真的换页。"""
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return 0
+            try:
+                return self.driver.execute_script(
+                    'return document.body ? document.body.innerText.length : 0;') or 0
+            except Exception:
+                return 0
+
+    def _publish_click_next(self) -> bool:
+        """先找内容层的「下一节」，再退回外壳层。"""
+        with PublishFrameContext(self.driver) as context:
+            if context.entered:
+                button = self._publish_find_next_button()
+                if button is not None:
+                    print("    尝试进入下一节（内容层）...")
+                    if WebDriverHelper.safe_click(self.driver, button):
+                        time.sleep(2.5)
+                        return True
+
+        PublishPlayer.reset(self.driver)
+        button = self._publish_find_next_button()
+        if button is None:
+            return False
+        print("    尝试进入下一节（外壳层）...")
+        if not WebDriverHelper.safe_click(self.driver, button):
+            return False
+        time.sleep(2.5)
+        return True
+
+    def _publish_find_next_button(self):
+        """查找「下一节/下一题」控制（在当前执行上下文里查找）。"""
+        keywords = ('下一节', '下一课', '下一题', '下一页', '下一个', 'next')
+        blocked = PublishPlayer.SUBMITTED_KEYWORDS + ('提交', '上一')
+        try:
+            candidates = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                'button, a, [role="button"], div[class*="btn"], div[class*="next"]')
+        except Exception:
+            return None
+        for element in candidates[:500]:
+            try:
+                if not element.is_displayed() or not element.is_enabled():
+                    continue
+                haystack = (PublishPlayer.button_text(element)
+                            + (element.get_attribute('aria-label') or '')
+                            + (element.get_attribute('title') or '')).lower()
+            except Exception:
+                continue
+            if any(word in haystack for word in blocked):
+                continue
+            if any(word in haystack for word in keywords):
+                return element
+        return None
+
     def _extract_single_answer(self, ai_response: str, question_number: int) -> str:
         answer = AnswerExecutor._extract_answer_by_number(ai_response, question_number)
         if answer:
@@ -4145,6 +6274,8 @@ class AISolver:
         print("\n" + "=" * 60)
         print(" 开始处理当前停留的页面")
         print("=" * 60)
+
+        self._publish_processed_groups = set()
 
         quick_tab_name = f"quick_current_page_{int(time.time())}"
         self.ai_client.force_reset(f"{chapter_name}_{quick_tab_name}")
@@ -4220,6 +6351,9 @@ class AISolver:
         return None
 
     def _generate_content_hash_from_direction(self) -> str:
+        if self._is_publish_page():
+            # 新版路由包含教材/单元/任务，外壳没有旧版题干；不要白等 3 × 5 秒。
+            return hashlib.md5(self._publish_current_url().encode()).hexdigest()[:16]
         try:
             direction_elem = WebDriverHelper.safe_find_element(
                 self.driver,
@@ -4234,6 +6368,8 @@ class AISolver:
         return "empty"
 
     def _generate_content_hash(self) -> str:
+        if self._is_publish_page():
+            return hashlib.md5(self._publish_current_url().encode()).hexdigest()[:16]
         try:
             direction_elem = WebDriverHelper.safe_find_element(
                 self.driver,
@@ -4622,20 +6758,52 @@ class UCampusBot:
     6. 重启终端，输入 ffmpeg -version 验证
     """)
 
-    def _create_driver(self):
+    COMPAT_EDGE_ARGS = ('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+                        '--disable-extensions')
+
+    def _start_edge(self, temp_dir: str, extra_args=()):
+        """按指定临时目录启动 Edge，并注入反检测脚本。"""
         options = webdriver.EdgeOptions()
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        for argument in extra_args:
+            options.add_argument(argument)
 
-        options.add_argument(f'--user-data-dir={tempfile.mkdtemp(prefix="ucampus_")}')
+        try:
+            user_data_dir = tempfile.mkdtemp(prefix='ucampus_', dir=temp_dir or None)
+        except Exception:
+            user_data_dir = tempfile.mkdtemp(prefix='ucampus_')
+        options.add_argument(f'--user-data-dir={user_data_dir}')
+        if temp_dir:
+            options.add_argument(f'--disk-cache-dir={os.path.join(temp_dir, "edge_cache")}')
+            options.add_argument(f'--crash-dumps-dir={temp_dir}')
 
         driver = webdriver.Edge(options=options)
-
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
         })
-
         return driver
+
+    def _create_driver(self):
+        # 系统临时目录不可写时，Edge 会报
+        # "cannot create temp dir for unpacking extensions"，这里统一换成可写目录
+        temp_dir = ensure_writable_temp_dir()
+
+        # Selenium Manager 的驱动缓存也放到可写目录，避免用户目录 .cache 拒绝访问
+        try:
+            selenium_cache = os.path.join(BASE_DIR, 'logs', 'selenium_cache')
+            os.makedirs(selenium_cache, exist_ok=True)
+            os.environ.setdefault('SE_CACHE_PATH', selenium_cache)
+        except Exception:
+            pass
+
+        try:
+            return self._start_edge(temp_dir)
+        except (SessionNotCreatedException, WebDriverException) as exc:
+            # 受限环境（沙箱/受限用户/显卡驱动异常）下首次启动可能失败，降级重试一次：
+            # 换新的临时 profile 并加上兼容参数
+            print(f" 启动 Edge 失败（{str(exc)[:120]}），尝试兼容模式重试...")
+            return self._start_edge(temp_dir, extra_args=self.COMPAT_EDGE_ARGS)
 
     def start(self):
         solver = AISolver(self.driver, self.config)
@@ -4697,6 +6865,17 @@ class UCampusBot:
                             'label.usso-agreements-checkbox .usso-checkbox'
                         )))
                     agreement_control.click()
+                    # 新版账号中心点击协议会弹「服务协议与隐私政策」确认框，
+                    # 必须再点一次「同意」，否则协议不会勾选、登录会被拦下。
+                    try:
+                        for agree_button in self.driver.find_elements(
+                                By.CSS_SELECTOR, '.usso-modal-agreement .usso-btn-primary'):
+                            if agree_button.is_displayed():
+                                agree_button.click()
+                                gui_log_queue.put(" 已确认服务协议与隐私政策")
+                                break
+                    except Exception:
+                        pass
 
                 login_btn = WebDriverWait(self.driver, 20).until(
                     EC.element_to_be_clickable((
@@ -4899,6 +7078,9 @@ class PopupWatcher:
 
 if __name__ == '__main__':
     print('*' * 25 + "Unipus-Helper" + '*' * 25)
+
+    # 先把临时目录换成可写的：受限环境下 Edge 启动会因为系统 TEMP 不可写而失败
+    ensure_writable_temp_dir()
 
     skip_check = '--skip-check' in sys.argv
 

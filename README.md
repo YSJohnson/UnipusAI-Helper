@@ -34,38 +34,7 @@
 
 ---
 
-## 项目结构
-
-```text
-UnipusAI-Helper/
-├── UnipusAI_Helper.py
-├── fluent_ui.py
-├── config_editor.py
-├── EnvironmentChecker.py
-├── AudioRecognizer.py
-├── config.json
-├── requirements.txt
-└── images/
-```
-
----
-
-## 运行环境
-
-- Windows 10/11
-- Python 3.10 及以上（3.12 与 3.13 已验证）
-- Microsoft Edge
-- FFmpeg
-- OpenAI 兼容大模型接口
-
-> [!IMPORTANT]
-> 从v3.5之后不再提供Windows exe打包。项目依赖本地 Whisper 和 PyTorch，打包后体积较大，单文件程序还存在启动缓慢及 DLL 兼容风险。请克隆仓库并通过 Python 源码运行；首次启动本地语音识别时还可能下载 Whisper `base` 模型，请预留网络流量和磁盘空间。
-
----
-
 ## 使用方法
-
-### 源码运行
 
 ```powershell
 git clone https://github.com/YSJohnson/UnipusAI-Helper.git
@@ -118,23 +87,6 @@ py -m venv .venv
 | `token_full` | 否 | 认证兜底；支持旧版完整 `__token` JSON 或 U校园 5.0 的 JWT，正常登录时留空 |
 | `debug_mode` | 否 | 是否开启调试日志，默认 `false` |
 
-
-
-## 获取 `token_full`（可选）
-从3.6.0版本之后不再强制需要手动获取token_full 程序会自己处理 此处仅保留为降级备选方案
-
-正常情况下程序会保留本次 SSO 登录生成的认证信息，`token_full` 留空即可。仅当正常登录后仍提示缺少认证信息时，再手动配置以下任一种值：
-
-`token_full` 是沿用旧版本的字段名，保存的是认证凭据，并不是独立的反作弊开关。程序仍需完成账号密码、验证码和服务端 SSO 校验；登录成功后优先使用平台签发的 `jwt` cookie。
-
-- 旧版课程页的完整 token：登录后执行 `localStorage.getItem('__token')`。
-- U校园 5.0 门户的 JWT：登录 `https://ucloud.unipus.cn/` 后执行 `JSON.parse(localStorage.getItem('PORTAL_STATE_PERSISTENT')).Authorization`。
-
-将控制台返回的结果直接粘贴到配置编辑器。程序会区分两种格式，不会把裸 JWT 写入只接受完整 JSON 对象的旧版 `__token`。
-
-> [!IMPORTANT]
-> 手动编辑 `config.json` 时还需保证内容是合法 JSON；建议直接使用配置编辑器可自动处理字符串转义。
-
 ---
 
 ## 使用指南
@@ -170,90 +122,43 @@ py -m venv .venv
 
 ---
 
-## 题型适配投稿
+## 新版 ipublish 播放器教材
 
-我本身能接触到的教材有限 能适配的教材题型也有限 所以不能保证所有题型都适配 目前已知新视野大学英语1 2 3册是基本全部适配 其他教材可能会出现不适配的情况。
+`新农科大学英语` 这类 course-v3 教材已完成初步适配，感谢 [Miku196](https://github.com/Miku196) 提供的账号。
 
-如果你遇到暂不支持的新题型/新教材 可以在 issue 中投稿页面结构 或者是联系我的邮箱私信发送账号密码（我会在最小范围内使用 这也是最快最高效的方法） 我会在有可复现材料时优先适配 也将会帮助项目变得更加完善。
+支持的题型：
 
-在提交 issue 时 请尽量按照以下格式并提供以下内容 这会有利于我的适配：
-1. 题型截图：直接截图整个页面即可。
-2. 关键元素 HTML：在浏览器按下 F12 打开开发人员工具 在控制台粘贴以下内容 会自动获取当前页面的题型内容：
+| 题型 | 播放器标记 | 处理方式 |
+| --- | --- | --- |
+| 单选 / 多选 | `single_choice_group` / `multiple_choice_group` | 按选项字母点击 |
+| 判断 | `true_false_group` | 点击 T / F |
+| 填空 | `fill_blanks_group` | 按空号写入 `input`（支持一个组里多道小题、多个空） |
+| 选词填空 | `fill_blanks_choice_group` | 从候选词中选择后写入 |
+| 下拉填空 | `fill_blanks_dropdown_group` | 点开空位抓取候选列表后交给模型选择，按文本精确点选 |
+| 简答 / 翻译 / 写作 | `short_answer_group` / `translation_group` / `writing_group` | 写入文本作答框 |
 
-```javascript
-(() => {
-  const selectors = [
-    '.layout-direction-container',
-    '.abs-direction',
-    '.layout-material-container',
-    '.audio-material-wrapper',
-    '.question-audio',
-    'audio',
-    '.layoutBody-container',
-    '.question-common-abs-reply',
-    '.question-common-abs-choice',
-    '.question-wrap',
-    '.question-basic'
-  ];
+会跳过并提示的题型：口语录音（`oral_personal_state_group`）、附件上传
+（`multi_media_upload_group`）、连线匹配（`text_match_group`）、小组讨论（`discussion_group`）。
+纯阅读材料（`rich_text_read_group`）不答题，但会作为上下文提供给模型。
 
-  const data = {
-    url: location.href,
-    title: document.title,
-    items: selectors.map(sel => ({
-      selector: sel,
-      count: document.querySelectorAll(sel).length,
-      nodes: [...document.querySelectorAll(sel)].map((el, i) => ({
-        index: i,
-        text: (el.innerText || '').slice(0, 2000),
-        html: el.outerHTML
-      }))
-    }))
-  };
-
-  copy(JSON.stringify(data, null, 2));
-  console.log('已复制页面结构，可以直接粘贴给我');
-})();
-```
-3. 将获取到的页面结构保存到 txt 文本文档中 并和图片一起作为 issue 附件上传
-
-请注意隐私：
-
-- 不要公开账号、密码、token、Cookie、API Key、学校个人信息。
-- 如果截图里有姓名、学号等隐私信息，请注意打码。
-- 音频、视频资源链接如果包含个人鉴权参数，也请先脱敏。
-
-材料越完整，越容易适配；只有一句“这个题型不支持”的 issue 无法判断页面结构 将被作为无效 issue 关闭。
+使用方式与旧版一致
 
 ---
 
-## 常见问题 Q&A
+## 题型适配投稿
 
-### 找不到 FFmpeg
+我本身能接触到的教材有限 能适配的教材题型也有限 所以不能保证所有题型都适配 目前已知新视野大学英语1 2 3册是基本全部适配 新农科大学英语完成初步适配 其他教材可能会出现不适配的情况。
 
-- 听力和视频转写依赖 FFmpeg，需要安装并加入系统 `PATH`。
+如果你遇到暂不支持的新题型/新教材 可以在 issue 中投稿页面结构 或者是联系我的邮箱私信发送账号密码（我会在最小范围内使用 这也是最快最高效的方法） 我会在有可复现材料时优先适配 也将会帮助项目变得更加完善。
 
-### 登录后白屏或状态异常
-
-- 程序会等待 SSO 完成换票，并自动移除已消费的一次性 `ticket` 后再进入 `/home`。
-- 若仍提示认证失败，先将 `token_full` 留空重试；仅在需要时按上文重新获取认证值。
-
-### API 调用失败
-
-- 优先检查：
-- `api_key`
-- `base_url`
-- `model`
-
-
-
-其他问题欢迎在 Issue 提出。
+材料越完整，越容易适配；只有一句“这个题型不支持”的 issue 无法判断页面结构 将被作为无效 issue 关闭。
 
 ---
 
 ## 致谢
 
 感谢优秀的开源土壤。
-感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者：Zzj-klwgxdz。这是纯命令行 + 原生 HTTP 实现的Rust版U校园 AI 版刷课脚本。  
+感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者 [Zzj-klwgxdz](https://github.com/Zzj-klwgxdz)。这是纯命令行 + 原生 HTTP 实现的 Rust 版 U 校园 AI 版刷课脚本。  
 感谢原作者提供的强大解析器框架与思路，特别是其针对 U 校园 AI 版登录认证状态的处理机制。
 
 ---

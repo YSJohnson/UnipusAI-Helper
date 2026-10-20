@@ -8,3 +8,4 @@ build/
 dist/
 release/
 config.json
+.vscode/
