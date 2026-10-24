@@ -216,9 +216,9 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_scan.setEnabled(False)
         self.btn_scan.clicked.connect(self._on_scan_clicked)
         control_layout.addWidget(self.btn_scan)
-        self.btn_scan_unit = PushButton("扫描当前单元必修")
+        self.btn_scan_unit = PrimaryPushButton("扫描当前单元")
         self.btn_scan_unit.setEnabled(False)
-        self.btn_scan_unit.setToolTip("只扫描当前显示的单元，并自动勾选其中的必修任务")
+        self.btn_scan_unit.setToolTip("只扫描当前已经打开的单元，不切换其它单元")
         self.btn_scan_unit.clicked.connect(self._on_scan_unit_clicked)
         control_layout.addWidget(self.btn_scan_unit)
         self.btn_quick = PrimaryPushButton("快速处理当前页")
@@ -345,7 +345,7 @@ class FluentModernGUI(MSFluentWindow):
         empty.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(empty)
         layout.setContentsMargins(0, 70, 0, 70)
-        text = self._label("登录后点击“扫描任务列表”，课程任务会显示在这里。", 14, "#a7b0bb")
+        text = self._label("登录后点击「扫描任务列表」或「扫描当前单元」，课程任务会显示在这里。", 14, "#a7b0bb")
         text.setAlignment(Qt.AlignCenter)
         layout.addWidget(text)
         return empty
@@ -442,11 +442,12 @@ class FluentModernGUI(MSFluentWindow):
 
     def enable_scan_button(self):
         self.btn_scan.setEnabled(True)
+        self.btn_scan_unit.setEnabled(True)
         self.btn_quick.setEnabled(True)
         self._set_status("就绪", "登录完成，可以扫描任务列表或直接处理当前页面。", "#37d987")
         self.gui_log_queue.put("\n" + "=" * 60)
         self.gui_log_queue.put("系统就绪")
-        self.gui_log_queue.put("模式1: 点击[扫描任务列表] -> 勾选 -> 自动处理")
+        self.gui_log_queue.put("模式1: 点击[扫描任务列表] 或 [扫描当前单元] -> 勾选 -> 自动处理")
         self.gui_log_queue.put("模式2: 手动翻到题目页 -> 点击[快速处理当前页]")
         try:
             winsound.MessageBeep()
@@ -495,7 +496,7 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_scan_unit.setEnabled(False)
         self.btn_scan_unit.setText("扫描中...")
         self.btn_scan.setEnabled(False)
-        self._set_status("扫描当前单元", "只扫描当前显示的单元，不切换其他单元。", "#ffb25f")
+        self._set_status("扫描当前单元", "只扫描当前已经打开的单元，不切换其它单元。", "#ffb25f")
         self._set_busy(True)
         threading.Thread(target=self._scan_tabs_thread, args=(True,), daemon=True).start()
 
@@ -615,23 +616,19 @@ class FluentModernGUI(MSFluentWindow):
                     "element": unit_tab,
                 })
 
-            targets = unit_infos
-            if current_unit_only:
-                targets = [info for info in unit_infos if self._is_active_unit(info["element"])]
-                if not targets:
-                    targets = unit_infos[:1]
-                self.gui_log_queue.put(f"仅扫描当前单元: {targets[0]['display']}")
+            active_info = next((i for i in unit_infos if self._is_active_unit(i["element"])), None)
 
-            for info in targets:
+            def collect_unit(info, click_tab: bool):
                 name_counts = {}
-                try:
-                    self.driver.execute_script("arguments[0].click();", info["element"])
-                except Exception:
+                if click_tab:
                     try:
-                        info["element"].click()
+                        self.driver.execute_script("arguments[0].click();", info["element"])
                     except Exception:
-                        continue
-                time.sleep(0.9)
+                        try:
+                            info["element"].click()
+                        except Exception:
+                            return
+                    time.sleep(0.9)
                 tasks = self.driver.execute_script(self.READ_TASKS_JS) or []
                 elements = self.driver.find_elements(self.By.CSS_SELECTOR, self.TASK_ITEM_SELECTOR)
                 for task in tasks:
@@ -671,6 +668,21 @@ class FluentModernGUI(MSFluentWindow):
                         "_section_title": section_title,
                         "_name_occurrence": occurrence,
                     })
+
+            if current_unit_only:
+                # 只读「当前已经打开」的那个单元：不点任何 tab，直接抓现行 DOM
+                info = active_info or {
+                    "index": 0,
+                    "label": "",
+                    "display": "当前单元",
+                    "is_preview": False,
+                }
+                self.gui_log_queue.put(f"仅扫描当前单元: {info['display']}（不切换其它单元）")
+                collect_unit(info, click_tab=False)
+                return tabs
+
+            for info in unit_infos:
+                collect_unit(info, click_tab=True)
         except Exception as e:
             if self.logger:
                 self.logger.debug(f"课程目录扫描未命中: {e}")
@@ -699,8 +711,10 @@ class FluentModernGUI(MSFluentWindow):
                 const el = arguments[0];
                 if (el.getAttribute('aria-selected') === 'true') return true;
                 const cls = String(el.className);
-                if (/active|selected|current/i.test(cls)) return true;
-                return false;
+                // 目录 tab 的当前项带 tabActive，滑条带 sliderActive
+                if (/tabactive|slideractive/i.test(cls)) return true;
+                if (el.querySelector('[class*="sliderActive"]')) return true;
+                return /active|selected|current/i.test(cls);
             """, element))
         except Exception:
             return False
@@ -740,6 +754,8 @@ class FluentModernGUI(MSFluentWindow):
             item = self._tab_list_layout.takeAt(0)
             widget = item.widget()
             if widget:
+                # 先脱离父级再 deleteLater，避免重新扫描时旧内容（含空状态提示）残留在列表上
+                widget.setParent(None)
                 widget.deleteLater()
 
     def _build_tab_list_ui(self, current_unit_only: bool = False):
@@ -811,14 +827,16 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_auto.setEnabled(True)
         self.btn_auto.setText(f"处理选中任务 ({len(self._selected_tab_keys)})")
         self.btn_scan.setEnabled(True)
-        self.btn_scan.setText("重新扫描")
+        self.btn_scan.setText("扫描任务列表")
         self.btn_scan_unit.setEnabled(True)
-        self.btn_scan_unit.setText("扫描当前单元必修")
+        self.btn_scan_unit.setText("扫描当前单元")
+        scope = "当前单元" if current_unit_only else "全部单元"
         self._set_status(
             "已扫描",
-            f"发现 {len(self._all_tabs)} 个任务（已完成 {done_count}），已勾选未完成必修 {len(self._selected_tab_keys)} 项。",
+            f"范围：{scope}；发现 {len(self._all_tabs)} 个任务（已完成 {done_count}），"
+            f"已勾选未完成必修 {len(self._selected_tab_keys)} 项。再次点击对应按钮可重新扫描。",
             "#37d987")
-        self.gui_log_queue.put(f"\n扫描完成，共 {len(self._all_tabs)} 个任务可供选择")
+        self.gui_log_queue.put(f"\n扫描完成（范围：{scope}），共 {len(self._all_tabs)} 个任务可供选择")
         self._update_task_stats()
 
     @staticmethod
@@ -952,6 +970,7 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_auto.setEnabled(False)
         self.btn_auto.setText("处理中...")
         self.btn_scan.setEnabled(False)
+        self.btn_scan_unit.setEnabled(False)
         self.btn_quick.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_stop.setText("停止")
@@ -996,7 +1015,9 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_auto.setEnabled(True)
         self.btn_auto.setText(f"处理选中任务 ({len(self._selected_tab_keys)})")
         self.btn_scan.setEnabled(True)
-        self.btn_scan.setText("重新扫描")
+        self.btn_scan.setText("扫描任务列表")
+        self.btn_scan_unit.setEnabled(True)
+        self.btn_scan_unit.setText("扫描当前单元")
         self.btn_quick.setEnabled(True)
         self.btn_quick.setText("快速处理当前页")
         self.btn_stop.setEnabled(False)
@@ -1022,6 +1043,7 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_quick.setEnabled(False)
         self.btn_quick.setText("处理中...")
         self.btn_scan.setEnabled(False)
+        self.btn_scan_unit.setEnabled(False)
         if self.btn_auto.isVisible():
             self.btn_auto.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -1054,6 +1076,8 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_quick.setText("快速处理当前页")
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText("扫描任务列表")
+        self.btn_scan_unit.setEnabled(True)
+        self.btn_scan_unit.setText("扫描当前单元")
         if self.btn_auto.isVisible():
             self.btn_auto.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -1072,9 +1096,9 @@ class FluentModernGUI(MSFluentWindow):
     def _reset_scan_button(self):
         self._set_busy(False)
         self.btn_scan.setEnabled(True)
-        self.btn_scan.setText("重新扫描")
+        self.btn_scan.setText("扫描任务列表")
         self.btn_scan_unit.setEnabled(True)
-        self.btn_scan_unit.setText("扫描当前单元必修")
+        self.btn_scan_unit.setText("扫描当前单元")
         self._set_status("扫描失败", "请确认已进入课程页面后重试。", "#ff6b6b")
         InfoBar.error("扫描失败", "请确认已进入课程页面后重试。", duration=2200, position=InfoBarPosition.TOP_RIGHT, parent=self)
 
@@ -1124,4 +1148,8 @@ class FluentModernGUI(MSFluentWindow):
         if not self._closing:
             self.on_quit_clicked()
         event.accept()
+
+
+
+
 

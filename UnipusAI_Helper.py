@@ -84,7 +84,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.7.0"
+APP_VERSION = "3.7.1"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -8620,6 +8620,7 @@ if __name__ == '__main__':
         print(f"\n 程序运行失败: {error_msg[:100]}")
         logger.error(f"程序异常: {error_msg}", exc_info=True)
         input("\n按任意键退出...")
+
 
 
 
