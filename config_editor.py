@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "api_key": "",
     "base_url": "",
     "model": "",
-    "max_tokens": 4096,
+    "max_tokens": 32768,
     "temperature": 0.3,
     "debug_mode": False,
 }
@@ -158,7 +158,7 @@ class ConfigEditor(QWidget):
         self._add_text_row(form, "api_key", "API Key", "")
         self._add_text_row(form, "base_url", "API 地址", "兼容OpenAI接口")
         self._add_text_row(form, "model", "模型名称", "")
-        self._add_text_row(form, "max_tokens", "最大 Token 数", "4096")
+        self._add_text_row(form, "max_tokens", "最大 Token 数", "32768")
         self._add_text_row(form, "temperature", "温度 (0-2)", "0.3")
         self._add_text_row(
             form,
@@ -308,7 +308,7 @@ class ConfigEditor(QWidget):
         try:
             data["max_tokens"] = int(data["max_tokens"])
         except Exception:
-            data["max_tokens"] = 4096
+            data["max_tokens"] = 32768
 
         try:
             data["temperature"] = float(data["temperature"])
@@ -357,3 +357,5 @@ class ConfigEditor(QWidget):
 if __name__ == "__main__":
     editor = ConfigEditor()
     editor.run()
+
+

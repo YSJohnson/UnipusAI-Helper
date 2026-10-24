@@ -59,7 +59,7 @@ class AudioTranscriber:
         audio_path = None
 
         try:
-            print(f"      ⬇  下载音频...")
+            print(f"      【下载】获取音频...")
             with urllib.request.urlopen(audio_url, timeout=30) as response, \
                     tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 f.write(response.read())

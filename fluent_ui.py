@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import re
 import sys
 import threading
 import time
@@ -69,6 +70,9 @@ class FluentModernGUI(MSFluentWindow):
         self._panel_cards = []
         self._metric_boxes = []
         self._auto_total = 0
+        self.font_scale = 1.15
+        self._done_tabs = set()
+        self._last_done_tab = None
 
         self._init_window()
         self._build_ui()
@@ -77,8 +81,8 @@ class FluentModernGUI(MSFluentWindow):
 
     def _init_window(self):
         self.setWindowTitle("")
-        self.resize(1180, 760)
-        self.setMinimumSize(980, 640)
+        self.resize(1330, 860)
+        self.setMinimumSize(1080, 680)
         self.setMicaEffectEnabled(False)
         self.setSystemTitleBarButtonVisible(False)
         self.navigationInterface.hide()
@@ -106,7 +110,7 @@ class FluentModernGUI(MSFluentWindow):
         top_layout = QHBoxLayout(top)
         top_layout.setContentsMargins(14, 8, 14, 8)
         top_layout.setSpacing(12)
-        top_layout.addWidget(self._label("UnipusAI Helper", 24, "#f5f7fb", 800))
+        top_layout.addWidget(self._label("UnipusAI Helper", 30, "#f5f7fb", 800))
         if self.app_version:
             version_label = self._label(f"v{self.app_version}", 13, "#c9d2dd", 700)
             version_label.setStyleSheet(version_label.styleSheet() + " padding: 7px 10px; border-radius: 6px; background: rgba(48, 217, 239, 0.12);")
@@ -123,7 +127,7 @@ class FluentModernGUI(MSFluentWindow):
 
         self.status_pill = self._status_pill("初始化", "#30d9ef")
         top_layout.addWidget(self.status_pill)
-        top_layout.addSpacing(22)
+        top_layout.addSpacing(16)
 
         top_layout.addWidget(self._label("调试模式", 14, "#a7b0bb", 600))
         self.debug_switch = SwitchButton()
@@ -131,7 +135,7 @@ class FluentModernGUI(MSFluentWindow):
         self.debug_switch.setChecked(bool(self._globals.get("DEBUG_MODE", False)))
         self.debug_switch.checkedChanged.connect(self._on_debug_toggle)
         top_layout.addWidget(self.debug_switch)
-        top_layout.addSpacing(22)
+        top_layout.addSpacing(16)
 
         top_layout.addWidget(self._label("界面主题", 14, "#a7b0bb", 600))
         self.theme_switch = SwitchButton()
@@ -165,6 +169,10 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_select_compulsory = PushButton("必修")
         self.btn_select_compulsory.clicked.connect(self._on_select_compulsory)
         task_toolbar.addWidget(self.btn_select_compulsory)
+        self.btn_select_pending = PushButton("仅未完成必修")
+        self.btn_select_pending.setToolTip("只勾选还没完成的必修任务")
+        self.btn_select_pending.clicked.connect(self._on_select_pending)
+        task_toolbar.addWidget(self.btn_select_pending)
         self.btn_deselect_all = PushButton("清空")
         self.btn_deselect_all.clicked.connect(self._on_deselect_all)
         task_toolbar.addWidget(self.btn_deselect_all)
@@ -208,6 +216,11 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_scan.setEnabled(False)
         self.btn_scan.clicked.connect(self._on_scan_clicked)
         control_layout.addWidget(self.btn_scan)
+        self.btn_scan_unit = PushButton("扫描当前单元必修")
+        self.btn_scan_unit.setEnabled(False)
+        self.btn_scan_unit.setToolTip("只扫描当前显示的单元，并自动勾选其中的必修任务")
+        self.btn_scan_unit.clicked.connect(self._on_scan_unit_clicked)
+        control_layout.addWidget(self.btn_scan_unit)
         self.btn_quick = PrimaryPushButton("快速处理当前页")
         self.btn_quick.setEnabled(False)
         self.btn_quick.clicked.connect(self._on_quick_clicked)
@@ -227,7 +240,7 @@ class FluentModernGUI(MSFluentWindow):
         meta_layout.setContentsMargins(0, 8, 0, 0)
         meta_layout.setHorizontalSpacing(8)
         meta_layout.setVerticalSpacing(8)
-        self.account_value = self._metric("账号", self.bot.config.username[:16] or "-")
+        self.account_value = self._metric("账号", self._mask_account(self.bot.config.username))
         self.model_value = self._metric("模型", self.bot.config.model or "-")
         self.task_value = self._metric("剩余任务", "0")
         meta_layout.addWidget(self.account_value, 0, 0)
@@ -261,11 +274,11 @@ class FluentModernGUI(MSFluentWindow):
 
     def _style_label(self, label):
         tone = label.property("tone") or "primary"
-        size = label.property("fontSize") or 14
+        size = (label.property("fontSize") or 14) * self.font_scale
         weight = label.property("fontWeight") or 400
         color = "#f5f7fb" if tone == "primary" and self.is_dark else "#1f2933" if tone == "primary" else "#a7b0bb" if self.is_dark else "#667085"
         label.setStyleSheet(
-            f"background: transparent; color: {color}; font-size: {size}px; "
+            f"background: transparent; color: {color}; font-size: {size:.1f}px; "
             f"font-weight: {weight}; font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
         )
 
@@ -303,6 +316,16 @@ class FluentModernGUI(MSFluentWindow):
         self.status_dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
         if detail is not None:
             self.status_label.setText(detail)
+
+    @staticmethod
+    def _mask_account(value: str) -> str:
+        """账号脱敏：只显示前三后四，中间用 * 代替（18396209079 → 183****9079）。"""
+        text = (value or "").strip()
+        if not text:
+            return "-"
+        if len(text) <= 7:
+            return text[0] + "*" * max(1, len(text) - 1)
+        return f"{text[:3]}{'*' * (len(text) - 7)}{text[-4:]}"
 
     def _metric(self, label, value):
         box = QWidget()
@@ -352,7 +375,7 @@ class FluentModernGUI(MSFluentWindow):
         self.setStyleSheet(f"""
             QWidget {{
                 font-family: 'Segoe UI', 'Microsoft YaHei';
-                font-size: 14px;
+                font-size: {14 * self.font_scale:.1f}px;
                 color: {palette['text']};
             }}
             QWidget#topStrip {{
@@ -371,15 +394,19 @@ class FluentModernGUI(MSFluentWindow):
                 border-radius: 8px;
                 color: {palette['text']};
                 font-family: 'Cascadia Mono', Consolas, 'Microsoft YaHei UI';
-                font-size: 14px;
+                font-size: {13.5 * self.font_scale * 1.3:.1f}px;
             }}
             CheckBox, QCheckBox {{
                 color: {palette['text']};
                 padding: 8px 10px;
-                font-size: 16px;
+                font-size: {16 * self.font_scale:.1f}px;
                 font-weight: 600;
                 font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';
                 spacing: 8px;
+            }}
+            PushButton, PrimaryPushButton {{
+                font-size: {13.5 * self.font_scale:.1f}px;
+                padding: 6px 10px;
             }}
         """)
         for card in self._panel_cards:
@@ -457,18 +484,29 @@ class FluentModernGUI(MSFluentWindow):
             return
         self.btn_scan.setEnabled(False)
         self.btn_scan.setText("扫描中...")
+        self.btn_scan_unit.setEnabled(False)
         self._set_status("扫描中", "正在扫描课程目录和章节任务。", "#ffb25f")
         self._set_busy(True)
-        threading.Thread(target=self._scan_tabs_thread, daemon=True).start()
+        threading.Thread(target=self._scan_tabs_thread, args=(False,), daemon=True).start()
 
-    def _scan_tabs_thread(self):
+    def _on_scan_unit_clicked(self):
+        if not self.btn_scan_unit.isEnabled():
+            return
+        self.btn_scan_unit.setEnabled(False)
+        self.btn_scan_unit.setText("扫描中...")
+        self.btn_scan.setEnabled(False)
+        self._set_status("扫描当前单元", "只扫描当前显示的单元，不切换其他单元。", "#ffb25f")
+        self._set_busy(True)
+        threading.Thread(target=self._scan_tabs_thread, args=(True,), daemon=True).start()
+
+    def _scan_tabs_thread(self, current_unit_only: bool = False):
         try:
             tabs = []
-            course_tabs = self._scan_course_directory()
+            course_tabs = self._scan_course_directory(current_unit_only=current_unit_only)
             if course_tabs:
                 tabs = course_tabs
                 self.gui_log_queue.put(f"课程目录页发现 {len(tabs)} 个任务")
-            else:
+            elif not current_unit_only:
                 level1 = self.solver._get_level1_tabs()
                 if level1:
                     for l1_idx, l1_tab in enumerate(level1):
@@ -477,58 +515,195 @@ class FluentModernGUI(MSFluentWindow):
                         time.sleep(1.2)
                         level2 = self.solver._get_level2_tabs()
                         if not level2:
-                            tabs.append({"l1_idx": l1_idx, "l2_idx": -1, "l1_title": l1_tab["title"], "l2_title": "", "display": l1_tab["title"], "is_l2": False, "is_compulsory": True})
+                            tabs.append({"l1_idx": l1_idx, "l2_idx": -1, "l1_title": l1_tab["title"], "l2_title": "", "display": l1_tab["title"], "is_l2": False, "is_compulsory": True, "status": "unknown"})
                         else:
                             for l2_idx, l2_tab in enumerate(level2):
-                                tabs.append({"l1_idx": l1_idx, "l2_idx": l2_idx, "l1_title": l1_tab["title"], "l2_title": l2_tab["title"], "display": f"  - {l2_tab['title']}", "is_l2": True, "is_compulsory": True})
+                                tabs.append({"l1_idx": l1_idx, "l2_idx": l2_idx, "l1_title": l1_tab["title"], "l2_title": l2_tab["title"], "display": f"  - {l2_tab['title']}", "is_l2": True, "is_compulsory": True, "status": "unknown"})
                     self.gui_log_queue.put(f"章节内部页发现 {len(tabs)} 个任务")
             self._all_tabs = tabs
-            self.after(0, self._build_tab_list_ui)
+            self.after(0, lambda: self._build_tab_list_ui(current_unit_only=current_unit_only))
         except Exception as e:
             self.gui_log_queue.put(f"扫描失败: {str(e)[:80]}")
             if self.logger:
                 self.logger.error(f"扫描异常: {e}", exc_info=True)
             self.after(0, self._reset_scan_button)
 
-    def _scan_course_directory(self):
+    TASK_ITEM_SELECTOR = '[class*="taskItemInnerLayout"]'
+
+    READ_TASKS_JS = """
+        const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+        const all = [...document.querySelectorAll('[class*="taskItemInnerLayout"]')];
+        const out = [];
+        all.forEach((el, index) => {
+          // 切 Unit 后旧面板仍留在 DOM 里，只取当前可见的那一份，否则任务会成倍重复
+          if (!el.getClientRects().length) return;
+          const nameEl = el.querySelector('[class*="taskTypeName"], [class*="nodeTypeName"]');
+          const statusEl = el.querySelector('[class*="nodePassStateTip"]');
+          const requireEl = el.querySelector('[class*="taskRequireIcon"], [class*="nodeRequireIcon"]');
+          const path = [];
+          let p = el;
+          while ((p = p.parentElement)) {
+            const head = p.querySelector(':scope > .ant-collapse-header');
+            if (head) {
+              const text = clean(head.innerText).replace(/必修|选修/g, '').trim();
+              if (text) path.unshift(text);
+            }
+          }
+          out.push({
+            index,
+            name: clean(nameEl && nameEl.innerText),
+            status: clean(statusEl && statusEl.innerText),
+            compulsory: !!requireEl,
+            section: path.join(' / ')
+          });
+        });
+        return out;
+    """
+
+    UNIT_LABEL_JS = """
+        const el = arguments[0];
+        const node = el.querySelector('[class*="unitName"], [class*="richName"], [class*="name-item"]');
+        const title = node && (node.getAttribute('title') || node.innerText);
+        return (title || el.innerText || '').replace(/\\s+/g, ' ').trim();
+    """
+
+    @staticmethod
+    def _parse_unit_label(label: str):
+        """把 Unit 标签解析成 (显示名, 是否预习单元)。预习单元不占 Unit 序号。"""
+        text = (label or "").strip()
+        match = re.search(r'unit\s*([0-9]+)', text, re.I)
+        if match:
+            return f"Unit {match.group(1)}", False
+        if re.search(r'preview|intro|预备|预习|准备|starter|start\s*up', text, re.I):
+            return f"预备单元 · {text}", True
+        if not re.search(r'\d', text):
+            return f"预备单元 · {text}", True
+        return text or "其他单元", False
+
+    @staticmethod
+    def _status_key(text: str) -> str:
+        value = (text or "").strip()
+        if any(kw in value for kw in ("已完成", "完成", "通过", "满分")):
+            return "done"
+        if any(kw in value for kw in ("进行中", "未完成", "继续")):
+            return "doing"
+        if any(kw in value for kw in ("未开始", "未学习", "未做")):
+            return "todo"
+        return "unknown"
+
+    def _scan_course_directory(self, current_unit_only: bool = False):
         tabs = []
         try:
             unit_container = self.WebDriverWait(self.driver, 5).until(
-                self.EC.presence_of_element_located((self.By.CLASS_NAME, "unipus-tabs_unitTabScrollContainer__fXBxR"))
+                self.EC.presence_of_element_located((self.By.CSS_SELECTOR, '[class*="unitTabScrollContainer"]'))
             )
             unit_tabs = unit_container.find_elements(self.By.CSS_SELECTOR, ":scope > *")
             self.gui_log_queue.put(f"课程目录页，找到 {len(unit_tabs)} 个 Unit")
+
+            unit_infos = []
             for unit_idx, unit_tab in enumerate(unit_tabs):
+                try:
+                    label = self.driver.execute_script(self.UNIT_LABEL_JS, unit_tab) or ""
+                except Exception:
+                    label = (unit_tab.text or "").strip()
+                display_name, is_preview = self._parse_unit_label(label)
+                unit_infos.append({
+                    "index": unit_idx,
+                    "label": label,
+                    "display": display_name,
+                    "is_preview": is_preview,
+                    "element": unit_tab,
+                })
+
+            targets = unit_infos
+            if current_unit_only:
+                targets = [info for info in unit_infos if self._is_active_unit(info["element"])]
+                if not targets:
+                    targets = unit_infos[:1]
+                self.gui_log_queue.put(f"仅扫描当前单元: {targets[0]['display']}")
+
+            for info in targets:
                 name_counts = {}
                 try:
-                    self.driver.execute_script("arguments[0].click();", unit_tab)
+                    self.driver.execute_script("arguments[0].click();", info["element"])
                 except Exception:
-                    unit_tab.click()
-                time.sleep(0.8)
-                chapters = self.driver.find_elements(self.By.CSS_SELECTOR, '[class*="courses-unit_taskItemInnerLayout__"], [class*="courses-unit_nodeItemInnerLayout__"]')
-                for chapter in chapters:
                     try:
-                        name_elem = chapter.find_element(self.By.CSS_SELECTOR, '[class*="courses-unit_taskTypeName__"], [class*="courses-unit_nodeTypeName__"]')
-                        name = name_elem.text.strip()
-                        if not name:
-                            continue
-                        try:
-                            chapter.find_element(self.By.CSS_SELECTOR, '[class*="courses-unit_taskRequireIcon__"], [class*="courses-unit_nodeRequireIcon__"]')
-                            is_compulsory = True
-                        except self.NoSuchElementException:
-                            is_compulsory = False
-                        prefix = "[必修]" if is_compulsory else "[选修]"
-                        section_title = self._extract_course_task_section(chapter)
-                        name_occurrence = name_counts.get(name, 0)
-                        name_counts[name] = name_occurrence + 1
-                        section_part = f" - {section_title}" if section_title else f" - #{name_occurrence + 1}"
-                        tabs.append({"l1_idx": len(tabs), "l2_idx": -1, "l1_title": name, "l2_title": section_title, "display": f"{prefix} Unit{unit_idx + 1}{section_part} - {name}", "is_l2": False, "is_compulsory": is_compulsory, "_element": name_elem, "_unit_idx": unit_idx, "_section_title": section_title, "_name_occurrence": name_occurrence})
+                        info["element"].click()
                     except Exception:
                         continue
+                time.sleep(0.9)
+                tasks = self.driver.execute_script(self.READ_TASKS_JS) or []
+                elements = self.driver.find_elements(self.By.CSS_SELECTOR, self.TASK_ITEM_SELECTOR)
+                for task in tasks:
+                    name = (task.get("name") or "").strip()
+                    if not name:
+                        continue
+                    element = None
+                    dom_index = task.get("index")
+                    if isinstance(dom_index, int) and 0 <= dom_index < len(elements):
+                        try:
+                            element = elements[dom_index].find_element(
+                                self.By.CSS_SELECTOR,
+                                '[class*="taskTypeName"], [class*="nodeTypeName"]')
+                        except Exception:
+                            element = elements[dom_index]
+                    section_title = (task.get("section") or "").strip()
+                    occurrence = name_counts.get(name, 0)
+                    name_counts[name] = occurrence + 1
+                    status_key = self._status_key(task.get("status", ""))
+                    compulsory = bool(task.get("compulsory"))
+                    tabs.append({
+                        "l1_idx": len(tabs),
+                        "l2_idx": -1,
+                        "l1_title": name,
+                        "l2_title": section_title,
+                        "display": self._format_task_display(
+                            compulsory, info["display"], section_title, name, task.get("status", "")),
+                        "is_l2": False,
+                        "is_compulsory": compulsory,
+                        "unit_label": info["display"],
+                        "unit_is_preview": info["is_preview"],
+                        "section": section_title,
+                        "status": status_key,
+                        "status_text": (task.get("status") or "").strip(),
+                        "_element": element,
+                        "_unit_idx": info["index"],
+                        "_section_title": section_title,
+                        "_name_occurrence": occurrence,
+                    })
         except Exception as e:
             if self.logger:
                 self.logger.debug(f"课程目录扫描未命中: {e}")
         return tabs
+
+    @staticmethod
+    def _format_task_display(compulsory, unit_name, section, name, status_text):
+        prefix = "[必修]" if compulsory else "[选修]"
+        # 目录里的折叠标题经常重复（Course preview / Course preview），去重后更易读
+        section_parts = [part.strip() for part in (section or "").split("/") if part.strip()]
+        section = " / ".join(dict.fromkeys(section_parts))
+        if section.strip().lower() == (name or "").strip().lower():
+            section = ""
+        parts = [prefix, unit_name]
+        if section:
+            parts.append(section)
+        parts.append(name)
+        display = " · ".join(parts)
+        if status_text:
+            display += f" · {status_text}"
+        return display
+
+    def _is_active_unit(self, element) -> bool:
+        try:
+            return bool(self.driver.execute_script("""
+                const el = arguments[0];
+                if (el.getAttribute('aria-selected') === 'true') return true;
+                const cls = String(el.className);
+                if (/active|selected|current/i.test(cls)) return true;
+                return false;
+            """, element))
+        except Exception:
+            return False
 
     def _extract_course_task_section(self, chapter) -> str:
         try:
@@ -567,7 +742,7 @@ class FluentModernGUI(MSFluentWindow):
             if widget:
                 widget.deleteLater()
 
-    def _build_tab_list_ui(self):
+    def _build_tab_list_ui(self, current_unit_only: bool = False):
         self._set_busy(False)
         if not self._all_tabs:
             self.gui_log_queue.put("未扫描到任何 Tab")
@@ -576,44 +751,96 @@ class FluentModernGUI(MSFluentWindow):
 
         self._clear_task_list()
         self._tab_widget_items = []
-        self._selected_tab_keys = {
-            self._tab_key(i, tab)
-            for i, tab in enumerate(self._all_tabs)
-            if tab.get("is_compulsory", False)
-        }
+        done_count = sum(1 for t in self._all_tabs if t.get("status") == "done")
+        pending_compulsory = [
+            i for i, t in enumerate(self._all_tabs)
+            if t.get("is_compulsory", False) and t.get("status") != "done"
+        ]
+        if current_unit_only:
+            self._selected_tab_keys = {self._tab_key(i, self._all_tabs[i]) for i in pending_compulsory}
+        else:
+            self._selected_tab_keys = {
+                self._tab_key(i, tab)
+                for i, tab in enumerate(self._all_tabs)
+                if tab.get("is_compulsory", False) and tab.get("status") != "done"
+            }
         compulsory_count = sum(1 for t in self._all_tabs if t.get("is_compulsory", False))
-        self.gui_log_queue.put(f"必修: {compulsory_count}, 选修: {len(self._all_tabs) - compulsory_count}")
+        self.gui_log_queue.put(
+            f"必修: {compulsory_count}, 选修: {len(self._all_tabs) - compulsory_count}, "
+            f"已完成: {done_count}, 未完成必修: {len(pending_compulsory)}")
 
         groups = {}
         for i, tab in enumerate(self._all_tabs):
-            display = tab.get("display", "")
-            unit_key = display.split("Unit")[1].split(" - ")[0].strip() if "Unit" in display else "其他"
+            unit_key = tab.get("unit_label") or "其他任务"
             groups.setdefault(unit_key, []).append(i)
 
         for unit_name, indices in groups.items():
             unit_tabs = [self._all_tabs[i] for i in indices]
             comp = sum(1 for t in unit_tabs if t.get("is_compulsory", False))
-            header = self._label(f"Unit {unit_name} ({len(indices)} 个任务 / {comp} 必修)", 14, "#9fa8b4", 600)
-            header.setStyleSheet(header.styleSheet() + " padding: 10px 4px 4px 4px;")
+            done = sum(1 for t in unit_tabs if t.get("status") == "done")
+            header = self._label(
+                f"{unit_name} ({len(indices)} 个任务 / {comp} 必修 / 已完成 {done})", 17, "#c3ccd8", 700)
+            header.setStyleSheet(
+                header.styleSheet()
+                + " padding: 12px 4px 2px 4px; margin-bottom: 2px;"
+                + " border-bottom: 1px solid rgba(255,255,255,0.08);")
             self._tab_list_layout.addWidget(header)
             for idx in indices:
                 tab = self._all_tabs[idx]
                 key = self._tab_key(idx, tab)
-                checkbox = CheckBox(tab["display"])
+                row = QWidget()
+                row.setStyleSheet("background: transparent;")
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(8)
+                checkbox = CheckBox(self._short_display(tab["display"]))
+                checkbox.setToolTip(tab["display"])
                 checkbox.setChecked(key in self._selected_tab_keys)
                 checkbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 checkbox.stateChanged.connect(lambda _=None, k=key, cb=checkbox: self._sync_tab_selection(k, cb))
-                self._tab_list_layout.addWidget(checkbox)
-                self._tab_widget_items.append({"index": idx, "key": key, "checkbox": checkbox})
+                row_layout.addWidget(checkbox, 1)
+                status_pill = self._task_status_label(tab)
+                row_layout.addWidget(status_pill, 0)
+                self._tab_list_layout.addWidget(row)
+                self._tab_widget_items.append({
+                    "index": idx, "key": key, "checkbox": checkbox,
+                    "row": row, "status": status_pill,
+                })
 
         self._tab_list_layout.addStretch(1)
         self.btn_auto.setEnabled(True)
         self.btn_auto.setText(f"处理选中任务 ({len(self._selected_tab_keys)})")
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText("重新扫描")
-        self._set_status("已扫描", f"发现 {len(self._all_tabs)} 个任务，请选择处理范围。", "#37d987")
+        self.btn_scan_unit.setEnabled(True)
+        self.btn_scan_unit.setText("扫描当前单元必修")
+        self._set_status(
+            "已扫描",
+            f"发现 {len(self._all_tabs)} 个任务（已完成 {done_count}），已勾选未完成必修 {len(self._selected_tab_keys)} 项。",
+            "#37d987")
         self.gui_log_queue.put(f"\n扫描完成，共 {len(self._all_tabs)} 个任务可供选择")
         self._update_task_stats()
+
+    @staticmethod
+    def _short_display(text: str, limit: int = 62) -> str:
+        text = text or ""
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def _task_status_label(self, tab: Dict):
+        status = tab.get("status", "unknown")
+        text = tab.get("status_text") or ("已完成" if status == "done" else "未完成" if status != "unknown" else "")
+        if not text:
+            text = "未标记"
+        color = {
+            "done": "#37d987",
+            "doing": "#ffb25f",
+            "todo": "#8fb2ff",
+        }.get(status, "#9fa8b4")
+        label = self._label(text, 12, color, 600)
+        label.setStyleSheet(
+            label.styleSheet()
+            + f" padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); color: {color};")
+        return label
 
     def _tab_key(self, index: int, tab: Dict) -> str:
         return "|".join(str(tab.get(part, "")) for part in ("l1_idx", "l2_idx", "display")) or str(index)
@@ -647,6 +874,15 @@ class FluentModernGUI(MSFluentWindow):
             tab = self._all_tabs[item["index"]]
             self._set_task_selected(item, tab.get("is_compulsory", False))
 
+    def _on_select_pending(self):
+        selected = 0
+        for item in self._tab_widget_items:
+            tab = self._all_tabs[item["index"]]
+            pending = tab.get("is_compulsory", False) and tab.get("status") != "done"
+            self._set_task_selected(item, pending)
+            selected += 1 if pending else 0
+        self.gui_log_queue.put(f"已勾选未完成必修 {selected} 项")
+
     def _on_deselect_all(self):
         for item in self._tab_widget_items:
             self._set_task_selected(item, False)
@@ -662,8 +898,39 @@ class FluentModernGUI(MSFluentWindow):
         query = self.task_search.text().lower()
         for item in self._tab_widget_items:
             tab = self._all_tabs[item["index"]]
-            item["checkbox"].setVisible(self._task_matches_query(tab, query))
+            visible = self._task_matches_query(tab, query)
+            item["checkbox"].setVisible(visible)
+            row = item.get("row")
+            if row is not None:
+                row.setVisible(visible)
         self.btn_select_visible.setVisible(bool(query))
+
+    def _on_task_done(self, tab: Dict):
+        """某个任务处理完：打勾状态、取消勾选，剩下的自然就是「还没做」的。"""
+        tab["status"] = "done"
+        tab["status_text"] = "已完成"
+        self._done_tabs.add(tab.get("l1_title", ""))
+        self._last_done_tab = tab
+        key = None
+        for item in list(self._tab_widget_items):
+            current = self._all_tabs[item["index"]]
+            if current is tab:
+                key = item["key"]
+                item["checkbox"].blockSignals(True)
+                item["checkbox"].setChecked(False)
+                item["checkbox"].blockSignals(False)
+                self._selected_tab_keys.discard(item["key"])
+                status = item.get("status")
+                if status is not None:
+                    status.setText("已完成")
+                    status.setStyleSheet(
+                        status.styleSheet().split("color:")[0]
+                        + "color: #37d987; padding: 3px 8px; border-radius: 8px; background: rgba(55,217,135,0.12);")
+                break
+        self.btn_auto.setText(f"处理选中任务 ({len(self._selected_tab_keys)})")
+        self._update_task_stats()
+        if key:
+            self.gui_log_queue.put(f"【完成】已提交并取消勾选: {tab.get('display', '')[:60]}")
 
     def _on_auto_clicked(self):
         if self._auto_running or not self.btn_auto.isEnabled():
@@ -706,9 +973,13 @@ class FluentModernGUI(MSFluentWindow):
 
     def _run_auto_task(self, selected):
         try:
-            self.solver.process_selected_tabs(selected)
+            self.solver.process_selected_tabs(
+                selected, on_task_done=lambda tab: self.after(0, lambda t=tab: self._on_task_done(t)))
             if self.solver._should_stop():
-                self.gui_log_queue.put("\n批量处理已停止。")
+                remaining = len(self._selected_tab_keys)
+                self.gui_log_queue.put(
+                    f"\n批量处理已停止。剩余 {remaining} 项仍保持勾选，"
+                    f"下次点“处理选中任务”会从第一个未完成的任务继续。")
             else:
                 self.gui_log_queue.put("\n全部选中任务处理完成！")
             winsound.MessageBeep()
@@ -802,6 +1073,8 @@ class FluentModernGUI(MSFluentWindow):
         self._set_busy(False)
         self.btn_scan.setEnabled(True)
         self.btn_scan.setText("重新扫描")
+        self.btn_scan_unit.setEnabled(True)
+        self.btn_scan_unit.setText("扫描当前单元必修")
         self._set_status("扫描失败", "请确认已进入课程页面后重试。", "#ff6b6b")
         InfoBar.error("扫描失败", "请确认已进入课程页面后重试。", duration=2200, position=InfoBarPosition.TOP_RIGHT, parent=self)
 
@@ -851,3 +1124,4 @@ class FluentModernGUI(MSFluentWindow):
         if not self._closing:
             self.on_quit_clicked()
         event.accept()
+

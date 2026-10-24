@@ -48,6 +48,8 @@ def test_custom_portal_url_falls_back_to_sso():
     driver.get.side_effect = navigate
     username = Mock()
     password = Mock()
+    username.parent.execute_script.return_value = "user"
+    password.parent.execute_script.return_value = "password"
     agreement = Mock()
     agreement.is_selected.return_value = False
     agreement_control = Mock()
@@ -80,8 +82,12 @@ def test_custom_portal_url_falls_back_to_sso():
         assert bot._login() is True
 
     assert driver.get.call_args_list[-1].args[0] == app.DEFAULT_LOGIN_URL
-    username.send_keys.assert_called_once_with("user")
-    password.send_keys.assert_called_once_with("password")
+    # 账号/密码改为原生 setter 写入（避免「记住我」预填值被追加成两遍），
+    # 写入成功后不再走键盘输入，因此 send_keys 不应被调用。
+    username.parent.execute_script.assert_called()
+    password.parent.execute_script.assert_called()
+    username.send_keys.assert_not_called()
+    password.send_keys.assert_not_called()
     agreement_control.click.assert_called_once()
     bot.anti_anti_cheat.assert_called_once()
 
@@ -174,6 +180,7 @@ def test_failed_choice_answer_does_not_submit_or_advance():
     solver.parser.parse_all.return_value = ([app.Question(1, 'Select all', app.QuestionType.MULTIPLE_CHOICE, None)], '')
     solver.content_handlers = []
     solver.prompt_builder = Mock()
+    solver.prompt_builder.build.return_value = "prompt"
     solver.ai_client = Mock()
     solver.executor = Mock()
     solver.executor.execute.return_value = False

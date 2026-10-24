@@ -5,8 +5,9 @@
   "api_key": "",
   "base_url": "",
   "model": "",
-  "max_tokens": 8192,
+  "max_tokens": 32768,
   "temperature": 0.3,
   "token_full": "",
   "debug_mode": false
 }
+
