@@ -48,6 +48,10 @@ DEFAULT_CONFIG = {
     "max_tokens": 32768,
     "temperature": 0.3,
     "debug_mode": False,
+    # 录音题（Exercise 2 这类主观题）没有原声，需要 TTS 生成语音
+    "tts_engine": "auto",
+    "tts_voice": "",
+    "tts_proxy": "",
 }
 
 PALETTE = {
@@ -160,6 +164,9 @@ class ConfigEditor(QWidget):
         self._add_text_row(form, "model", "模型名称", "")
         self._add_text_row(form, "max_tokens", "最大 Token 数", "32768")
         self._add_text_row(form, "temperature", "温度 (0-2)", "0.3")
+        self._add_text_row(form, "tts_engine", "录音题 TTS 引擎", "auto / edge / sapi / off")
+        self._add_text_row(form, "tts_voice", "TTS 音色（可选）", "留空用默认英语音色，如 en-US-AriaNeural")
+        self._add_text_row(form, "tts_proxy", "TTS 代理（可选）", "走代理时填，如 http://127.0.0.1:7890")
         self._add_text_row(
             form,
             "token_full",

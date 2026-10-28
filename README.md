@@ -24,7 +24,7 @@
 - 断点续跑：每完成一个任务自动取消勾选，停止后剩下的勾选就是「还没做」的任务，再点开始即从卡住的那题继续。
 - 双模式处理：支持「扫描任务列表」批量处理、只扫「当前单元必修」，也支持「快速处理当前页」。
 - 单元编号按目录真实标题显示，`Course preview` 这类预习单元单列为「预备单元」，不会把后面的 Unit 挤乱。
-- 多题型处理：支持单选、多选、填空、写作、选词填空、拖拽排序、下拉选择、词汇测试、听力填空、听力选择、视频选择、视频任务、视频弹窗题、词汇闪卡、Self-check 词汇勾选、My voice 文字作答、**人物 A–F 匹配**、**翻译段落**、**首字母搭配填空**、**Wrapping up 自评清单**、**讨论区发帖**、**跟读/朗读录音题**。
+- 多题型处理：支持单选、多选、填空、写作、选词填空、拖拽排序、下拉选择、词汇测试、听力填空、听力选择、视频选择、视频任务、视频弹窗题、词汇闪卡、Self-check 词汇勾选、My voice 文字作答、**人物 A–F 匹配**、**翻译段落**、**首字母搭配填空**、**Wrapping up 自评清单**、**讨论区发帖**、**跟读/朗读录音题**、**中文括注填空（直接复用 Vocabulary 答案）**、**主观录音题（TTS 作答）**。
 - 答案格式校验：选项题会把模型回填的选项原文反查成字母；本页有题没填好时自动二次修正。
 - 搭配题增强：自动读取同题组的 `Learning` 页当答案上下文；空位多时按 8 空分批提问；题干印在输入框外的首字母会自动去掉再写入。
 - 做完自动交卷：填完直接提交，日志提示「已自动提交」；找不到按钮会明确提示手动提交。
@@ -86,6 +86,13 @@ py -m venv .venv
 | `temperature` | 否 | 生成温度，保持默认数值即可 |
 | `token_full` | 否 | 认证兜底；支持旧版完整 `__token` JSON 或 U校园 5.0 的 JWT，正常登录时留空 |
 | `debug_mode` | 否 | 是否开启调试日志，默认 `false` |
+| `tts_engine` | 否 | 录音题语音合成后端：`auto`（默认，先 edge 后 sapi）/ `edge` / `sapi` / `off` |
+| `tts_voice` | 否 | TTS 音色；留空用默认英语音色（`en-US-AriaNeural` / 系统英语语音） |
+| `tts_proxy` | 否 | `edge-tts` 需要走代理时填，例如 `http://127.0.0.1:7890`；离线 `sapi` 不需要 |
+
+> 录音题里的「主观题」（`Exercise 2` 这类只有计时录音按钮、没有原声的题）靠 TTS 作答。
+> 装了 `edge-tts`（`pip install edge-tts`，已列在 `requirements.txt`）会优先用它，音色更自然；
+> 没装或断网时自动回退到 Windows 自带的 `System.Speech`，完全离线也能出声。
 
 ---
 
@@ -126,6 +133,46 @@ py -m venv .venv
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.0（2026-10）</b>：Exercise 1 词汇复用 / Exercise 2 主观录音题 TTS（issue #29）</summary>
+
+感谢 [mctea01](https://github.com/mctea01) 提供账号密码并反馈 issue #29
+
+接着 v3.8.0 的跟读适配，把 `After you view` 里剩下的两个子步骤补齐：
+
+- **Vocabulary 对照表复用**：解析 `Vocabulary` 页的跟读行时，把「英文原词 + 中文释义」收进
+  一份跨页缓存（`VocabularyStore`，按中文归一化后建索引，支持包含/近义变体命中）。
+- **Exercise 1（中文括注 → 英文填空）不再让模型自由翻译**：题干里 `____ (老年大学)` 这类
+  括注先按 Vocabulary 页的对照表锚定用词（逐空给出「空1: 老年大学 → senior citizen's college」），
+  并要求「用词必须取自表里的写法，不许意译或换同义词」，写错搭配导致正确率低的问题就是这样解决的。
+- **词形一律交给模型**：脚本只提供对照表，不做任何机械变位（不加 `-ing`、不拼 `-ed`、不改大小写）。
+  提示词里明确「词形由你按句子语法判断——该用 `-ing` / `-ed` / 复数 / 首字母大写时就改，词干必须与表里一致」。
+  这样 `… discovering new demands and ____ (释放新动力)` 会由模型自己写成 `unleashing new impetus`，
+  遇到复数、派生词这类规则覆盖不到的变化也不会被脚本硬掰错。
+- **Exercise 2（主观录音题）新增 TTS 作答**：这类题只有一个 02:00 计时录音按钮、没有原声可借。
+  现在的流程是「模型写一段可直接朗读的英文口语稿 → TTS 合成 → 依旧冒充麦克风输入 → 自动点停止」。
+  稿件长度按语速（约 2.4 词/秒）折算并裁到 110 秒以内，超长音频在浏览器侧按上限截断并做淡出。
+- **双 TTS 后端**：默认 `auto`，先试 `edge-tts`（微软在线朗读，音色自然，可配代理），失败自动回退到
+  Windows 自带 `System.Speech`（`sapi`，离线可用）；配置 `tts_engine` 可强制指定或 `off` 关闭。
+- **录音按钮识别加兜底**：`Exercise` 主观题的录音按钮不一定带 `button-record`，主选择器找不到时
+  依次尝试 `.button-record` / `.oral-record-btn` / `.record-btn` 等，避免整题被当成「没有输入框」跳过。
+- **主观题也按分数判定**：自由作答停止后平台会先上传音频再评分（实测同一个 239 词语音拿到
+  **100 分**），分数挂在 `.p-oral-personal-state` 上、不在录音按钮那一层，判定逻辑一并上扩到该层；
+  没有分数时退回「出现可回放的 `<audio>`」判断，长录音最多等 120 秒。主观题只录一次，
+  避免重录白白多花一分多钟。
+- **实测（新视野视听说教程4 / Unit 2 Viewing China）**：Vocabulary 7 条跟读 7/7，得分
+  95/96/94/97/96/95/96；Exercise 2 的 TTS 作答一次录完、评分 100；Exercise 1 的用词来自
+  Vocabulary 对照表（`senior citizen's college` / `silver economy` / `unleash new impetus` /
+  `smart elderly care`），词形由模型按句子语法调整，其中空 3 应为 `unleashing new impetus`。
+
+| 题型 | 识别特征 | 处理方式 |
+| --- | --- | --- |
+| 跟读录音（Vocabulary / Exercise 1） | `.oral-study-sentence` 行 + `.record-icon.button-record` | 借题目自带原声冒充麦克风，逐条录音等评分 |
+| 自由作答录音（Exercise 2） | 计时录音按钮（`02:00` + 点击结束录音），行内没有 `<audio>` | 模型写口语稿 → TTS 合成 → 同样注入麦克风 |
+| 中文括注填空（Exercise 1） | 题干 `____ (老年大学)` | 命中 Vocabulary 对照表就直接填，未命中才走模型 + 对照表上下文 |
+
+</details>
 
 <details>
 <summary><b>v3.8.0（2026-11）</b>：跟读/朗读录音题适配（issue #26）</summary>
@@ -262,7 +309,7 @@ py -m venv .venv
 
 ---
 
-## Star⭐ 承蒙厚爱
+## Star⭐ 对你有帮助欢迎点个Star
 
 [![Star History Chart](https://api.star-history.com/svg?repos=YSJohnson/UnipusAI-Helper&type=Date)](https://www.star-history.com/#YSJohnson/UnipusAI-Helper&Date)
 

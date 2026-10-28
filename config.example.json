@@ -8,6 +8,8 @@
   "max_tokens": 32768,
   "temperature": 0.3,
   "token_full": "",
-  "debug_mode": false
+  "debug_mode": false,
+  "tts_engine": "auto",
+  "tts_voice": "",
+  "tts_proxy": ""
 }
-

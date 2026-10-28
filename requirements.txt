@@ -3,3 +3,5 @@ openai>=1.10.0
 openai-whisper>=20231117
 PyQt5>=5.15.0
 PyQt-Fluent-Widgets>=1.0.0
+# 录音题（Exercise 2 主观题）TTS 主后端；没装会回退到 Windows 自带 System.Speech
+edge-tts>=7.0.0
