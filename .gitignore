@@ -11,3 +11,5 @@ config.json
 config.real.json
 config.test.json
 .vscode/
+# 测试脚本只在本地跑，不进版本库
+test_*.py
