@@ -1,4 +1,5 @@
-import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, winsound
+import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, winsound, base64
+import urllib.request
 import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -84,7 +85,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.7.1"
+APP_VERSION = "3.8.0"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -258,6 +259,7 @@ class QuestionType(Enum):
     VIDEO_CHOICE = auto()
     TRUE_FALSE = auto()  # 判断题（course-v3 播放器 T/F）
     MATCHING = auto()  # 人物 A-F ↔ 陈述 的匹配题（空里只填字母）
+    RECORD = auto()  # 跟读/朗读录音题（course-v2 播放器 oral-study 题型）
 
 
 @dataclass
@@ -284,6 +286,7 @@ class Question:
     group: Any = None  # course-v3 题目组容器（提交单位）
     needs_upload: bool = False  # course-v3 需要上传附件的题型
     blank_count: int = 0  # course-v3 下拉空位可能没有 input
+    record_items: List[Dict] = field(default_factory=list)  # 录音题：逐条 {index,url,name,duration,text,element}
 
     @property
     def answer_count(self) -> int:
@@ -294,6 +297,7 @@ class Question:
         if self.q_type in [QuestionType.VIDEO,
                            QuestionType.VOCABULARY_FLASHCARD,  # 闪卡需要交互
                            QuestionType.DISCUSSION_BOARD,
+                           QuestionType.RECORD,
                            QuestionType.SELF_CHECK]:
             return True
         return bool(self.options or self.inputs or self.banked_blanks)
@@ -684,6 +688,7 @@ class QuestionParser:
         self.strategies: List[QuestionParserStrategy] = [
             VideoStrategy(),
             DiscussionBoardStrategy(),
+            RecordStrategy(),  # 跟读录音题：靠 .record-icon.button-record 判定，必须在通用策略之前
             ChecklistStrategy(),
             SelfCheckStrategy(),
             SortingStrategy(),
@@ -871,6 +876,12 @@ class QuestionParser:
             print("     检测到讨论板页面，跳过")
             return []
 
+        # 跟读/朗读录音题：每句右侧是麦克风按钮，先按行收容器，避免落到通用判定里
+        record_containers = self._find_record_containers()
+        if record_containers:
+            print(f"     找到 {len(record_containers)} 个跟读录音题容器")
+            return record_containers
+
         # 自评清单（Wrapping up）优先于选择题判定，否则表格里的图标会被误判成选项
         checklist_containers = []
         for container in self.driver.find_elements(By.CSS_SELECTOR, '.layoutBody-container'):
@@ -1006,6 +1017,34 @@ class QuestionParser:
             return reply_fallback
 
         return []
+
+    def _find_record_containers(self) -> List[Any]:
+        """跟读/朗读录音题：按每个麦克风按钮所属的句子行收容器。"""
+        try:
+            buttons = self.driver.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR)
+        except Exception:
+            return []
+        if not buttons:
+            return []
+
+        rows = []
+        for button in buttons:
+            row = None
+            for xpath in (
+                "ancestor::*[contains(@class,'oral-study-sentence')][1]",
+                "ancestor::div[contains(@class,'record-button-group')][1]",
+                "ancestor::div[contains(@class,'layoutBody-container')][1]",
+            ):
+                try:
+                    row = button.find_element(By.XPATH, xpath)
+                    break
+                except Exception:
+                    continue
+            if row is None:
+                continue
+            if row not in rows:
+                rows.append(row)
+        return rows
 
     def _is_really_visible(self, element) -> bool:
         """检查元素真正可见"""
@@ -1510,6 +1549,210 @@ class MyVoiceTextStrategy(QuestionParserStrategy):
             except:
                 continue
         return ""
+
+
+RECORD_BUTTON_SELECTOR = '.record-icon.button-record'
+
+# 录音题的浏览器侧支撑库：把一段音频喂给 navigator.mediaDevices.getUserMedia，
+# 页面上的录音器（chivox）拿到的就是这段音频，而不是真的麦克风。
+#
+# 关键细节：录音器开始拉流后的前 ~0.6 秒必丢块并把丢失部分补成静音，
+# 所以参考音频前面要垫 LEAD_PAD 秒静音（实测 0.8s 时逐词满分）。
+RECORD_MIC_BOOTSTRAP_JS = r"""
+(function () {
+  if (window.__ucRec) { return; }
+  const md = navigator.mediaDevices || (navigator.mediaDevices = {});
+  const api = { buf: null, ctx: null, pad: 0.8, calls: 0, dur: 0, srcDur: 0 };
+  api.ctxOf = function () {
+    const ctx = api.ctx || (api.ctx = new AudioContext());
+    try { ctx.resume(); } catch (e) {}
+    return ctx;
+  };
+  api.silent = function () {
+    return api.ctxOf().createMediaStreamDestination().stream;
+  };
+  api.stream = function () {
+    const ctx = api.ctxOf();
+    if (!api.buf) { return ctx.createMediaStreamDestination().stream; }
+    const padSec = api.pad || 0;
+    const sr = api.buf.sampleRate;
+    const frames = api.buf.length + Math.round(padSec * sr);
+    const buf = ctx.createBuffer(api.buf.numberOfChannels, frames, sr);
+    for (let c = 0; c < api.buf.numberOfChannels; c++) {
+      buf.getChannelData(c).set(api.buf.getChannelData(c), Math.round(padSec * sr));
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(dest);
+    src.start();
+    api.calls += 1;
+    api.dur = buf.duration;
+    return dest.stream;
+  };
+  md.getUserMedia = function () { return Promise.resolve(api.stream()); };
+  md.getDisplayMedia = md.getDisplayMedia || function () { return Promise.resolve(api.silent()); };
+  window.__ucRec = api;
+})();
+"""
+
+RECORD_MIC_JS = r"""
+const done = arguments[arguments.length - 1];
+const b64 = arguments[0] || '';
+const pad = (typeof arguments[1] === 'number') ? arguments[1] : 0.8;
+(async () => {
+  const api = window.__ucRec;
+  if (!api) { done({ ok: false, err: 'bootstrap missing' }); return; }
+  api.pad = pad;
+  if (!b64) { done({ ok: true, dur: api.dur, srcDur: api.srcDur, pad: pad, reused: true }); return; }
+  const ctx = api.ctxOf();
+  const raw = atob(b64);
+  const u8 = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) u8[i] = raw.charCodeAt(i);
+  const buf = await ctx.decodeAudioData(u8.buffer);
+  api.buf = buf;
+  api.srcDur = buf.duration;
+  api.dur = buf.duration + pad;
+  done({ ok: true, dur: api.dur, srcDur: api.srcDur, sr: buf.sampleRate, pad: pad });
+})().catch((e) => done({ ok: false, err: String(e) }));
+"""
+
+RECORD_ITEMS_JS = r"""
+return Array.from((arguments[0] || document).querySelectorAll('.record-button-wrap'))
+  .map(function (wrap) {
+    const audio = wrap.querySelector('audio');
+    const raw = audio ? (audio.getAttribute('src') || audio.getAttribute('title') || '') : '';
+    const song = wrap.querySelector('.question-audio.audio-origin');
+    const text = wrap.closest('.oral-study-sentence') || wrap.parentElement;
+    return {
+      raw: raw,
+      name: (text ? (text.innerText || '') : '').trim().split('\n')[0],
+      src: song ? (song.getAttribute('title') || '') : ''
+    };
+  });
+"""
+
+RECORD_ROW_SCORE_JS = r"""
+return (function (root, idx) {
+  if (!root) { return { text: '', score: null, stop: false, wave: '' }; }
+  let rows;
+  try {
+    rows = (root.matches && root.matches('.oral-study-sentence'))
+      ? [root]
+      : Array.from(root.querySelectorAll('.oral-study-sentence'));
+  } catch (e) { rows = []; }
+  if (!rows.length) { rows = [root]; }
+  const row = rows[idx] || rows[0];
+  if (!row) { return { text: '', score: null, stop: false, wave: '' }; }
+  const node = row.querySelector('.score_layout');
+  const text = node ? ((node.innerText || node.textContent || '').trim()) : '';
+  const match = text.match(/(\d{1,3})/);
+  const icon = row.querySelector('.record-icon.button-record');
+  // 录音中图标会换成实心方块，空闲时 svg 里只有一个 opacity=0 的 rect
+  const stop = !!(icon && icon.querySelector('svg rect[fill="currentColor"]'));
+  const waveNode = row.querySelector('.audio-control-box.audio-control-wave');
+  return {
+    text: text,
+    score: match ? parseInt(match[1], 10) : null,
+    stop: stop,
+    wave: waveNode ? waveNode.className : ''
+  };
+})(arguments[0], arguments[1]);
+"""
+
+RECORD_STATE_JS = r"""
+return (function () {
+  // 调试/自检用：整页录音题的状态快照（每条分数、波形按钮态、注入调用次数）
+  const rows = Array.from(document.querySelectorAll('.oral-study-sentence, .record-button-group'));
+  const pick = (row) => {
+    const score = row.querySelector('.score_layout');
+    const wave = row.querySelector('.audio-control-box.audio-control-wave');
+    return {
+      score: score ? (score.innerText || score.textContent || '').trim() : '',
+      wave: wave ? (wave.className || '') : '',
+      text: (row.innerText || '').trim().slice(0, 80).replace(/\s+/g, ' '),
+    };
+  };
+  return {
+    rows: rows.map(pick),
+    buttons: document.querySelectorAll('.record-icon.button-record').length,
+    calls: (window.__ucRec && window.__ucRec.calls) || 0,
+  };
+})();
+"""
+
+
+class RecordStrategy(QuestionParserStrategy):
+    """跟读/朗读录音题（course-v2 播放器 .oral-study-sentence）
+
+    新版视听说教材的 Vocabulary、Exercise 里有一类题型：页面上给一句英文和它的
+    原声，要求"听并跟读"，每条右侧是一个麦克风按钮。做题方式不是填输入框，而是
+    让浏览器录一段音交给腾讯智聆（SOE）打分——所以只能走「把参考音频冒充成麦克风
+    输入」这条路，不需要 TTS、也不需要真的说话。
+    """
+
+    def can_parse(self, container, driver) -> bool:
+        try:
+            if container.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR):
+                return True
+        except Exception:
+            return False
+        return False
+
+    def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
+        try:
+            buttons = container.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR)
+        except Exception:
+            buttons = []
+        if not buttons:
+            return None
+
+        # 参考音频挂在 .record-button-wrap 里的 <audio>，src 后面带
+        # #duration=..&name=..，这里一次性用 JS 读出来，比多层 XPath 稳。
+        try:
+            metas = driver.execute_script(RECORD_ITEMS_JS, container) or []
+        except Exception:
+            metas = []
+
+        items = []
+        for idx, button in enumerate(buttons):
+            meta = {'index': idx, 'url': '', 'name': '', 'duration': 0.0, 'element': button}
+            if idx < len(metas):
+                info = metas[idx] or {}
+                raw = (info.get('raw') or '') or (info.get('src') or '')
+                meta['url'] = raw.split('#')[0].strip()
+                match = re.search(r'name=([^&]*)', raw)
+                if match:
+                    meta['name'] = match.group(1).strip()
+                match = re.search(r'duration=([0-9.]+)', raw)
+                if match:
+                    meta['duration'] = float(match.group(1))
+                if not meta['name']:
+                    meta['name'] = (info.get('name') or '').strip()
+            if not meta['name']:
+                meta['name'] = (button.get_attribute('title') or '').strip()
+            items.append(meta)
+
+        if not items:
+            return None
+
+        text = "跟读/朗读录音题"
+        try:
+            sentence = container.find_element(By.CSS_SELECTOR, '.sentence-html-container')
+            candidate = (sentence.text or '').strip()
+            if candidate:
+                text = candidate.split('\n')[0]
+        except Exception:
+            pass
+
+        return Question(
+            number=question_number,
+            text=text,
+            q_type=QuestionType.RECORD,
+            element=container,
+            directions=directions,
+            record_items=items,
+        )
 
 
 class TextInputStrategy(QuestionParserStrategy):
@@ -2973,6 +3216,7 @@ class AnswerExecutor:
             QuestionType.MY_VOICE_TEXT: self._fill_text,
             QuestionType.LISTENING_FILL_IN: self._fill_listening_fill_in,
             QuestionType.MATCHING: self._fill_matching,
+            QuestionType.RECORD: self._answer_record,
         }
 
         executor = executors.get(question.q_type, self._fill_unknown)
@@ -3353,6 +3597,178 @@ class AnswerExecutor:
     @staticmethod
     def _number_prefix_pattern(number: int) -> str:
         return rf'(?:(?:空\s*)?{number}\s*[.、:：\)\]]|Blank\s*{number}\s*[.、:：\)\]])'
+
+    # ===== 跟读/朗读录音题 =====
+    # 录音器（chivox）在开始拉流后的前 ~0.6 秒会丢块并补静音，参考音频前面垫
+    # 这么多静音才能让整句落进有效窗口（实测 0.8s：逐词 100/100/100，总分 95）。
+    RECORD_LEAD_PAD = 0.8
+    RECORD_RETRY_PAD = 1.3
+    RECORD_MIN_SCORE = 60
+    RECORD_AUDIO_CACHE: Dict[str, bytes] = {}
+
+    def _answer_record(self, q: Question, answer: str = "") -> bool:
+        """把题目自带原声冒充成麦克风输入，逐条完成跟读录音并等评分回填。"""
+        items = list(q.record_items or [])
+        if not items:
+            print("\t没有找到录音条目")
+            return False
+
+        self._dismiss_record_popup()
+        probe = self.driver.execute_async_script(RECORD_MIC_JS, "", self.RECORD_LEAD_PAD)
+        if not probe or not probe.get("ok"):
+            print(f"\t录音注入初始化失败: {probe}")
+            return False
+
+        for idx in range(len(items)):
+            try:
+                self._record_one_item(q, idx)
+            except Exception as exc:
+                print(f"\t第 {idx + 1} 条录音失败: {str(exc)[:80]}")
+                logger.error("录音题执行失败", exc_info=True)
+
+        # 收尾：平台提交时会检查「有没有作答」，漏掉的条目补录一次
+        missing = [i for i in range(len(items)) if self._read_row_state(q, i) is None]
+        if missing:
+            print(f"\t有 {len(missing)} 条没拿到评分，补录: {[i + 1 for i in missing]}")
+            for idx in missing:
+                try:
+                    self._record_one_item(q, idx)
+                except Exception:
+                    logger.error("录音题补录失败", exc_info=True)
+
+        done = sum(1 for i in range(len(items)) if self._read_row_state(q, i) is not None)
+        print(f"\t录音题完成 {done}/{len(items)} 条")
+        return done > 0
+
+    def _read_row_state(self, q: Question, idx: int) -> Optional[int]:
+        """读某一条当前分数，没有分数返回 None。"""
+        try:
+            state = self.driver.execute_script(RECORD_ROW_SCORE_JS, q.element, idx)
+        except Exception:
+            return None
+        if state and state.get('score') is not None:
+            return int(state['score'])
+        return None
+
+    def _record_one_item(self, q: Question, idx: int) -> bool:
+        items = q.record_items or []
+        if idx >= len(items):
+            return False
+        item = items[idx]
+        url = (item.get('url') or '').strip()
+        data = self._download_record_audio(url)
+        if not data:
+            print(f"\t第 {idx + 1} 条: 没有参考音频，跳过")
+            return False
+
+        payload = base64.b64encode(data).decode()
+        last_score = None
+        for pad in (self.RECORD_LEAD_PAD, self.RECORD_RETRY_PAD):
+            state = self.driver.execute_async_script(RECORD_MIC_JS, payload, pad)
+            if not state or not state.get("ok"):
+                print(f"\t第 {idx + 1} 条: 音频注入失败 {state}")
+                return False
+            clip = float(state.get("dur") or 0) or (float(item.get('duration') or 0) + pad)
+
+            buttons = q.element.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR)
+            if idx >= len(buttons):
+                print(f"\t第 {idx + 1} 条: 录音按钮已消失")
+                return False
+            button = buttons[idx]
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", button)
+            time.sleep(0.3)
+            if not WebDriverHelper.safe_click(self.driver, button):
+                print(f"\t第 {idx + 1} 条: 点击录音失败")
+                return False
+            time.sleep(clip + 1.0)
+            # 再点一次 = 停止录音
+            if not WebDriverHelper.safe_click(self.driver, button):
+                print(f"\t第 {idx + 1} 条: 点击停止失败")
+                return False
+
+            last_score = self._wait_record_score(q, idx)
+            if last_score is None:
+                print(f"\t第 {idx + 1} 条: 未拿到评分（可能录音未被识别）")
+            else:
+                print(f"\t第 {idx + 1} 条: 得分 {last_score}")
+                if last_score >= self.RECORD_MIN_SCORE:
+                    return True
+            time.sleep(0.6)
+            if last_score is None:
+                break
+        return last_score is not None
+
+    def _wait_record_score(self, q: Question, idx: int, timeout: float = 20.0) -> Optional[int]:
+        """轮询页面，等第 idx 条录音的分数出现（只看这条自己那一行）。"""
+        state = self._wait_record_finish(q, idx, timeout=timeout)
+        return state.get('score') if state else None
+
+    def _wait_record_finish(self, q: Question, idx: int, timeout: float = 25.0) -> Optional[dict]:
+        """等这一条录音评分出来；若发现还停在录音状态，补一次停止点击。"""
+        deadline = time.time() + timeout
+        extra_stops = 0
+        while time.time() < deadline:
+            try:
+                state = self.driver.execute_script(RECORD_ROW_SCORE_JS, q.element, idx)
+            except Exception:
+                time.sleep(0.5)
+                continue
+            if state and state.get('score') is not None:
+                return state
+            if state and state.get('stop') and extra_stops < 2:
+                # 还在录：说明停止那一下没点中，补点一次
+                extra_stops += 1
+                try:
+                    buttons = q.element.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR)
+                    if idx < len(buttons):
+                        WebDriverHelper.safe_click(self.driver, buttons[idx])
+                        print(f"\t第 {idx + 1} 条: 检测到仍在录音，补一次停止点击")
+                except Exception:
+                    pass
+                time.sleep(1.5)
+                continue
+            time.sleep(0.5)
+        return None
+
+    def _download_record_audio(self, url: str) -> Optional[bytes]:
+        if not url:
+            return None
+        cached = self.RECORD_AUDIO_CACHE.get(url)
+        if cached:
+            return cached
+        try:
+            request = urllib.request.Request(url, headers={
+                'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                               'AppleWebKit/537.36 (KHTML, like Gecko) '
+                               'Chrome/120.0 Safari/537.36'),
+                'Referer': 'https://ucontent.unipus.cn/',
+            })
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = response.read()
+            if data:
+                if len(self.RECORD_AUDIO_CACHE) >= 64:
+                    self.RECORD_AUDIO_CACHE.clear()
+                self.RECORD_AUDIO_CACHE[url] = data
+                return data
+        except Exception as exc:
+            print(f"\t参考音频下载失败: {str(exc)[:80]}")
+        return None
+
+    def _dismiss_record_popup(self):
+        try:
+            self.driver.execute_script("""
+                const selectors = ['.system-info-cloud-ok-button',
+                                   '.know-box .iKnow',
+                                   '.ant-modal-confirm-btns .ant-btn-primary'];
+                for (const sel of selectors) {
+                    const btn = document.querySelector(sel);
+                    if (btn) { btn.click(); }
+                }
+            """)
+            time.sleep(0.4)
+        except Exception:
+            pass
 
     def _fill_text(self, q: Question, answer: str) -> bool:
         if not q.inputs:
@@ -7017,9 +7433,31 @@ class AISolver:
             ]]
 
             total_questions = len(normal_questions)
+
+            # 录音题不需要模型给答案：页面自带参考音频，直接喂进麦克风轨道。
+            # total_questions 保持原值（含录音题），否则「只有录音题」的页面不会触发提交。
+            record_questions = [q for q in normal_questions if q.q_type == QuestionType.RECORD]
+            record_answered = 0
+            if record_questions:
+                print(f"    本页 {len(record_questions)} 道跟读录音题，开始逐条录音...")
+                for q in record_questions:
+                    if self._should_stop():
+                        return False
+                    if self.executor.execute(q, ""):
+                        record_answered += 1
+                print(f"    录音题完成 {record_answered}/{len(record_questions)}")
+                normal_questions = [q for q in normal_questions
+                                    if q.q_type != QuestionType.RECORD]
+                if not normal_questions:
+                    total_answered += record_answered
+                    print(f"    本页成功填写 {record_answered}/{total_questions} 题")
+                    if record_answered != total_questions:
+                        print("    本页录音题未全部完成，停止当前任务")
+                        return False
+
             if normal_questions:
                 print(f"    共 {total_questions} 道题目需要回答")
-                success_count = 0
+                success_count = record_answered
 
                 # 空位特别多的填空题（如 28 空的首字母搭配）一次性问模型时，
                 # 推理型模型容易把 token 全烧在思考上导致返回空；拆成小块逐段问更稳。
@@ -7965,6 +8403,10 @@ class AISolver:
         if self._has_video_on_page():
             return
 
+        # 跟读录音题的原声就是题目本身，不需要转写进上下文
+        if self.driver.find_elements(By.CSS_SELECTOR, RECORD_BUTTON_SELECTOR):
+            return
+
         if not self._has_audio_on_page():
             return
 
@@ -8239,11 +8681,17 @@ class UCampusBot:
     COMPAT_EDGE_ARGS = ('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
                         '--disable-extensions')
 
+    # 录音题需要：不再弹麦克风授权框 + AudioContext 无需用户手势即可启动
+    MIC_EDGE_ARGS = ('--use-fake-ui-for-media-stream',
+                     '--autoplay-policy=no-user-gesture-required')
+
     def _start_edge(self, temp_dir: str, extra_args=()):
         """按指定临时目录启动 Edge，并注入反检测脚本。"""
         options = webdriver.EdgeOptions()
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        for argument in self.MIC_EDGE_ARGS:
+            options.add_argument(argument)
         for argument in extra_args:
             options.add_argument(argument)
 
@@ -8260,6 +8708,13 @@ class UCampusBot:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
         })
+        # 把麦克风轨道换成「页面自带原声」的载体，供跟读录音题使用
+        try:
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": RECORD_MIC_BOOTSTRAP_JS
+            })
+        except Exception as exc:
+            logger.warning(f"录音注入脚本安装失败: {str(exc)[:100]}")
         return driver
 
     def _create_driver(self):
@@ -8281,6 +8736,10 @@ class UCampusBot:
             # 受限环境（沙箱/受限用户/显卡驱动异常）下首次启动可能失败，降级重试一次：
             # 换新的临时 profile 并加上兼容参数
             print(f" 启动 Edge 失败（{str(exc)[:120]}），尝试兼容模式重试...")
+            return self._start_edge(temp_dir, extra_args=self.COMPAT_EDGE_ARGS)
+        except Exception as exc:
+            # 驱动握手超时（urllib3 ReadTimeoutError）等非 WebDriverException 也要重试
+            print(f" 启动 Edge 超时（{str(exc)[:120]}），尝试兼容模式重试...")
             return self._start_edge(temp_dir, extra_args=self.COMPAT_EDGE_ARGS)
 
     def start(self):
