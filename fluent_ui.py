@@ -8,7 +8,7 @@ import winsound
 from typing import Dict
 
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QTextCursor
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCursor
 from PyQt5.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     CardWidget,
@@ -28,10 +28,22 @@ from qfluentwidgets import (
     ToolButton,
     setTheme,
 )
+from qfluentwidgets.common.font import getFont, setFont as setWidgetFont
 
 
 class _MainThreadBridge(QObject):
     invoke = pyqtSignal(object)
+
+
+class _ClickableRow(QWidget):
+    """整行可点击的容器，用来折叠/展开目录层级。"""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class FluentModernGUI(MSFluentWindow):
@@ -62,10 +74,10 @@ class FluentModernGUI(MSFluentWindow):
 
         self._all_tabs = []
         self._tab_widget_items = []
+        self._section_items = []
         self._selected_tab_keys = set()
         self._auto_running = False
         self._quick_running = False
-        self.is_dark = True
         self._labels = []
         self._panel_cards = []
         self._metric_boxes = []
@@ -137,13 +149,6 @@ class FluentModernGUI(MSFluentWindow):
         top_layout.addWidget(self.debug_switch)
         top_layout.addSpacing(16)
 
-        top_layout.addWidget(self._label("界面主题", 14, "#a7b0bb", 600))
-        self.theme_switch = SwitchButton()
-        self.theme_switch.setText("夜间")
-        self.theme_switch.setChecked(True)
-        self.theme_switch.checkedChanged.connect(self._on_theme_toggle)
-        top_layout.addWidget(self.theme_switch)
-
         self.btn_quit = PushButton("安全退出软件")
         self.btn_quit.setIcon(FIF.POWER_BUTTON)
         self.btn_quit.setToolTip("关闭浏览器并退出软件")
@@ -160,7 +165,7 @@ class FluentModernGUI(MSFluentWindow):
         task_toolbar = QHBoxLayout()
         task_toolbar.setSpacing(8)
         self.task_search = SearchLineEdit()
-        self.task_search.setPlaceholderText("筛选任务名称")
+        self.task_search.setPlaceholderText("筛选任务 / 章节 / Unit")
         self.task_search.textChanged.connect(self._on_search_key)
         task_toolbar.addWidget(self.task_search)
         self.btn_select_all = PushButton("全选")
@@ -189,7 +194,7 @@ class FluentModernGUI(MSFluentWindow):
         self._tab_list_frame = QWidget()
         self._tab_list_layout = QVBoxLayout(self._tab_list_frame)
         self._tab_list_layout.setContentsMargins(0, 6, 0, 6)
-        self._tab_list_layout.setSpacing(7)
+        self._tab_list_layout.setSpacing(5)
         self._tab_list_layout.addWidget(self._empty_state())
         self._tab_list_layout.addStretch(1)
         self.task_scroll.setWidget(self._tab_list_frame)
@@ -273,10 +278,20 @@ class FluentModernGUI(MSFluentWindow):
         return label
 
     def _style_label(self, label):
+        kind = label.property("labelKind")
+        if kind == "taskStatus":
+            self._style_task_status(label)
+            return
+        if kind == "groupHeader":
+            self._style_group_header(label)
+            return
+        if kind == "sectionHeader":
+            self._style_section_header(label)
+            return
         tone = label.property("tone") or "primary"
         size = (label.property("fontSize") or 14) * self.font_scale
         weight = label.property("fontWeight") or 400
-        color = "#f5f7fb" if tone == "primary" and self.is_dark else "#1f2933" if tone == "primary" else "#a7b0bb" if self.is_dark else "#667085"
+        color = "#f5f7fb" if tone == "primary" else "#a7b0bb"
         label.setStyleSheet(
             f"background: transparent; color: {color}; font-size: {size:.1f}px; "
             f"font-weight: {weight}; font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
@@ -351,22 +366,13 @@ class FluentModernGUI(MSFluentWindow):
         return empty
 
     def _apply_theme(self):
-        if self.is_dark:
-            palette = {
-                "bg": "#17191d", "panel": "#202328", "panel_border": "#2c3138",
-                "top": "#202328", "pill_bg": "#1c3238", "pill_border": "#24515b",
-                "metric": "#242830", "log": "#14171b", "log_border": "#303640",
-                "text": "#f4f7fb",
-            }
-            setTheme(Theme.DARK)
-        else:
-            palette = {
-                "bg": "#f3f6fa", "panel": "#ffffff", "panel_border": "#dfe5ec",
-                "top": "#ffffff", "pill_bg": "#e8f7fb", "pill_border": "#bcebf4",
-                "metric": "#f1f5f9", "log": "#ffffff", "log_border": "#d7dee8",
-                "text": "#1f2933",
-            }
-            setTheme(Theme.LIGHT)
+        palette = {
+            "bg": "#17191d", "panel": "#202328", "panel_border": "#2c3138",
+            "top": "#202328", "pill_bg": "#1c3238", "pill_border": "#24515b",
+            "metric": "#242830", "log": "#14171b", "log_border": "#303640",
+            "text": "#f4f7fb",
+        }
+        setTheme(Theme.DARK)
 
         self.setBackgroundColor(QColor(palette["bg"]))
         self.setCustomBackgroundColor(QColor(palette["bg"]), QColor(palette["bg"]))
@@ -415,6 +421,10 @@ class FluentModernGUI(MSFluentWindow):
             box.setStyleSheet(f"background: {palette['metric']}; border-radius: 8px;")
         for label in self._labels:
             self._style_label(label)
+        for item in self._tab_widget_items:
+            badge = item.get("badge")
+            if badge is not None:
+                self._style_task_badge(badge)
         if hasattr(self, "author_label"):
             self.author_label.setStyleSheet(
                 self.author_label.styleSheet()
@@ -757,6 +767,16 @@ class FluentModernGUI(MSFluentWindow):
                 # 先脱离父级再 deleteLater，避免重新扫描时旧内容（含空状态提示）残留在列表上
                 widget.setParent(None)
                 widget.deleteLater()
+        # 列表内的分组标题与状态胶囊由 _labels 托管样式，重建前先摘掉旧引用，
+        # 否则切主题刷新样式时会访问到已销毁的控件
+        alive = []
+        for label in self._labels:
+            try:
+                if label.property("labelKind") is None:
+                    alive.append(label)
+            except RuntimeError:
+                continue
+        self._labels = alive
 
     def _build_tab_list_ui(self, current_unit_only: bool = False):
         self._set_busy(False)
@@ -767,6 +787,7 @@ class FluentModernGUI(MSFluentWindow):
 
         self._clear_task_list()
         self._tab_widget_items = []
+        self._section_items = []
         done_count = sum(1 for t in self._all_tabs if t.get("status") == "done")
         pending_compulsory = [
             i for i, t in enumerate(self._all_tabs)
@@ -791,37 +812,7 @@ class FluentModernGUI(MSFluentWindow):
             groups.setdefault(unit_key, []).append(i)
 
         for unit_name, indices in groups.items():
-            unit_tabs = [self._all_tabs[i] for i in indices]
-            comp = sum(1 for t in unit_tabs if t.get("is_compulsory", False))
-            done = sum(1 for t in unit_tabs if t.get("status") == "done")
-            header = self._label(
-                f"{unit_name} ({len(indices)} 个任务 / {comp} 必修 / 已完成 {done})", 17, "#c3ccd8", 700)
-            header.setStyleSheet(
-                header.styleSheet()
-                + " padding: 12px 4px 2px 4px; margin-bottom: 2px;"
-                + " border-bottom: 1px solid rgba(255,255,255,0.08);")
-            self._tab_list_layout.addWidget(header)
-            for idx in indices:
-                tab = self._all_tabs[idx]
-                key = self._tab_key(idx, tab)
-                row = QWidget()
-                row.setStyleSheet("background: transparent;")
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(0, 0, 0, 0)
-                row_layout.setSpacing(8)
-                checkbox = CheckBox(self._short_display(tab["display"]))
-                checkbox.setToolTip(tab["display"])
-                checkbox.setChecked(key in self._selected_tab_keys)
-                checkbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                checkbox.stateChanged.connect(lambda _=None, k=key, cb=checkbox: self._sync_tab_selection(k, cb))
-                row_layout.addWidget(checkbox, 1)
-                status_pill = self._task_status_label(tab)
-                row_layout.addWidget(status_pill, 0)
-                self._tab_list_layout.addWidget(row)
-                self._tab_widget_items.append({
-                    "index": idx, "key": key, "checkbox": checkbox,
-                    "row": row, "status": status_pill,
-                })
+            self._tab_list_layout.addWidget(self._build_unit_block(unit_name, indices))
 
         self._tab_list_layout.addStretch(1)
         self.btn_auto.setEnabled(True)
@@ -840,25 +831,259 @@ class FluentModernGUI(MSFluentWindow):
         self._update_task_stats()
 
     @staticmethod
-    def _short_display(text: str, limit: int = 62) -> str:
-        text = text or ""
-        return text if len(text) <= limit else text[:limit - 1] + "…"
+    def _task_section_parts(tab: Dict):
+        """把目录路径拆成层级标题：Unit preview / Quotation / Quotation -> [Unit preview, Quotation]。"""
+        section = (tab.get("section") or tab.get("l2_title") or "").strip()
+        parts = [part.strip() for part in section.split("/") if part.strip()]
+        # 目录里的折叠标题经常重复（Quotation / Quotation），去重后层级更清爽
+        parts = list(dict.fromkeys(parts))
+        name = (tab.get("l1_title") or "").strip()
+        if parts and name and parts[-1].lower() == name.lower():
+            parts = parts[:-1]
+        return parts
+
+    @staticmethod
+    def _node_indices(node) -> list:
+        """收集一棵目录子树下的全部任务下标。"""
+        found = list(node["tasks"])
+        for child in node["children"].values():
+            found.extend(FluentModernGUI._node_indices(child))
+        return found
+
+    def _indent(self, depth: int) -> int:
+        return round(depth * 16 * self.font_scale)
+
+    def _elide(self, text: str, indent: int = 0) -> str:
+        fm = QFontMetrics(getFont(self._task_text_px(), QFont.Weight.Medium))
+        viewport = self.task_scroll.viewport().width() if getattr(self, "task_scroll", None) else 0
+        # 徽章 + 勾选框 + 状态胶囊约占 175px；viewport 还没完成布局时退回保守值
+        base = viewport - 175 if viewport >= 520 else 500
+        return fm.elidedText(text or "", Qt.ElideRight, max(180, base - indent))
+
+    def _collapsible(self, header_row, body, indices):
+        """标题行 + 内容容器绑成可折叠块，点击标题切换展开/收起。"""
+        box = QWidget()
+        box.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(header_row)
+        layout.addWidget(body)
+
+        state = {"open": True}
+
+        def toggle():
+            state["open"] = not state["open"]
+            body.setVisible(state["open"])
+            arrow = getattr(header_row, "arrow_label", None)
+            if arrow is not None:
+                arrow.setText("▾" if state["open"] else "▸")
+
+        header_row.clicked.connect(toggle)
+        self._section_items.append(
+            {"row": header_row, "body": body, "state": state, "tasks": list(indices)})
+        return box
+
+    def _header_row(self, text, depth, size, trailing=""):
+        """带折叠箭头的层级标题行。"""
+        row = _ClickableRow()
+        row.setCursor(Qt.PointingHandCursor)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(self._indent(depth), 5, 28, 1)
+        layout.setSpacing(6)
+
+        arrow = self._label("▾", size - 4, "#7b8794", 700)
+        arrow.setFixedWidth(round(12 * self.font_scale))
+        arrow.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(arrow, 0)
+
+        label = self._label(text, size, "#c3ccd8", 600)
+        label.setProperty("labelKind", "sectionHeader")
+        label.setProperty("sectionDepth", depth)
+        self._style_section_header(label)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(label, 1)
+
+        if trailing:
+            tip = self._label(trailing, size - 4, "#7b8794", 600)
+            tip.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            layout.addWidget(tip, 0)
+
+        row.arrow_label = arrow
+        return row
+
+    def _build_unit_block(self, unit_name, indices):
+        unit_tabs = [self._all_tabs[i] for i in indices]
+        comp = sum(1 for t in unit_tabs if t.get("is_compulsory", False))
+        done = sum(1 for t in unit_tabs if t.get("status") == "done")
+        header = self._header_row(
+            f"{unit_name}", 0, 19, f"{len(indices)} 任务 · {comp} 必修 · 完成 {done}")
+        header.setProperty("unitHeader", True)
+        header.arrow_label.setText("▾")
+
+        # 按 section 路径建树：同名前缀只出现一次标题，任务点挂在最深层
+        tree = {"children": {}, "tasks": []}
+        for idx in indices:
+            node = tree
+            for part in self._task_section_parts(self._all_tabs[idx]):
+                node = node["children"].setdefault(part, {"children": {}, "tasks": []})
+            node["tasks"].append(idx)
+
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 6)
+        body_layout.setSpacing(2)
+        for title, child in tree["children"].items():
+            body_layout.addWidget(self._build_section_block(title, child, 1))
+        for idx in tree["tasks"]:
+            body_layout.addWidget(self._build_task_row(idx, 1))
+
+        return self._collapsible(header, body, indices)
+
+    def _build_section_block(self, title, node, depth):
+        indices = self._node_indices(node)
+        header = self._header_row(title, depth, 16, f"{len(indices)} 项")
+
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 2)
+        body_layout.setSpacing(2)
+        for child_title, child in node["children"].items():
+            body_layout.addWidget(self._build_section_block(child_title, child, depth + 1))
+        for idx in node["tasks"]:
+            body_layout.addWidget(self._build_task_row(idx, depth + 1))
+
+        return self._collapsible(header, body, indices)
+
+    def _build_task_row(self, idx, depth):
+        tab = self._all_tabs[idx]
+        key = self._tab_key(idx, tab)
+        compulsory = bool(tab.get("is_compulsory", False))
+        indent = self._indent(depth)
+
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(indent, 0, 28, 0)
+        row_layout.setSpacing(8)
+
+        badge = self._task_type_badge(compulsory)
+        row_layout.addWidget(badge, 0)
+
+        name = (tab.get("l1_title") or tab.get("display") or "").strip()
+        checkbox = CheckBox(self._elide(name, indent))
+        self._style_task_checkbox(checkbox, compulsory)
+        checkbox.setToolTip(tab.get("display") or name)
+        checkbox.setChecked(key in self._selected_tab_keys)
+        checkbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        checkbox.stateChanged.connect(
+            lambda _=None, k=key, cb=checkbox: self._sync_tab_selection(k, cb))
+        row_layout.addWidget(checkbox, 1)
+
+        status_pill = self._task_status_label(tab)
+        row_layout.addWidget(status_pill, 0)
+
+        self._tab_widget_items.append({
+            "index": idx, "key": key, "checkbox": checkbox,
+            "row": row, "status": status_pill, "badge": badge,
+        })
+        return row
+
+    def _task_text_px(self) -> int:
+        return max(14, round(15.5 * self.font_scale))
+
+    def _style_task_checkbox(self, checkbox, compulsory: bool):
+        """任务行文字：必修更亮更粗（暖黄），选修常规；勾选框颜色也随类型区分。"""
+        setWidgetFont(
+            checkbox,
+            self._task_text_px(),
+            QFont.Weight.Bold if compulsory else QFont.Weight.Medium,
+        )
+        if compulsory:
+            checkbox.setTextColor("#8a5a00", "#ffd98a")
+            checkbox.setCheckedColor("#c67c00", "#ffb02e")
+        else:
+            checkbox.setTextColor("#42505f", "#ccd6e2")
+
+    def _task_type_badge(self, compulsory: bool) -> QLabel:
+        badge = QLabel("必修" if compulsory else "选修")
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFixedWidth(round(44 * self.font_scale))
+        badge.setProperty("taskKind", "compulsory" if compulsory else "elective")
+        self._style_task_badge(badge)
+        return badge
+
+    def _style_task_badge(self, badge):
+        compulsory = badge.property("taskKind") == "compulsory"
+        fg, bg, border = (
+            ("#ffcf6b", "rgba(255,176,46,0.16)", "rgba(255,176,46,0.45)")
+            if compulsory else
+            ("#93a1b1", "rgba(255,255,255,0.05)", "rgba(255,255,255,0.12)")
+        )
+        size = max(11, round(11.5 * self.font_scale))
+        badge.setStyleSheet(
+            "QLabel {"
+            f" color: {fg}; background: {bg}; border: 1px solid {border};"
+            f" border-radius: 7px; padding: 2px 0px; font-size: {size}px;"
+            " font-weight: 700;"
+            " font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
+            " }"
+        )
 
     def _task_status_label(self, tab: Dict):
         status = tab.get("status", "unknown")
         text = tab.get("status_text") or ("已完成" if status == "done" else "未完成" if status != "unknown" else "")
         if not text:
             text = "未标记"
-        color = {
-            "done": "#37d987",
-            "doing": "#ffb25f",
-            "todo": "#8fb2ff",
-        }.get(status, "#9fa8b4")
-        label = self._label(text, 12, color, 600)
-        label.setStyleSheet(
-            label.styleSheet()
-            + f" padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,0.06); color: {color};")
+        label = self._label(text, 12, "#f4f7fb", 600)
+        label.setProperty("labelKind", "taskStatus")
+        label.setProperty("taskStatus", status)
+        self._style_task_status(label)
         return label
+
+    def _style_task_status(self, label):
+        """状态胶囊：底色/文字色固定深色主题配色。"""
+        status = label.property("taskStatus") or "unknown"
+        palette = {"done": "#37d987", "doing": "#ffb25f", "todo": "#8fb2ff", "unknown": "#9fa8b4"}
+        color = palette.get(status, palette["unknown"])
+        bg = "rgba(255,255,255,0.06)"
+        size = (label.property("fontSize") or 12) * self.font_scale
+        label.setStyleSheet(
+            f"background: {bg}; color: {color}; font-size: {size:.1f}px; font-weight: 600;"
+            " font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
+            " padding: 3px 8px; border-radius: 8px;"
+        )
+
+    def _style_group_header(self, label):
+        """分组标题：字号更大、加粗，底部一条分隔线。"""
+        color = "#c3ccd8"
+        border = "rgba(255,255,255,0.08)"
+        size = (label.property("fontSize") or 19) * self.font_scale
+        label.setStyleSheet(
+            f"background: transparent; color: {color}; font-size: {size:.1f}px; font-weight: 700;"
+            " font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
+            " padding: 6px 4px 2px 4px; margin-bottom: 2px;"
+            f" border-bottom: 1px solid {border};"
+        )
+
+    def _style_section_header(self, label):
+        """目录层级标题：越深越淡、字号逐级收小，靠缩进表达结构。"""
+        depth = label.property("sectionDepth") or 0
+        if depth <= 0:
+            size, color, weight = 19, "#c3ccd8", 700
+        elif depth == 1:
+            size, color, weight = 16, "#dce4ee", 600
+        else:
+            size, color, weight = 14.5, "#aeb9c6", 600
+        border = " border-bottom: 1px solid rgba(255,255,255,0.08);" if depth <= 0 else ""
+        label.setStyleSheet(
+            f"background: transparent; color: {color}; font-size: {size * self.font_scale:.1f}px;"
+            f" font-weight: {weight};"
+            " font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
+            f" padding: {'0 0 4px 0' if depth <= 0 else '0'};{border}"
+        )
 
     def _tab_key(self, index: int, tab: Dict) -> str:
         return "|".join(str(tab.get(part, "")) for part in ("l1_idx", "l2_idx", "display")) or str(index)
@@ -881,7 +1106,11 @@ class FluentModernGUI(MSFluentWindow):
         self._update_task_stats()
 
     def _task_matches_query(self, tab: Dict, query: str) -> bool:
-        return query == "" or query in tab.get("display", "").lower()
+        if not query:
+            return True
+        haystack = " ".join(str(tab.get(part) or "") for part in
+                            ("l1_title", "section", "unit_label", "status_text"))
+        return query in haystack.lower()
 
     def _on_select_all(self):
         for item in self._tab_widget_items:
@@ -913,14 +1142,29 @@ class FluentModernGUI(MSFluentWindow):
                 self._set_task_selected(item, True)
 
     def _on_search_key(self, *_):
-        query = self.task_search.text().lower()
+        query = self.task_search.text().strip().lower()
+        visible_idx = set()
         for item in self._tab_widget_items:
             tab = self._all_tabs[item["index"]]
-            visible = self._task_matches_query(tab, query)
-            item["checkbox"].setVisible(visible)
-            row = item.get("row")
-            if row is not None:
-                row.setVisible(visible)
+            visible = (not query) or self._task_matches_query(tab, query)
+            item["row"].setVisible(visible)
+            if visible:
+                visible_idx.add(item["index"])
+
+        # 目录层级跟着子项走：没有命中任务的层级整块收起，命中时保持原有的展开状态
+        for section in reversed(list(self._section_items)):
+            try:
+                tasks = section["tasks"]
+            except (RuntimeError, KeyError):
+                continue
+            if query:
+                hit = any(idx in visible_idx for idx in tasks)
+                section["row"].setVisible(hit)
+                section["body"].setVisible(hit and section["state"]["open"])
+            else:
+                section["row"].setVisible(True)
+                section["body"].setVisible(section["state"]["open"])
+
         self.btn_select_visible.setVisible(bool(query))
 
     def _on_task_done(self, tab: Dict):
@@ -1107,11 +1351,6 @@ class FluentModernGUI(MSFluentWindow):
         self._globals["DEBUG_MODE"] = checked
         self.gui_log_queue.put(f"调试模式: {'开启' if checked else '关闭'}")
 
-    def _on_theme_toggle(self, checked=None):
-        self.is_dark = self.theme_switch.isChecked() if checked is None else bool(checked)
-        self.theme_switch.setText("夜间")
-        self._apply_theme()
-
     def _open_repository(self):
         webbrowser.open("https://github.com/YSJohnson/UnipusAI-Helper")
 
@@ -1148,6 +1387,8 @@ class FluentModernGUI(MSFluentWindow):
         if not self._closing:
             self.on_quit_clicked()
         event.accept()
+
+
 
 
 

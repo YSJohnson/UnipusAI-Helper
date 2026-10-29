@@ -13,3 +13,5 @@ config.test.json
 .vscode/
 # 测试脚本只在本地跑，不进版本库
 test_*.py
+# 本地排查产物（截图、真机扫描快照、探针脚本）
+output/
