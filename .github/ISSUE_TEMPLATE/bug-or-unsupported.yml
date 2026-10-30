@@ -1,0 +1,83 @@
+name: 问题反馈 / 教材题型适配 / 优化建议
+description: 报告 Bug、投稿暂不适配的教材题型，或提优化建议。
+body:
+  - type: dropdown
+    id: problem_type
+    attributes:
+      label: "1. 遇到什么问题（必填）"
+      options:
+        - "Bug：程序报错 / 崩溃 / 卡住不动 / 登录失败 / 界面异常"
+        - "题型没适配：某类题被跳过、答错、填不进去或提交失败"
+        - "Bug 和题型不适配都有"
+        - "脚本优化建议：功能想法、速度 / 稳定性 / 界面体验改进"
+        - "使用与配置问题：安装依赖、config.json 怎么填、命令怎么跑"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem_detail
+    attributes:
+      label: "1.1 具体说明（必填）"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproduce_rate
+    attributes:
+      label: "1.2 复现情况（选填）"
+      options:
+        - "每次都能复现"
+        - "偶尔出现，重复几次才遇到"
+        - "只出现过一次"
+        - "不适用"
+    validations:
+      required: false
+
+  - type: input
+    id: textbook
+    attributes:
+      label: "2. 教材名称（必填）"
+      placeholder: 新视野大学英语视听说教程 1（第三版）
+    validations:
+      required: true
+
+  - type: input
+    id: unit_and_task
+    attributes:
+      label: "2.1 具体单元 / 任务点（必填）"
+      placeholder: Unit 3 → Listening to the world → 第 2 个任务点（Vocabulary）
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "3. 报错与日志（选填）"
+      placeholder: 贴报错前后 20 行（去掉账号和 api_key）
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: script_version
+    attributes:
+      label: "3.1 脚本版本（选填）"
+      placeholder: v3.8.0
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 4. 能否提供账号密码方便适配？
+
+        不要把账号密码写在 issue 里。请发到 **1468943602@qq.com**，并注明本 issue 的编号或链接。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认（必填）
+      options:
+        - label: 教材名称、单元、任务点已写清楚，截图已附上
+    validations:
+      required: true
