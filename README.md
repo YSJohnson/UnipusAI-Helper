@@ -26,7 +26,7 @@
 - 断点续跑：每完成一个任务自动取消勾选，停止后剩下的勾选就是「还没做」的任务，再点开始即从卡住的那题继续。
 - 双模式处理：支持「扫描任务列表」批量处理、只扫「当前单元必修」，也支持「快速处理当前页」。
 - 单元编号按目录真实标题显示，`Course preview` 这类预习单元单列为「预备单元」，不会把后面的 Unit 挤乱。
-- 多题型处理：支持单选、多选、填空、写作、选词填空、拖拽排序、下拉选择、词汇测试、听力填空、听力选择、视频选择、视频任务、视频弹窗题、词汇闪卡、Self-check 词汇勾选、My voice 文字作答、**人物 A–F 匹配**、**翻译段落**、**首字母搭配填空**、**Wrapping up 自评清单**、**讨论区发帖**、**跟读/朗读录音题**、**中文括注填空（直接复用 Vocabulary 答案）**、**主观录音题（TTS 作答）**。
+- 多题型处理：支持单选、多选、填空、写作、选词填空、拖拽排序、下拉选择、词汇测试、听力填空、听力选择、视频选择、视频任务、视频弹窗题、词汇闪卡、Self-check 词汇勾选、My voice 文字作答、**人物 A–F 匹配**、**翻译段落**、**首字母搭配填空**、**Wrapping up 自评清单**、**讨论区发帖**、**跟读/朗读录音题**、**中文括注填空（直接复用 Vocabulary 答案）**、**主观录音题（TTS 作答）**、**连线匹配（React Flow 拖拽连线）**。
 - 做完自动交卷：填完直接提交，日志提示「已自动提交」；找不到按钮会明确提示手动提交。
 - 音视频辅助：支持本地 Whisper 转写。
 - 环境检查：启动时检查 Edge、FFmpeg、网络和运行环境。
@@ -299,9 +299,10 @@ py -m venv .venv
 | 选词填空 | `fill_blanks_choice_group` | 从候选词中选择后写入 |
 | 下拉填空 | `fill_blanks_dropdown_group` | 点开空位抓取候选列表后交给模型选择，按文本精确点选 |
 | 简答 / 翻译 / 写作 | `short_answer_group` / `translation_group` / `writing_group` | 写入文本作答框 |
+| 连线匹配 | `text_match_group` | React Flow 画布：在内容层派发合成 `MouseEvent`，把提示把手拖到选项把手 |
 
 会跳过并提示的题型：口语录音（`oral_personal_state_group`）、附件上传
-（`multi_media_upload_group`）、连线匹配（`text_match_group`）、小组讨论（`discussion_group`）。
+（`multi_media_upload_group`）、小组讨论（`discussion_group`）。
 纯阅读材料（`rich_text_read_group`）不答题，但会作为上下文提供给模型。
 
 </details>

@@ -272,6 +272,7 @@ class QuestionType(Enum):
     TRUE_FALSE = auto()  # 判断题（course-v3 播放器 T/F）
     MATCHING = auto()  # 人物 A-F ↔ 陈述 的匹配题（空里只填字母）
     RECORD = auto()  # 跟读/朗读录音题（course-v2 播放器 oral-study 题型）
+    LINK_MATCH = auto()  # 连线匹配（course-v3 播放器 React Flow 拖拽连线，text_match_group）
 
 
 @dataclass
@@ -299,6 +300,7 @@ class Question:
     needs_upload: bool = False  # course-v3 需要上传附件的题型
     blank_count: int = 0  # course-v3 下拉空位可能没有 input
     record_items: List[Dict] = field(default_factory=list)  # 录音题：逐条 {index,url,name,duration,text,element}
+    link_items: List[Dict] = field(default_factory=list)  # 连线匹配：逐节点 {i,id,side,text}，right=提示，left=选项
 
     @property
     def answer_count(self) -> int:
@@ -3571,8 +3573,27 @@ class PromptBuilder:
             QuestionType.LISTENING_CHOICE: self._build_listening_choice,
             QuestionType.VIDEO_CHOICE: self._build_video_choice,
             QuestionType.MATCHING: self._build_matching,
+            QuestionType.LINK_MATCH: self._build_link_match,
         }
         return builders.get(q_type, self._build_unknown)
+
+    def _build_link_match(self, q: Question) -> List[str]:
+        prompts = [item for item in q.link_items if item.get('side') == 'right']
+        lines = [
+            f"{q.number}. 【连线匹配】把每个提示和它对应的选项连起来",
+            "   提示:",
+        ]
+        for index, item in enumerate(prompts):
+            lines.append(f"     {index + 1}. {item.get('text', '')}")
+        lines.append("   选项:")
+        for opt in q.options:
+            lines.append(f"     {opt.letter}. {opt.text}")
+        lines.extend([
+            "   请判断每个提示对应哪个选项（同一选项不应重复使用），",
+            f"   只返回 {{提示序号}}.{{选项字母}}，例如 1.D 2.C 3.A 4.B（共 {len(prompts)} 组）",
+            "",
+        ])
+        return lines
 
     def _build_matching(self, q: Question) -> List[str]:
         letters = q.banked_options or [opt.letter for opt in q.options]
@@ -3875,6 +3896,9 @@ class PromptBuilder:
 
         if QuestionType.MATCHING in type_counts:
             lines.append("匹配题: 每空一个字母，格式：1.B 2.A 3.F（不要写单词）")
+
+        if QuestionType.LINK_MATCH in type_counts:
+            lines.append("连线匹配: 提示序号配选项字母，格式：1.D 2.C 3.A 4.B（不要写选项原文）")
 
         lines.append("-" * 50)
         return lines
@@ -5507,7 +5531,7 @@ class PublishQuestionParser:
         'multi_media_upload_group': 'upload',
         'rich_text_read_group': 'skip',
         'discussion_group': 'skip',
-        'text_match_group': 'skip',
+        'text_match_group': 'link_match',
         'oral_personal_state_group': 'skip',
     }
 
@@ -5782,6 +5806,8 @@ class PublishQuestionParser:
             return self._parse_fill_blanks(group, start_number, dropdown=True)
         if kind == 'text':
             return self._parse_text(group, start_number)
+        if kind == 'link_match':
+            return self._parse_link_match(group, start_number)
         if kind != 'skip':
             self.unsupported.append(group_type)
         return []
@@ -5926,6 +5952,80 @@ class PublishQuestionParser:
         """填空/下拉题：把每个空位替换成 (N) 标记，保证 AI 能对上空号。"""
         return self._dom_text(node, numbered=True, limit=None)
 
+    # ---- 连线匹配 -------------------------------------------------------
+    LINK_NODE_WAIT_SECONDS = 12.0
+
+    LINK_NODES_JS = """
+    const group = arguments[0];
+    const nodes = [...group.querySelectorAll('.react-flow__node')];
+    return nodes.map((node, index) => {
+      const handle = node.querySelector('.react-flow__handle');
+      return {
+        i: index,
+        id: node.getAttribute('data-id') || '',
+        side: handle ? (handle.getAttribute('data-handlepos') || '') : '',
+        text: (node.innerText || '').replace(/\\s+/g, ' ').trim(),
+      };
+    });
+    """
+
+    def _link_nodes(self, group) -> List[Dict[str, Any]]:
+        """读取画布节点。
+
+        连线题是 React Flow 画布：左列提示节点的连接点在自己的**右**侧
+        （data-handlepos=right），右列选项节点的连接点在**左**侧（left）。
+        节点文字跟正文一样是懒渲染的，没等齐就取会拿到空串，AI 只能瞎配，
+        所以这里等到全部有字再返回。
+        """
+        deadline = time.time() + self.LINK_NODE_WAIT_SECONDS
+        nodes: List[Dict[str, Any]] = []
+        while True:
+            try:
+                raw = self.driver.execute_script(self.LINK_NODES_JS, group)
+            except Exception:
+                raw = None
+            nodes = [item for item in (raw or []) if isinstance(item, dict)]
+            if nodes and all((item.get('text') or '').strip() for item in nodes):
+                return nodes
+            if time.time() >= deadline:
+                return nodes
+            time.sleep(0.8)
+
+    def _parse_link_match(self, group, start_number: int) -> List[Question]:
+        """连线匹配：一个题目组 = 一张画布，作为单题交给 AI 配对。"""
+        nodes = self._link_nodes(group)
+        prompts = [item for item in nodes if item.get('side') == 'right']
+        options = [item for item in nodes if item.get('side') == 'left']
+        if not prompts or not options:
+            self.unsupported.append('text_match_group')
+            return []
+        prompt_lines = [f"{index + 1}. {self._link_label(item.get('text', ''), number=True)}"
+                        for index, item in enumerate(prompts)]
+        return [Question(
+            number=start_number,
+            text='\n'.join(prompt_lines),
+            q_type=QuestionType.LINK_MATCH,
+            element=group,
+            options=[Option(letter=chr(65 + index),
+                            text=self._link_label(item.get('text', ''), number=False),
+                            element=None)
+                     for index, item in enumerate(options)],
+            group=group,
+            directions=self.group_direction(group),
+            link_items=nodes,
+        )]
+
+    @staticmethod
+    def _link_label(text: str, number: bool = True) -> str:
+        """去掉节点自带的「1.」「A.」前缀，避免和我们的编号重复。
+
+        画布节点文字本身就带序号（提示是 `1. Paras. 1-2`，选项是 `A. The role …`），
+        直接拼会变成「1. 1. Paras. 1-2」。只在前缀后跟空白时才剥，避免误伤
+        「5G」「A-level」这类正文。
+        """
+        pattern = r'^\s*\d{1,2}\s*[.、:：)）]\s+' if number else r'^\s*[A-Za-z]\s*[.、:：)）]\s+'
+        return re.sub(pattern, '', text or '').strip()
+
     def _parse_text(self, group, start_number: int) -> List[Question]:
         questions = []
         for node in self._question_nodes(group):
@@ -6045,6 +6145,8 @@ class PublishAnswerExecutor(AnswerExecutor):
             return self._fill_true_false(question, answer)
         if question.q_type == QuestionType.DROPDOWN_SELECT:
             return self._fill_publish_dropdown(question, answer)
+        if question.q_type == QuestionType.LINK_MATCH:
+            return self._fill_link_match(question, answer)
         return super().execute(question, answer)
 
     def _fill_fill_in(self, q: Question, answer: str) -> bool:
@@ -6057,6 +6159,136 @@ class PublishAnswerExecutor(AnswerExecutor):
         if len(q.inputs) <= 1:
             return super()._fill_text(q, answer)
         return self._fill_required_inputs(q.inputs, self._parse_banked_answer(answer, len(q.inputs)))
+
+    # ---- 连线匹配 -------------------------------------------------------
+    # 画布是 React Flow：把手势模拟成真实鼠标才连得上。两个坑都踩过：
+    #   1. 不能用 ActionChains / CDP 的绝对坐标——阅读器 iframe 上方压着播放器外壳的
+    #      score-column 浮层，真实鼠标事件会被顶层文档接走，iframe 里一条都收不到；
+    #   2. 必须派发 MouseEvent 而不是 PointerEvent——把手的 React props 只挂了
+    #      onMouseDown / onTouchStart / onClick，没有 pointerdown。
+    # 所以这里在内容层文档里直接派发合成 MouseEvent，完全不碰坐标和命中测试。
+    LINK_STUB_JS = """
+    if (!window.__unipusLinkStub) {
+      window.__unipusLinkStub = true;
+      const noop = function () { return false; };
+      ['setPointerCapture', 'releasePointerCapture'].forEach((name) => {
+        try { Element.prototype[name] = noop; } catch (e) {}
+      });
+      try { Element.prototype.hasPointerCapture = function () { return true; }; } catch (e) {}
+    }
+    return true;
+    """
+
+    LINK_ONCE_JS = """
+    const group = arguments[0];
+    const sourceId = arguments[1];
+    const targetId = arguments[2];
+    const steps = 12;
+    const nodeOf = (id) => group.querySelector('.react-flow__node[data-id="' + id + '"]');
+    const sourceNode = nodeOf(sourceId);
+    const targetNode = nodeOf(targetId);
+    if (!sourceNode || !targetNode) return 'no-node';
+    const sourceHandle = sourceNode.querySelector('.react-flow__handle');
+    const targetHandle = targetNode.querySelector('.react-flow__handle');
+    if (!sourceHandle || !targetHandle) return 'no-handle';
+    const centerOf = (el) => {
+      const box = el.getBoundingClientRect();
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    const from = centerOf(sourceHandle);
+    const to = centerOf(targetHandle);
+    const fire = (el, type, point, buttons) => {
+      el.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: point.x, clientY: point.y,
+        button: 0, buttons: buttons, view: window,
+      }));
+    };
+    fire(sourceHandle, 'mousedown', from, 1);
+    for (let step = 1; step <= steps; step++) {
+      fire(sourceHandle, 'mousemove', {
+        x: from.x + (to.x - from.x) * step / steps,
+        y: from.y + (to.y - from.y) * step / steps,
+      }, 1);
+    }
+    fire(targetHandle, 'mousemove', to, 1);
+    fire(targetHandle, 'mouseup', to, 0);
+    return 'ok';
+    """
+
+    LINK_EDGES_JS = "return arguments[0].querySelectorAll('.react-flow__edge').length;"
+
+    def _link_stub(self) -> None:
+        try:
+            self.driver.execute_script(self.LINK_STUB_JS)
+        except Exception:
+            pass
+
+    def _link_edge_count(self, group) -> int:
+        try:
+            return int(self.driver.execute_script(self.LINK_EDGES_JS, group) or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _parse_link_answer(answer: str, prompt_count: int,
+                           option_count: int) -> List[Tuple[int, str]]:
+        """把「1.D 2.C 3.A」解析成 [(0, 'D'), (1, 'C'), (2, 'A')]；非法项直接丢弃。"""
+        pairs: List[Tuple[int, str]] = []
+        seen = set()
+        for number, letter in re.findall(r'(\d+)\s*[.\-:：)）]?\s*([A-Za-z])', answer or ''):
+            index = int(number) - 1
+            position = ord(letter.upper()) - 65
+            if not (0 <= index < prompt_count and 0 <= position < option_count):
+                continue
+            if index in seen:
+                continue
+            seen.add(index)
+            pairs.append((index, letter.upper()))
+        return pairs
+
+    def _fill_link_match(self, q: Question, answer: str) -> bool:
+        """按 AI 给出的配对逐条连线；画布上连线数与提示数一致才算成功。"""
+        group = q.group or q.element
+        prompts = [item for item in q.link_items if item.get('side') == 'right']
+        options = [item for item in q.link_items if item.get('side') == 'left']
+        if not prompts or not options:
+            print("\t连线匹配：画布节点不完整，跳过")
+            return False
+        letter_to_item = {chr(65 + index): item for index, item in enumerate(options)}
+        pairs = self._parse_link_answer(answer, len(prompts), len(options))
+        if not pairs:
+            print("\t连线匹配：未能从回答里解析出配对，跳过")
+            return False
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", group)
+        except Exception:
+            pass
+        self._link_stub()
+        before = self._link_edge_count(group)
+        linked = 0
+        for index, letter in pairs:
+            source = prompts[index]
+            target = letter_to_item.get(letter)
+            if not target:
+                continue
+            try:
+                result = self.driver.execute_script(
+                    self.LINK_ONCE_JS, group, source.get('id'), target.get('id'))
+            except Exception as exc:
+                print(f"\t连线匹配：{index + 1}→{letter} 异常 {type(exc).__name__}")
+                continue
+            time.sleep(0.35)
+            now = self._link_edge_count(group)
+            if result == 'ok' and now > before:
+                linked += 1
+                before = now
+            else:
+                print(f"\t连线匹配：{index + 1}→{letter} 未生成连线（{result}）")
+        after = self._link_edge_count(group)
+        print(f"\t连线匹配：连上 {linked} 组，画布共 {after} 条连线（提示 {len(prompts)} 条）")
+        return after >= len(prompts)
 
     def _fill_required_inputs(self, inputs: List[Any], answers: List[str]) -> bool:
         """整题的所有空位均有答案且实际写入成功，才能交给上层提交。"""
