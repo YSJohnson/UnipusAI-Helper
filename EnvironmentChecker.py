@@ -161,7 +161,8 @@ class EnvironmentChecker:
 
         ffmpeg_dir = os.path.dirname(ffmpeg_path)
         if ffmpeg_dir:
-            candidate = os.path.join(ffmpeg_dir, "ffprobe.exe")
+            probe_name = "ffprobe.exe" if platform.system() == "Windows" else "ffprobe"
+            candidate = os.path.join(ffmpeg_dir, probe_name)
             if os.path.exists(candidate):
                 return candidate
 
@@ -181,6 +182,11 @@ class EnvironmentChecker:
         print("   [4] 手动指定 FFmpeg 路径")
         print("   [5] 显示详细帮助后退出")
         print("   [Q] 退出程序")
+        if platform.system() != "Windows":
+            print("\n   macOS / Linux 提示：下面 [1][2][3] 是 Windows 专用流程，")
+            print("   建议直接用包管理器安装，装完重跑本程序即可：")
+            print("     macOS   brew install --cask microsoft-edge && brew install ffmpeg")
+            print("     Ubuntu  sudo apt install ffmpeg   # Edge 请去官网下 .deb")
 
         choice = input("\n请输入选项 (1/2/3/4/5/Q): ").strip().upper()
         return choice
@@ -189,6 +195,11 @@ class EnvironmentChecker:
 
     def auto_install_ffmpeg(self) -> bool:
         """自动下载并安装 FFmpeg"""
+        if platform.system() != "Windows":
+            print("\n  当前系统不是 Windows，自动安装流程只适用于 Windows，改用包管理器：")
+            print("     macOS:  brew install ffmpeg")
+            print("     Ubuntu: sudo apt install ffmpeg")
+            return False
         print("\n 正在下载 FFmpeg...")
         print("   来源: https://github.com/BtbN/FFmpeg-Builds")
 
@@ -307,6 +318,11 @@ class EnvironmentChecker:
 
     def _add_to_system_path(self, bin_dir: str):
         """将目录添加到系统 PATH 环境变量"""
+        if platform.system() != "Windows":
+            # 非 Windows 没有注册表 PATH，写 shell 配置文件即可
+            print("    非 Windows 平台请把下面这行加进 ~/.zshrc 或 ~/.bash_profile：")
+            print(f'      export PATH="{bin_dir}:$PATH"')
+            return
         import winreg
 
         # 获取当前系统 PATH
@@ -355,6 +371,10 @@ class EnvironmentChecker:
 
     def auto_install_edge(self) -> bool:
         """自动安装 Edge"""
+        if platform.system() != "Windows":
+            print("\n  当前系统不是 Windows，这里下载的是 Windows 安装包，改用包管理器：")
+            print("     macOS: brew install --cask microsoft-edge")
+            return False
         print("\n 正在下载 Edge 浏览器安装程序...")
         try:
             installer_path = os.path.join(tempfile.gettempdir(), "EdgeSetup.exe")

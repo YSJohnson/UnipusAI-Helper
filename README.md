@@ -53,6 +53,23 @@ py -m venv .venv
 .venv\Scripts\python.exe UnipusAI_Helper.py --skip-check
 ```
 
+### macOS
+
+先装好运行环境，之后用脚本启动即可（脚本会自动检测并初始化 `.venv`）：
+
+```bash
+brew install ffmpeg                     # 语音转写需要
+brew install --cask microsoft-edge      # 程序驱动的是 Edge
+
+./config.sh                             # 打开配置编辑器，生成 config.json
+./start.sh                              # 启动主程序
+```
+
+也可以在访达里双击 `UnipusAI-Helper.command`。首次双击若提示「无法打开」，右键 →「打开」，
+或在终端补一下执行权限：`chmod +x *.sh UnipusAI-Helper.command`。
+
+macOS 下使用系统原生红绿灯，窗口支持 `⌘M` 最小化、`⌘W` 关闭；Windows 端保持无边框自绘不变。
+
 ---
 
 ## 配置说明
@@ -136,6 +153,29 @@ py -m venv .venv
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.2（2026-11-03）</b>：适配 macOS 运行 / 修复原生红绿灯与无边框窗口控制</summary>
+
+合入 [@Twiikeyee](https://github.com/Twiikeyee) 的 [#35](https://github.com/YSJohnson/UnipusAI-Helper/pull/35)，
+并补齐了几处会连带影响 Windows 的地方。作答逻辑没有改动。
+
+- **非 Windows 不再因 `winsound` 启动即崩**：改为 `try/except` 降级，非 Windows 下走静音实现，
+  Windows 仍然是真 `winsound`，行为不变。
+- **环境检测认得 macOS 的 Edge**：新增 `/Applications/Microsoft Edge.app` 与 `PATH` 里的
+  `msedge` / `microsoft-edge` 探测；非 Windows 缺 Edge 或 FFmpeg 时改为提示 `brew` 安装命令，
+  不再傻乎乎去下 Windows 安装包（原来那样在 mac 上必然失败）。
+- **macOS 恢复原生红绿灯**：启用系统标题栏按钮，红绿灯按标题栏实际高度纵向居中，
+  全屏或缩放时不会跑偏；Windows 端依旧是无边框自绘。
+- **`⌘M` / `⌘W` 与最小化按钮**：快捷键只在 macOS 注册（Qt 的 `Ctrl` 在 darwin 上映射到 Command），
+  Windows 用户不会因为新增快捷键被 `Ctrl+W` 直接关窗；配置编辑器补了最小化按钮，两个平台都能用。
+- **双击启动不再秒关窗口**：`UnipusAI-Helper.command` 去掉 `set -e`——原来程序一报错，
+  脚本就退出了，后面那段「按任意键关闭窗口」永远执行不到，正是它想解决的场景。
+- **PyQt5 提到 5.15.11**：更低版本在 Apple Silicon 上没有预编译轮子，会掉进源码编译。
+
+Windows 端除了配置编辑器多一个最小化按钮，其余行为与 v3.9.1 一致。
+
+</details>
 
 <details>
 <summary><b>v3.9.1（2026-10-29）</b>：任务列表改成多层折叠目录树 / 必修选修视觉区分 / 只保留深色主题</summary>

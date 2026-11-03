@@ -1,0 +1,3 @@
+# 启动脚本必须是 LF，否则 macOS 上会报 bad interpreter: /bin/bash^M
+*.sh text eol=lf
+*.command text eol=lf

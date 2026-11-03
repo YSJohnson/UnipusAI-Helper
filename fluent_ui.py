@@ -40,6 +40,13 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.common.font import getFont, setFont as setWidgetFont
 
+# 标题栏高度：macOS 要给原生红绿灯留出竖直空间，Windows 保持原来的 30
+TITLE_BAR_HEIGHT = 42 if sys.platform == "darwin" else 30
+# macOS 原生红绿灯按钮区域（左边距 / 单个按钮宽度 / 按钮高度），用于 systemTitleBarRect
+TITLE_BAR_LIGHTS_LEFT = 10
+TITLE_BAR_LIGHTS_WIDTH = 75
+TITLE_BAR_LIGHTS_HEIGHT = 28
+
 
 class _MainThreadBridge(QObject):
     invoke = pyqtSignal(object)
@@ -102,13 +109,20 @@ class FluentModernGUI(MSFluentWindow):
         self.after(100, self._poll_logs)
 
     def systemTitleBarRect(self, size: QSize) -> QRect:
-        if sys.platform == "darwin":
-            # 适配 macOS 原生红绿灯位置（距左 20pt，距上 19pt，对齐原生应用如 Safari）
-            return QRect(10, 15, 75, 28)
-        return super().systemTitleBarRect(size)
+        """macOS 原生红绿灯的位置。
+
+        只有 macOS 会用到；其它平台原样交回父类，保持 Windows 行为不变。
+        纵向跟着标题栏实际高度居中，不写死坐标——全屏或改字体缩放时按钮不会跑偏。
+        """
+        if sys.platform != "darwin":
+            return super().systemTitleBarRect(size)
+        bar_height = size.height() or TITLE_BAR_HEIGHT
+        lights_height = min(TITLE_BAR_LIGHTS_HEIGHT, bar_height)
+        return QRect(TITLE_BAR_LIGHTS_LEFT, max(0, (bar_height - lights_height) // 2),
+                     TITLE_BAR_LIGHTS_WIDTH, lights_height)
 
     def _init_window(self):
-        self.setWindowTitle("UnipusAI Helper")
+        self.setWindowTitle("UnipusAI Helper" if sys.platform == "darwin" else "")
         self.resize(1330, 860)
         self.setMinimumSize(1080, 680)
         self.setMicaEffectEnabled(False)
@@ -124,12 +138,14 @@ class FluentModernGUI(MSFluentWindow):
             "font-size: 18px; font-weight: 700; "
             "font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
         )
-        self.titleBar.setFixedHeight(42)
-        try:
-            QShortcut(QKeySequence("Ctrl+M"), self, self.showMinimized)
-            QShortcut(QKeySequence("Ctrl+W"), self, self.close)
-        except Exception:
-            pass
+        self.titleBar.setFixedHeight(TITLE_BAR_HEIGHT)
+        if sys.platform == "darwin":
+            # macOS 习惯用 Cmd+M / Cmd+W；Qt 里 Ctrl 在 darwin 上映射到 Command 键
+            for seq, slot in (("Ctrl+M", self.showMinimized), ("Ctrl+W", self.close)):
+                try:
+                    QShortcut(QKeySequence(seq), self, slot)
+                except Exception:
+                    pass
 
     def _build_ui(self):
         self.workbench = QWidget()

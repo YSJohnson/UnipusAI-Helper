@@ -116,11 +116,13 @@ class ConfigEditor(QWidget):
         self.resize(820, 860)
         self.setMinimumSize(700, 720)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
-        try:
-            QShortcut(QKeySequence("Ctrl+M"), self, self.showMinimized)
-            QShortcut(QKeySequence("Ctrl+W"), self, self.close)
-        except Exception:
-            pass
+        if sys.platform == "darwin":
+            # macOS 习惯用 Cmd+M / Cmd+W；Qt 里 Ctrl 在 darwin 上映射到 Command 键
+            for seq, slot in (("Ctrl+M", self.showMinimized), ("Ctrl+W", self.close)):
+                try:
+                    QShortcut(QKeySequence(seq), self, slot)
+                except Exception:
+                    pass
 
     def _build_ui(self):
         root = QVBoxLayout(self)
