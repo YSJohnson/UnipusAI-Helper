@@ -3584,7 +3584,8 @@ class PromptBuilder:
             "   提示:",
         ]
         for index, item in enumerate(prompts):
-            lines.append(f"     {index + 1}. {item.get('text', '')}")
+            label = PublishQuestionParser._link_label(item.get('text', ''), number=True)
+            lines.append(f"     {index + 1}. {label}")
         lines.append("   选项:")
         for opt in q.options:
             lines.append(f"     {opt.letter}. {opt.text}")
@@ -9196,6 +9197,11 @@ class AISolver:
         if question.q_type in (QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
                                QuestionType.TRUE_FALSE):
             return self._extract_single_answer(ai_response, question.number)
+        if question.q_type == QuestionType.LINK_MATCH:
+            # 收紧为 {提示序号}.{选项字母}，解释文字里的残留交给 _parse_link_answer 去重
+            pairs = re.findall(r'(?<![\d.])(\d{1,2})\s*[.\-:：)）]\s*([A-Za-z])(?![A-Za-z])',
+                               ai_response or '')
+            return ' '.join(f'{n}.{letter}' for n, letter in pairs)
         answer = ai_response
         if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
             answer = self._sanitize_fill_answer(answer)
