@@ -4,12 +4,14 @@ import os
 import sys
 
 from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QShortcut,
     QVBoxLayout,
     QWidget,
 )
@@ -114,6 +116,11 @@ class ConfigEditor(QWidget):
         self.resize(820, 860)
         self.setMinimumSize(700, 720)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        try:
+            QShortcut(QKeySequence("Ctrl+M"), self, self.showMinimized)
+            QShortcut(QKeySequence("Ctrl+W"), self, self.close)
+        except Exception:
+            pass
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -129,13 +136,19 @@ class ConfigEditor(QWidget):
         self.top_strip.installEventFilter(self)
         layout = QHBoxLayout(self.top_strip)
         layout.setContentsMargins(2, 4, 2, 4)
-        layout.setSpacing(12)
+        layout.setSpacing(8)
 
         self.title_label = QLabel("UnipusAI Helper 配置编辑器")
         self.title_label.setObjectName("pageTitle")
         self.title_label.installEventFilter(self)
         layout.addWidget(self.title_label)
         layout.addStretch(1)
+
+        self.min_btn = ToolButton(FIF.MINIMIZE)
+        self.min_btn.setToolTip("最小化")
+        self.min_btn.setFixedSize(32, 32)
+        self.min_btn.clicked.connect(self.showMinimized)
+        layout.addWidget(self.min_btn)
 
         self.close_btn = ToolButton(FIF.CLOSE)
         self.close_btn.setToolTip("关闭")

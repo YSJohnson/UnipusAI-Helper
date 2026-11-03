@@ -7,6 +7,9 @@ net10.0-windows/
 build/
 dist/
 release/
+# 本地快捷启动方式
+*启动*.command
+*配置*.command
 config.json
 config.real.json
 config.test.json

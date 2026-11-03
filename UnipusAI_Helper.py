@@ -1,4 +1,15 @@
-import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, winsound, base64
+import hashlib, json, logging, os, sys, random, re, tempfile, threading, time, base64
+try:
+    import winsound
+except ImportError:
+    class _MockWinsound:
+        @staticmethod
+        def MessageBeep(*args, **kwargs):
+            try:
+                print('\a', end='', flush=True)
+            except Exception:
+                pass
+    winsound = _MockWinsound()
 import shutil
 import subprocess
 import urllib.request

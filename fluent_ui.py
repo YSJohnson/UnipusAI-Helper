@@ -4,12 +4,22 @@ import sys
 import threading
 import time
 import webbrowser
-import winsound
+try:
+    import winsound
+except ImportError:
+    class _MockWinsound:
+        @staticmethod
+        def MessageBeep(*args, **kwargs):
+            try:
+                print('\a', end='', flush=True)
+            except Exception:
+                pass
+    winsound = _MockWinsound()
 from typing import Dict
 
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCursor
-from PyQt5.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal, QRect, QSize
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCursor, QKeySequence
+from PyQt5.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget, QShortcut
 from qfluentwidgets import (
     CardWidget,
     CheckBox,
@@ -91,12 +101,21 @@ class FluentModernGUI(MSFluentWindow):
         self._apply_theme()
         self.after(100, self._poll_logs)
 
+    def systemTitleBarRect(self, size: QSize) -> QRect:
+        if sys.platform == "darwin":
+            # 适配 macOS 原生红绿灯位置（距左 20pt，距上 19pt，对齐原生应用如 Safari）
+            return QRect(10, 15, 75, 28)
+        return super().systemTitleBarRect(size)
+
     def _init_window(self):
-        self.setWindowTitle("")
+        self.setWindowTitle("UnipusAI Helper")
         self.resize(1330, 860)
         self.setMinimumSize(1080, 680)
         self.setMicaEffectEnabled(False)
-        self.setSystemTitleBarButtonVisible(False)
+        if sys.platform == "darwin":
+            self.setSystemTitleBarButtonVisible(True)
+        else:
+            self.setSystemTitleBarButtonVisible(False)
         self.navigationInterface.hide()
         self.titleBar.raise_()
         self.titleBar.setTitle("")
@@ -105,7 +124,12 @@ class FluentModernGUI(MSFluentWindow):
             "font-size: 18px; font-weight: 700; "
             "font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
         )
-        self.titleBar.setFixedHeight(30)
+        self.titleBar.setFixedHeight(42)
+        try:
+            QShortcut(QKeySequence("Ctrl+M"), self, self.showMinimized)
+            QShortcut(QKeySequence("Ctrl+W"), self, self.close)
+        except Exception:
+            pass
 
     def _build_ui(self):
         self.workbench = QWidget()
