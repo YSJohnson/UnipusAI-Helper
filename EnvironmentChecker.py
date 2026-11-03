@@ -63,8 +63,8 @@ class EnvironmentChecker:
         print(f"   架构: {platform.machine()}")
         print(f"   Python: {platform.python_version()}")
 
-        if platform.system() != "Windows":
-            self.warnings.append("非 Windows 系统，可能无法正常使用 Edge")
+        if platform.system() not in ("Windows", "Darwin"):
+            self.warnings.append("非 Windows / macOS 系统，可能无法正常使用 Edge")
 
     def _check_edge_browser(self):
         """检查 Edge 浏览器"""
@@ -74,7 +74,13 @@ class EnvironmentChecker:
             os.path.expandvars(r'%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe'),
             os.path.expandvars(r'%PROGRAMFILES%\Microsoft\Edge\Application\msedge.exe'),
             os.path.expandvars(r'%PROGRAMFILES(X86)%\Microsoft\Edge\Application\msedge.exe'),
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+            os.path.expanduser('~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'),
         ]
+        for name in ('msedge', 'microsoft-edge', 'microsoft-edge-stable'):
+            found = shutil.which(name)
+            if found:
+                possible_paths.append(found)
 
         for path in possible_paths:
             if os.path.exists(path):
