@@ -493,8 +493,12 @@ class FluentModernGUI(MSFluentWindow):
     def _scan_course_directory(self):
         tabs = []
         try:
+            # U校园 5.0 会更换 CSS Modules 哈希后缀，用前缀匹配兼容新旧 class。
             unit_container = self.WebDriverWait(self.driver, 5).until(
-                self.EC.presence_of_element_located((self.By.CLASS_NAME, "unipus-tabs_unitTabScrollContainer__fXBxR"))
+                self.EC.presence_of_element_located((
+                    self.By.CSS_SELECTOR,
+                    '[class*="unipus-tabs_unitTabScrollContainer"]'
+                ))
             )
             unit_tabs = unit_container.find_elements(self.By.CSS_SELECTOR, ":scope > *")
             self.gui_log_queue.put(f"课程目录页，找到 {len(unit_tabs)} 个 Unit")
@@ -505,18 +509,29 @@ class FluentModernGUI(MSFluentWindow):
                 except Exception:
                     unit_tab.click()
                 time.sleep(0.8)
-                chapters = self.driver.find_elements(self.By.CLASS_NAME, "courses-unit_taskItemInnerLayout__DTYuN")
+                chapters = self.driver.find_elements(
+                    self.By.CSS_SELECTOR,
+                    '[class*="courses-unit_nodeItemInnerLayout"], '
+                    '[class*="courses-unit_taskItemInnerLayout"]'
+                )
                 for chapter in chapters:
                     try:
-                        name_elem = chapter.find_element(self.By.CLASS_NAME, "courses-unit_taskTypeName__99BXj")
+                        if not chapter.is_displayed():
+                            continue
+                        name_elem = chapter.find_element(
+                            self.By.CSS_SELECTOR,
+                            '[class*="courses-unit_nodeTypeName"], '
+                            '[class*="courses-unit_taskTypeName"]'
+                        )
                         name = name_elem.text.strip()
                         if not name:
                             continue
-                        try:
-                            chapter.find_element(self.By.CLASS_NAME, "courses-unit_taskRequireIcon__zZldK")
-                            is_compulsory = True
-                        except self.NoSuchElementException:
-                            is_compulsory = False
+                        require_icons = chapter.find_elements(
+                            self.By.CSS_SELECTOR,
+                            '[class*="courses-unit_nodeRequireIcon"], '
+                            '[class*="courses-unit_taskRequireIcon"]'
+                        )
+                        is_compulsory = any(icon.is_displayed() for icon in require_icons)
                         prefix = "[必修]" if is_compulsory else "[选修]"
                         section_title = self._extract_course_task_section(chapter)
                         name_occurrence = name_counts.get(name, 0)

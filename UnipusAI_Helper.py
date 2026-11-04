@@ -3824,7 +3824,8 @@ class AISolver:
                     try:
                         unit_container = WebDriverWait(self.driver, 10).until(
                             EC.presence_of_element_located(
-                                (By.CLASS_NAME, 'unipus-tabs_unitTabScrollContainer__fXBxR'))
+                                (By.CSS_SELECTOR,
+                                 '[class*="unipus-tabs_unitTabScrollContainer"]'))
                         )
                         unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
                         if tab['_unit_idx'] >= len(unit_tabs):
@@ -3841,15 +3842,24 @@ class AISolver:
 
                 chapter_clicked = False
                 try:
+                    # U校园 5.0 的新版任务条目 class 已变化，同时保留旧版前缀回退。
                     chapters = self.driver.find_elements(
-                        By.CLASS_NAME, 'courses-unit_taskItemInnerLayout__DTYuN'
+                        By.CSS_SELECTOR,
+                        '[class*="courses-unit_nodeItemInnerLayout"], '
+                        '[class*="courses-unit_taskItemInnerLayout"]'
                     )
                     name_occurrence = 0
                     for ch in chapters:
                         if self._should_stop():
                             break
                         try:
-                            name_elem = ch.find_element(By.CLASS_NAME, 'courses-unit_taskTypeName__99BXj')
+                            if not ch.is_displayed():
+                                continue
+                            name_elem = ch.find_element(
+                                By.CSS_SELECTOR,
+                                '[class*="courses-unit_nodeTypeName"], '
+                                '[class*="courses-unit_taskTypeName"]'
+                            )
                             if name_elem.text.strip() == tab_name:
                                 if name_occurrence == tab.get('_name_occurrence', 0):
                                     if self._should_stop():

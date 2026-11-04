@@ -227,6 +227,11 @@ py -m venv .venv
 
 ## 更新日志
 
+### 2026-11-04
+
+- 修复 U校园 5.0 课程目录扫描返回 0 个任务的问题：新版页面的任务条目 class 已从 `courses-unit_taskItemInnerLayout__*` 改为 `courses-unit_nodeItemInnerLayout__*`，名称和必修图标 class 也同步变化。扫描逻辑改用 class 前缀匹配，并保留旧版回退。
+- 扫描时只处理当前 Unit 中可见的任务条目，避免 5.0 页面中其他 Unit 的隐藏节点造成重复任务。
+
 ### 2026-09-24
 
 - 版本号更新至 `3.6.0`，适配 U校园 AI版 5.0。
