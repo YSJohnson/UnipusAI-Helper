@@ -16,6 +16,7 @@ except ImportError:
                 pass
     winsound = _MockWinsound()
 from typing import Dict
+from urllib.parse import parse_qs, urlsplit
 
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal, QRect, QSize
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCursor, QKeySequence
@@ -579,11 +580,12 @@ class FluentModernGUI(MSFluentWindow):
                 self.logger.error(f"扫描异常: {e}", exc_info=True)
             self.after(0, self._reset_scan_button)
 
-    TASK_ITEM_SELECTOR = '[class*="taskItemInnerLayout"]'
+    TASK_ITEM_SELECTOR = '[class*="taskItemInnerLayout"], [class*="nodeItemInnerLayout"]'
 
     READ_TASKS_JS = """
         const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
-        const all = [...document.querySelectorAll('[class*="taskItemInnerLayout"]')];
+        const all = [...document.querySelectorAll(
+            '[class*="taskItemInnerLayout"], [class*="nodeItemInnerLayout"]')];
         const out = [];
         all.forEach((el, index) => {
           // 切 Unit 后旧面板仍留在 DOM 里，只取当前可见的那一份，否则任务会成倍重复
@@ -645,6 +647,18 @@ class FluentModernGUI(MSFluentWindow):
     def _scan_course_directory(self, current_unit_only: bool = False):
         tabs = []
         try:
+            player_unit = ''
+            if self.solver._is_publish_page():
+                route = self.driver.current_url
+                resource = parse_qs(urlsplit(route).query).get('courseResourceId', [''])[0]
+                if not resource.isdigit():
+                    raise ValueError('播放器地址缺少 courseResourceId，无法定位课程目录')
+                match = re.search(r'/courseware/([^/]+)', urlsplit(route).fragment)
+                player_unit = match.group(1) if match else ''
+                if current_unit_only and not player_unit:
+                    raise ValueError('播放器地址缺少单元标识，无法确认当前单元')
+                self.gui_log_queue.put('从播放器返回本教材课程目录，读取任务列表')
+                self.driver.get(f'https://ucloud.unipus.cn/app/cmgt/resource-detail/{resource}')
             unit_container = self.WebDriverWait(self.driver, 5).until(
                 self.EC.presence_of_element_located((self.By.CSS_SELECTOR, '[class*="unitTabScrollContainer"]'))
             )
@@ -667,6 +681,12 @@ class FluentModernGUI(MSFluentWindow):
                 })
 
             active_info = next((i for i in unit_infos if self._is_active_unit(i["element"])), None)
+            if current_unit_only and player_unit:
+                active_info = next((i for i in unit_infos
+                                    if i['element'].get_attribute('id') == f'id-{player_unit}-tab'), None)
+                if active_info is None:
+                    raise ValueError('课程目录中找不到播放器当前单元')
+            directory_url = self.driver.current_url
 
             def collect_unit(info, click_tab: bool):
                 name_counts = {}
@@ -717,6 +737,7 @@ class FluentModernGUI(MSFluentWindow):
                         "_unit_idx": info["index"],
                         "_section_title": section_title,
                         "_name_occurrence": occurrence,
+                        "_directory_url": directory_url,
                     })
 
             if current_unit_only:
@@ -728,12 +749,14 @@ class FluentModernGUI(MSFluentWindow):
                     "is_preview": False,
                 }
                 self.gui_log_queue.put(f"仅扫描当前单元: {info['display']}（不切换其它单元）")
-                collect_unit(info, click_tab=False)
+                collect_unit(info, click_tab=bool(player_unit))
                 return tabs
 
             for info in unit_infos:
                 collect_unit(info, click_tab=True)
         except Exception as e:
+            if player_unit:
+                self.gui_log_queue.put(f'播放器任务扫描失败: {str(e)[:100]}')
             if self.logger:
                 self.logger.debug(f"课程目录扫描未命中: {e}")
         return tabs
@@ -1345,7 +1368,7 @@ class FluentModernGUI(MSFluentWindow):
             elif success:
                 self.gui_log_queue.put("\n当前页面处理完成！")
             else:
-                self.gui_log_queue.put("\n当前页面没有需要处理的题目")
+                self.gui_log_queue.put("\n当前页面未处理完成，请查看上方日志中的原因。")
         except Exception as e:
             self.gui_log_queue.put(f"\n处理异常: {str(e)}")
             if self.logger:

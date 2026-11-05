@@ -98,7 +98,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.2"
+APP_VERSION = "3.9.3"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -683,7 +683,7 @@ class OpenAICompatibleClient:
 
     def _add_context_if_new(self, content: str, label: str, ack_label: str) -> bool:
         """添加可复用上下文，按内容哈希去重"""
-        if not content or len(content) < 50:
+        if not content or not content.strip() or (label == '阅读材料' and len(content) < 50):
             return False
 
         passage_hash = hashlib.md5(content.encode()).hexdigest()[:16]
@@ -3851,7 +3851,7 @@ class PromptBuilder:
             "【输出要求】",
             "1. 只输出可以直接朗读的英文正文；不要标题、不要 markdown、不要括号说明、不要中文。",
             f"2. 长度约 {words_low}-{words_high} 词，句子短、口语化，适合朗读。",
-            "3. 结构：先点出场合与主题 → 中国老年人的真实生活状态 → 银发经济相关举措 → 你的看法 → 一句话收尾。",
+            "3. 紧扣题目要求组织内容，并结合相关材料给出具体回答。",
         ])
         return "\n".join(lines)
 
@@ -5463,6 +5463,46 @@ class PublishTaskScope:
     block_only: bool = False
 
     @classmethod
+    def capture_visible(cls, driver):
+        """快速处理只取视口中的题块；iframe 初始锚点不随手动滚动更新。"""
+        state = driver.execute_script("""
+            const selector = '[data-lexical-node-type="question-block"]';
+            const blocks = [...document.querySelectorAll(selector + ', [data-ipublish-question-group-type]')]
+                .filter(el => el.matches(selector) || !el.closest(selector));
+            const candidates = blocks.map(el => {
+                const r = el.getBoundingClientRect();
+                let top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+                let left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+                for (let p = el.parentElement; p; p = p.parentElement) {
+                    const style = getComputedStyle(p), box = p.getBoundingClientRect();
+                    if (/auto|scroll|hidden|clip/.test(style.overflowY)) {
+                        top = Math.max(top, box.top); bottom = Math.min(bottom, box.bottom);
+                    }
+                    if (/auto|scroll|hidden|clip/.test(style.overflowX)) {
+                        left = Math.max(left, box.left); right = Math.min(right, box.right);
+                    }
+                }
+                const anchor = el.dataset.lexicalNodeAnchor || el.id;
+                const visible = el.getClientRects().length && right > left && bottom > top;
+                return {el, anchor, height: visible ? bottom - top : 0};
+            }).filter(item => item.anchor && item.height > 0)
+              .sort((a, b) => b.height - a.height);
+            if (!candidates.length) return {error: '当前视口没有题目，请先滚动到需要处理的题块'};
+            const {el, anchor} = candidates[0];
+            const root = el.closest('.editor-content') || document.body;
+            const headings = [...root.querySelectorAll('h1,h2,h3,h4,h5,h6')].filter(head =>
+                !head.closest('[data-ipublish-question-group-type]') &&
+                (head.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING));
+            const heading = headings[headings.length - 1];
+            return {document_url: location.href.split('#')[0], start_anchor: anchor,
+                    title: heading ? (heading.innerText || heading.textContent || '').trim() : '当前题块',
+                    block_only: true};
+        """)
+        if not state or state.get('error'):
+            raise ValueError((state or {}).get('error', '无法定位当前可见题块'))
+        return cls(**state)
+
+    @classmethod
     def capture(cls, driver, anchor: str = ''):
         """调用前进入内容层。无法确认任务边界时抛错，禁止退回整单元作答。"""
         state = driver.execute_script("""
@@ -5544,7 +5584,8 @@ class PublishQuestionParser:
         'rich_text_read_group': 'skip',
         'discussion_group': 'skip',
         'text_match_group': 'link_match',
-        'oral_personal_state_group': 'skip',
+        'oral_personal_state_group': 'record',
+        'oral_sentence_scoop_group': 'record',
     }
 
     QUESTION_TYPE_KINDS = {
@@ -5557,6 +5598,8 @@ class PublishQuestionParser:
         'short_answer': 'text',
         'translation': 'text',
         'writing': 'text',
+        'oral_personal_state': 'record',
+        'oral_sentence_scoop': 'record',
     }
     CHOICE_HEADER_SKIP = 'strongListView'
     EXPLANATION_PLACEHOLDERS = ('请输入',)
@@ -5661,6 +5704,11 @@ class PublishQuestionParser:
             contents = []
         parts = []
         for content in contents:
+            try:
+                if content.find_elements(By.XPATH, 'ancestor::*[contains(@class, "q-answer-and-analysis")]'):
+                    continue
+            except Exception:
+                pass
             if skip_class:
                 try:
                     ancestor = content.find_elements(
@@ -5820,6 +5868,8 @@ class PublishQuestionParser:
             return self._parse_text(group, start_number)
         if kind == 'link_match':
             return self._parse_link_match(group, start_number)
+        if kind == 'record':
+            return self._parse_record(group, start_number, group_type)
         if kind != 'skip':
             self.unsupported.append(group_type)
         return []
@@ -5847,8 +5897,11 @@ class PublishQuestionParser:
     def _parse_choices(self, group, group_type: str, start_number: int) -> List[Question]:
         questions = []
         multiple = 'multiple' in group_type or 'multi_choice' in group_type
-        for node in self._question_nodes(group):
+        nodes = self._question_nodes(group)
+        for node in nodes:
             text = self._stem_text(node, skip_class=self.CHOICE_HEADER_SKIP)
+            if not text and len(nodes) == 1:
+                text = self.group_direction(group)
             options = self._choice_options(node)
             if not text or not options:
                 continue
@@ -5859,6 +5912,32 @@ class PublishQuestionParser:
                 element=node,
                 options=options,
                 group=group,
+            ))
+        return questions
+
+    def _parse_record(self, group, start_number: int, group_type: str = '') -> List[Question]:
+        questions = []
+        nodes = self._question_nodes(group)
+        for node in nodes:
+            buttons = node.find_elements(
+                By.CSS_SELECTOR,
+                '[class*="i-record_record-wave-wrapper"], [class*="result_re-record-wrapper"], '
+                '[class*="i-oral-reply_oral-base-re-record-wrapper"]')
+            text = self._stem_text(node)
+            if not text and len(nodes) == 1:
+                text = self.group_direction(group)
+            if not buttons or not text:
+                continue
+            samples = node.find_elements(By.CSS_SELECTOR, '[class*="answer_sample-audio-wrapper"] audio')
+            url = samples[0].get_attribute('src') if samples else ''
+            if (group_type == 'oral_sentence_scoop_group' or
+                    self._question_type(node) == 'oral_sentence_scoop') and not url:
+                continue
+            questions.append(Question(
+                number=start_number + len(questions), text=text,
+                q_type=QuestionType.RECORD, element=node, group=group,
+                record_items=[{'url': url or '', 'element': buttons[0],
+                               'sample': samples[0] if samples else None}],
             ))
         return questions
 
@@ -6116,6 +6195,135 @@ class PublishAnswerExecutor(AnswerExecutor):
 
     RULE_POPUP_TEXTS = ('我知道了', '知道了', '确定')
     last_rejection = ''  # 最近一次提交被平台拒绝时的提示文案
+
+    def __init__(self, driver, tts=None, stop_requested=None):
+        super().__init__(driver, tts=tts)
+        self.stop_requested = stop_requested or threading.Event()
+
+    def play_material(self, media, timeout: float = 20.0) -> bool:
+        """实际播放材料至少三秒；短音频须播放到结束。"""
+        try:
+            start = self.driver.execute_script("""
+                const media = arguments[0];
+                media.currentTime = 0;
+                const start = media.currentTime || 0;
+                media.muted = true;
+                const playing = media.play();
+                if (playing && playing.catch) playing.catch(() => {});
+                return start;
+            """, media)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not self.stop_requested.is_set():
+                state = self.driver.execute_script("""
+                    const media = arguments[0];
+                    return {time: media.currentTime || 0, ended: media.ended,
+                            error: !!media.error};
+                """, media) or {}
+                elapsed = float(state.get('time') or 0) - float(start or 0)
+                if elapsed >= 3 or (state.get('ended') and elapsed > 0):
+                    return True
+                if state.get('error') or self.stop_requested.wait(0.25):
+                    break
+        except Exception as exc:
+            print(f"    材料播放失败: {str(exc)[:80]}")
+        finally:
+            try:
+                self.driver.execute_script('arguments[0].pause();', media)
+            except Exception:
+                pass
+        return False
+
+    def _answer_record(self, q: Question, answer: str = "") -> bool:
+        """新版口语题按准备时间、真实录音和上传状态逐题处理。"""
+        item = q.record_items[0]
+        url = (item.get('url') or '').strip()
+        if url and item.get('sample') and not self.play_material(item['sample']):
+            print("\t样音播放失败")
+            return False
+        data = self._download_record_audio(url) if url else self._speech_audio(answer, 0)
+        if not data or self.stop_requested.is_set():
+            return False
+        started = False
+        try:
+            prep = self.driver.execute_script("""
+                const boxes = arguments[0].querySelectorAll('[class*="i-record-count-down_title-wrapper"]');
+                for (const box of boxes) {
+                    const text = (box.innerText || '').replace(/\s/g, '');
+                    const match = text.match(/准备时长(\d{2}):(\d{2})/);
+                    if (match) return Number(match[1]) * 60 + Number(match[2]);
+                }
+                return 3;
+            """, q.element)
+            prep = max(0.0, min(float(prep), 30.0))
+            state = self.driver.execute_async_script(
+                RECORD_MIC_JS, base64.b64encode(data).decode(),
+                prep + self.RECORD_LEAD_PAD, self.RECORD_MAX_SECONDS)
+            if not state or not state.get('ok') or not state.get('dur'):
+                print("\t录音注入初始化失败")
+                return False
+            before = self._publish_record_state(q)
+            if not self._click_publish_record(q):
+                return False
+            started = True
+            deadline = time.monotonic() + prep + 15
+            while time.monotonic() < deadline and not self.stop_requested.is_set():
+                current = self._publish_record_state(q)
+                if current.get('calls', 0) > before.get('calls', 0):
+                    break
+                if self.stop_requested.wait(0.25):
+                    break
+            else:
+                current = {}
+            if not current or current.get('calls', 0) <= before.get('calls', 0):
+                print("\t录音器未启动，停止本题")
+                return False
+            if self.stop_requested.wait(float(state['dur']) + 1.0):
+                return False
+            if not self._click_publish_record(q):
+                return False
+            started = False
+            deadline = time.monotonic() + max(30.0, min(120.0, float(state['dur'])))
+            previous = set(before.get('uploaded') or [])
+            while time.monotonic() < deadline and not self.stop_requested.is_set():
+                current = self._publish_record_state(q)
+                if set(current.get('uploaded') or []) - previous:
+                    print("\t录音已上传")
+                    return True
+                if self.stop_requested.wait(0.5):
+                    break
+            print("\t未能确认录音上传完成，不提交")
+        except Exception as exc:
+            print(f"\t录音失败: {str(exc)[:80]}")
+        finally:
+            if started:
+                try:
+                    self._click_publish_record(q)
+                except Exception:
+                    pass
+        return False
+
+    def _click_publish_record(self, q: Question) -> bool:
+        buttons = q.element.find_elements(
+            By.CSS_SELECTOR,
+            '[class*="i-record_record-wave-wrapper"], [class*="result_re-record-wrapper"], '
+            '[class*="i-oral-reply_oral-base-re-record-wrapper"]')
+        return bool(buttons and WebDriverHelper.safe_click(self.driver, buttons[0]))
+
+    def _publish_record_state(self, q: Question) -> Dict[str, Any]:
+        return self.driver.execute_script("""
+            const root = arguments[0];
+            return {
+                calls: (window.__ucRec && window.__ucRec.calls) || 0,
+                uploaded: Array.from(root.querySelectorAll('audio[src]'))
+                    .filter(audio => !audio.closest('[class*="answer_sample-audio-wrapper"], ' +
+                        '[class*="sample-audio"], [data-lexical-node-type="insert-audio"]'))
+                    .map(audio => audio.getAttribute('src') || '')
+                    .filter(src => /^https?:/i.test(src))
+            };
+        """, q.element) or {}
+
+    def publish_record_uploaded(self, q: Question) -> bool:
+        return bool(self._publish_record_state(q).get('uploaded'))
 
     def reveal_group(self, group, stop_requested: Optional[threading.Event] = None) -> bool:
         """从外向内点击折叠标题，使隐藏题块真正可见，不修改页面的 hidden 状态。"""
@@ -7777,7 +7985,8 @@ class AISolver:
         self.prompt_builder = PromptBuilder(self.ai_client, vocab_store=self.vocab_store)
         self.executor = AnswerExecutor(driver, tts=self.tts_engine)
         self.publish_parser = PublishQuestionParser(driver)
-        self.publish_executor = PublishAnswerExecutor(driver)
+        self.publish_executor = PublishAnswerExecutor(driver, tts=self.tts_engine,
+                                                      stop_requested=self.stop_requested)
         self.video_handler = VideoHandler(driver, self.config, self.stop_requested)
         self.content_handlers: List[ContentHandler] = [
             self.video_handler,
@@ -7819,7 +8028,8 @@ class AISolver:
         self.processed_hashes.clear()
         self._publish_processed_groups = set()
 
-        course_home_url = self.driver.current_url
+        course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
+        course_home_url = course_home_url or self.driver.current_url
 
         for task_idx, tab in enumerate(selected_tabs):
             if self._should_stop():
@@ -7877,7 +8087,7 @@ class AISolver:
                 return 'stopped'
 
         if '_element' in tab and tab['_element'] is not None:
-            if task_idx > 0:
+            if task_idx > 0 or self.driver.current_url != course_home_url:
                 self.driver.get(course_home_url)
                 if self.stop_requested.wait(3):
                     return 'stopped'
@@ -7912,6 +8122,8 @@ class AISolver:
                     if self._should_stop():
                         return 'stopped'
                     try:
+                        if not ch.is_displayed():
+                            continue
                         name_elem = ch.find_element(
                             By.CSS_SELECTOR, '[class*="taskTypeName"], [class*="nodeTypeName"]')
                         if name_elem.text.strip() == tab_name:
@@ -7932,8 +8144,8 @@ class AISolver:
                 return 'skipped'
             if self.stop_requested.wait(3):
                 return 'stopped'
-            self._process_tab_with_accumulation(tab_name, task_idx, 0)
-            return 'stopped' if self._should_stop() else 'done'
+            success = self._process_tab_with_accumulation(tab_name, task_idx, 0)
+            return 'stopped' if self._should_stop() else ('done' if success else 'error')
 
         l1_idx = tab.get('l1_idx', 0)
         l2_idx = tab.get('l2_idx', -1)
@@ -7954,8 +8166,8 @@ class AISolver:
         if self.stop_requested.wait(1.5):
             return 'stopped'
         if l2_idx < 0:
-            self._process_tab_with_accumulation(l1_tab['title'], l1_idx, 0)
-            return 'stopped' if self._should_stop() else 'done'
+            success = self._process_tab_with_accumulation(l1_tab['title'], l1_idx, 0)
+            return 'stopped' if self._should_stop() else ('done' if success else 'error')
 
         level2_tabs = self._get_level2_tabs()
         if l2_idx >= len(level2_tabs):
@@ -7973,8 +8185,8 @@ class AISolver:
         if self.stop_requested.wait(1.5):
             return 'stopped'
         combined_name = f"{l1_tab['title']}_{l2_tab['title']}"
-        self._process_tab_with_accumulation(combined_name, l1_idx, l2_idx)
-        return 'stopped' if self._should_stop() else 'done'
+        success = self._process_tab_with_accumulation(combined_name, l1_idx, l2_idx)
+        return 'stopped' if self._should_stop() else ('done' if success else 'error')
 
     def _answer_chunked_fill(self, q: Question, directions: str = "", chunk_size: int = 8) -> bool:
         """空位很多的填空题拆成小块问模型，按「全局空号」写回，全部填上才算成功。"""
@@ -8545,7 +8757,10 @@ class AISolver:
         self.processed_hashes.add(content_hash)
 
         if self._is_publish_page():
-            return self._process_publish_content(tab_name)
+            success = self._process_publish_content(tab_name)
+            if not success:
+                self.processed_hashes.discard(content_hash)
+            return success
 
         page_num = 1
         total_answered = 0
@@ -8820,9 +9035,9 @@ class AISolver:
             print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
         if not handled and not skipped and not rejected:
             print("    当前任务没有待自动作答的题目组（已完成或需人工处理），不进入其他任务")
-        return not self._should_stop()
+        return not self._should_stop() and not skipped and not rejected
 
-    def _publish_prepare_scope(self, task_name: str = '', timeout: float = 8.0) -> bool:
+    def _publish_prepare_scope(self, task_name: str = '', timeout: float = 30.0) -> bool:
         self._publish_scope = None
         deadline = time.monotonic() + timeout
         reason = '未能进入任务内容'
@@ -8836,7 +9051,12 @@ class AISolver:
                 with PublishFrameContext(self.driver) as context:
                     if not context.entered:
                         raise ValueError('未能进入内容 iframe')
-                    scope = PublishTaskScope.capture(self.driver, anchor)
+                    if task_name.startswith('quick_current_page_'):
+                        scope = PublishTaskScope.capture_visible(self.driver)
+                        if not scope.select(self.driver, self.publish_parser.collect_groups()):
+                            raise ValueError('当前可见题块尚未加载出题目组')
+                    else:
+                        scope = PublishTaskScope.capture(self.driver, anchor)
                     if '/course-v3:' in route and not scope.start_anchor:
                         raise ValueError('新版任务没有明确的正文锚点')
                     if task_name and not task_name.startswith('quick_current_page_') and scope.title:
@@ -8920,15 +9140,17 @@ class AISolver:
 
             pending = None
             for state in scoped_groups:
-                if state['kind'] in ('skip', 'upload'):
-                    if state['kind'] == 'upload':
-                        print(f"    跳过需要手动上传附件的题目组: {state['type']}")
+                if state['kind'] == 'skip':
                     continue
                 if parser.group_submitted(state['element']):
                     continue
                 key = parser.group_key(state['element'])
                 if key in self._publish_processed_groups:
                     continue
+                if state['kind'] == 'upload':
+                    print(f"    需要手动上传附件的题目组: {state['type']}")
+                    self._publish_processed_groups.add(key)
+                    return 'skipped'
                 pending = (state, key)
                 break
 
@@ -8987,29 +9209,51 @@ class AISolver:
             print("    本组有小题未能解析，不提交，请检查页面结构")
             return False
 
-        prompt = self.prompt_builder.build(questions, direction)
-        prompt += self._publish_fill_format_hint(questions)
-        if group_type == 'fill_blanks_dropdown_group':
-            prompt += self._publish_dropdown_options_prompt(questions)
-        ai_response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
-        if self._should_stop():
+        if not self._publish_prepare_media(group):
             return False
-        if not ai_response:
-            print("    AI 未返回答案")
-            return False
-
         filled = 0
-        blank_offset = 0
-        for question in questions:
-            if self._should_stop() or not self._publish_group_in_scope(group):
+        if all(question.q_type == QuestionType.RECORD for question in questions):
+            for question in questions:
+                if self._should_stop() or not self._publish_group_in_scope(group):
+                    return False
+                if not self._publish_select_record_question(group, question):
+                    print("    无法切换到口语小题，不提交")
+                    return False
+                if self.publish_executor.publish_record_uploaded(question):
+                    print("    本题已有上传录音，保留现有结果")
+                    filled += 1
+                    continue
+                answer = ''
+                if question.needs_speech_script:
+                    prompt = self.prompt_builder.build_speaking_script(question, direction)
+                    answer = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+                    if not answer or self._should_stop():
+                        print("    AI 未返回口语稿")
+                        return False
+                if self.publish_executor.execute(question, answer):
+                    filled += 1
+        else:
+            prompt = self.prompt_builder.build(questions, direction)
+            prompt += self._publish_fill_format_hint(questions)
+            if group_type == 'fill_blanks_dropdown_group':
+                prompt += self._publish_dropdown_options_prompt(questions)
+            ai_response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+            if self._should_stop():
                 return False
-            answer = self._publish_answer_text(question, ai_response, blank_offset)
-            if question.q_type == QuestionType.FILL_IN:
-                answer = self._normalize_fill_answer_capitalization(question, answer)
-            if answer and self.publish_executor.execute(question, answer):
-                filled += 1
-            if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
-                blank_offset += question.answer_count or 1
+            if not ai_response:
+                print("    AI 未返回答案")
+                return False
+            blank_offset = 0
+            for question in questions:
+                if self._should_stop() or not self._publish_group_in_scope(group):
+                    return False
+                answer = self._publish_answer_text(question, ai_response, blank_offset)
+                if question.q_type == QuestionType.FILL_IN:
+                    answer = self._normalize_fill_answer_capitalization(question, answer)
+                if answer and self.publish_executor.execute(question, answer):
+                    filled += 1
+                if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
+                    blank_offset += question.answer_count or 1
         print(f"    本组填写 {filled}/{len(questions)} 题")
 
         if filled != len(questions):
@@ -9140,6 +9384,65 @@ class AISolver:
             except Exception:
                 continue
         return count
+
+    def _publish_select_record_question(self, group, question: Question) -> bool:
+        """按当前可见小题的位置操作上一题/下一题，不跨越题组。"""
+        nodes = self.publish_parser._question_nodes(group)
+        target = question.element.get_attribute('data-question-id')
+        for _ in range(len(nodes) + 1):
+            if self._should_stop():
+                return False
+            visible = [i for i, node in enumerate(nodes) if node.is_displayed()]
+            desired = next((i for i, node in enumerate(nodes)
+                            if node.get_attribute('data-question-id') == target), -1)
+            if desired < 0:
+                return False
+            if desired in visible:
+                return True
+            if len(visible) != 1:
+                return False
+            label = '下一个' if visible[0] < desired else '上一个'
+            buttons = group.find_elements(By.CSS_SELECTOR, '[class*="q-oral-header_handle-btn"]')
+            button = next((item for item in buttons
+                           if label in (item.text or '') and
+                           'disabled' not in (item.get_attribute('class') or '').lower()), None)
+            if not button or not WebDriverHelper.safe_click(self.driver, button):
+                return False
+            if self.stop_requested.wait(0.3):
+                return False
+        return False
+
+    def _publish_prepare_media(self, group) -> bool:
+        """只处理当前题组中的音视频材料，转写成功后才允许作答。"""
+        if self._should_stop():
+            return False
+        wrappers = group.find_elements(
+            By.CSS_SELECTOR,
+            '[data-lexical-node-type="insert-audio"], [data-lexical-node-type="insert-video"]')
+        for wrapper in wrappers:
+            kind = wrapper.get_attribute('data-lexical-node-type') or ''
+            is_video = kind == 'insert-video'
+            media = wrapper.find_elements(By.TAG_NAME, 'video' if is_video else 'audio')
+            if not media:
+                print("    音视频播放器未加载，不提交")
+                return False
+            url = (wrapper.get_attribute('data-video-url') if is_video
+                   else media[0].get_attribute('src')) or ''
+            if urlsplit(url).scheme not in ('http', 'https'):
+                print("    未找到可下载的音视频材料，不提交")
+                return False
+            if not self.publish_executor.play_material(media[0]):
+                print("    未能确认音视频播放，不提交")
+                return False
+            transcript = self.video_handler.transcriber.transcribe(url.split('#')[0], language='en')
+            if not (transcript or '').strip() or self._should_stop():
+                print("    音视频转写失败，不提交")
+                return False
+            if is_video:
+                self.ai_client.add_video_transcript_if_new(transcript)
+            else:
+                self.ai_client.add_audio_transcript_if_new(transcript)
+        return not self._should_stop()
 
     def _publish_dropdown_options_prompt(self, questions: List[Question]) -> str:
         """下拉填空：尽力抓取每个空位的候选列表，供模型按原样选择。"""
@@ -9414,7 +9717,8 @@ class AISolver:
         )
 
         print(f"\n{'=' * 60}")
-        print(" 当前页面处理已停止" if self._should_stop() else " 当前页面处理完毕")
+        print(" 当前页面处理已停止" if self._should_stop() else
+              (" 当前页面处理完毕" if success else " 当前页面未处理完成"))
         print(f"{'=' * 60}")
         return success
 
