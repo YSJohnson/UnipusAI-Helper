@@ -1,0 +1,994 @@
+{
+  "source": "synthetic-fixture",
+  "groups": [
+    {
+      "group_id": "fixture-g00",
+      "group_type": "discussion_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-00-00",
+          "question_type": "discussion",
+          "stem": "Fixture discussion_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-00-01",
+          "question_type": "discussion",
+          "stem": "Fixture discussion_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-00-02",
+          "question_type": "discussion",
+          "stem": "",
+          "stem_source": "none",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g01",
+      "group_type": "single_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-01-00",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 1.",
+              "option_id": "opt-1-0-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 1.",
+              "option_id": "opt-1-0-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 1.",
+              "option_id": "opt-1-0-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 1.",
+              "option_id": "opt-1-0-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": true
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-01-01",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 2.",
+              "option_id": "opt-1-1-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 2.",
+              "option_id": "opt-1-1-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 2.",
+              "option_id": "opt-1-1-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 2.",
+              "option_id": "opt-1-1-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": true
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-01-02",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 3.",
+              "option_id": "opt-1-2-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 3.",
+              "option_id": "opt-1-2-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 3.",
+              "option_id": "opt-1-2-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 3.",
+              "option_id": "opt-1-2-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": true
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g02",
+      "group_type": "fill_blanks_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-02-00",
+          "question_type": "fill_blanks",
+          "stem": "Fixture fill_blanks_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 5,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g03",
+      "group_type": "true_false_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-03-00",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 1: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-3-0-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-3-0-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-03-01",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 2: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-3-1-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-3-1-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-03-02",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 3: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-3-2-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-3-2-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g04",
+      "group_type": "single_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-04-00",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 1.",
+              "option_id": "opt-4-0-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 1.",
+              "option_id": "opt-4-0-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 1.",
+              "option_id": "opt-4-0-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 1.",
+              "option_id": "opt-4-0-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-04-01",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 2.",
+              "option_id": "opt-4-1-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 2.",
+              "option_id": "opt-4-1-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 2.",
+              "option_id": "opt-4-1-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 2.",
+              "option_id": "opt-4-1-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-04-02",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 3.",
+              "option_id": "opt-4-2-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 3.",
+              "option_id": "opt-4-2-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 3.",
+              "option_id": "opt-4-2-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 3.",
+              "option_id": "opt-4-2-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g05",
+      "group_type": "true_false_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-05-00",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 1: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-5-0-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-5-0-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-05-01",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 2: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-5-1-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-5-1-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-05-02",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 3: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-5-2-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-5-2-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 3,
+          "qid": "fixture-q-05-03",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 4: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-5-3-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-5-3-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 4,
+          "qid": "fixture-q-05-04",
+          "question_type": "true_false",
+          "stem": "Fixture true_false_group question 5: choose or fill the correct answer.",
+          "stem_source": "children.quesTextString",
+          "options": [
+            {
+              "label": "T",
+              "value": "T",
+              "option_id": "opt-5-4-T"
+            },
+            {
+              "label": "F",
+              "value": "F",
+              "option_id": "opt-5-4-F"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g06",
+      "group_type": "single_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-06-00",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 1.",
+              "option_id": "opt-6-0-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 1.",
+              "option_id": "opt-6-0-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 1.",
+              "option_id": "opt-6-0-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 1.",
+              "option_id": "opt-6-0-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-06-01",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 2.",
+              "option_id": "opt-6-1-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 2.",
+              "option_id": "opt-6-1-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 2.",
+              "option_id": "opt-6-1-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 2.",
+              "option_id": "opt-6-1-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-06-02",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 3.",
+              "option_id": "opt-6-2-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 3.",
+              "option_id": "opt-6-2-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 3.",
+              "option_id": "opt-6-2-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 3.",
+              "option_id": "opt-6-2-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g07",
+      "group_type": "single_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-07-00",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 1.",
+              "option_id": "opt-7-0-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 1.",
+              "option_id": "opt-7-0-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 1.",
+              "option_id": "opt-7-0-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 1.",
+              "option_id": "opt-7-0-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-07-01",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 2.",
+              "option_id": "opt-7-1-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 2.",
+              "option_id": "opt-7-1-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 2.",
+              "option_id": "opt-7-1-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 2.",
+              "option_id": "opt-7-1-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-07-02",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 3.",
+              "option_id": "opt-7-2-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 3.",
+              "option_id": "opt-7-2-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 3.",
+              "option_id": "opt-7-2-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 3.",
+              "option_id": "opt-7-2-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g08",
+      "group_type": "fill_blanks_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-08-00",
+          "question_type": "fill_blanks",
+          "stem": "Fixture fill_blanks_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 5,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g09",
+      "group_type": "fill_blanks_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-09-00",
+          "question_type": "fill_blanks_choice",
+          "stem": "Fixture fill_blanks_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "word0",
+              "value": "word0",
+              "option_id": "bank-9-0"
+            },
+            {
+              "label": "word1",
+              "value": "word1",
+              "option_id": "bank-9-1"
+            },
+            {
+              "label": "word2",
+              "value": "word2",
+              "option_id": "bank-9-2"
+            },
+            {
+              "label": "word3",
+              "value": "word3",
+              "option_id": "bank-9-3"
+            },
+            {
+              "label": "word4",
+              "value": "word4",
+              "option_id": "bank-9-4"
+            },
+            {
+              "label": "word5",
+              "value": "word5",
+              "option_id": "bank-9-5"
+            },
+            {
+              "label": "word6",
+              "value": "word6",
+              "option_id": "bank-9-6"
+            },
+            {
+              "label": "word7",
+              "value": "word7",
+              "option_id": "bank-9-7"
+            },
+            {
+              "label": "word8",
+              "value": "word8",
+              "option_id": "bank-9-8"
+            },
+            {
+              "label": "word9",
+              "value": "word9",
+              "option_id": "bank-9-9"
+            }
+          ],
+          "blank_count": 10,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g10",
+      "group_type": "single_choice_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-10-00",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 1.",
+              "option_id": "opt-10-0-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 1.",
+              "option_id": "opt-10-0-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 1.",
+              "option_id": "opt-10-0-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 1.",
+              "option_id": "opt-10-0-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-10-01",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 2.",
+              "option_id": "opt-10-1-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 2.",
+              "option_id": "opt-10-1-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 2.",
+              "option_id": "opt-10-1-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 2.",
+              "option_id": "opt-10-1-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-10-02",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 3.",
+              "option_id": "opt-10-2-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 3.",
+              "option_id": "opt-10-2-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 3.",
+              "option_id": "opt-10-2-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 3.",
+              "option_id": "opt-10-2-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        },
+        {
+          "index": 3,
+          "qid": "fixture-q-10-03",
+          "question_type": "single_choice",
+          "stem": "Fixture single_choice_group question 4: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [
+            {
+              "label": "A",
+              "value": "Fixture option A for question 4.",
+              "option_id": "opt-10-3-A"
+            },
+            {
+              "label": "B",
+              "value": "Fixture option B for question 4.",
+              "option_id": "opt-10-3-B"
+            },
+            {
+              "label": "C",
+              "value": "Fixture option C for question 4.",
+              "option_id": "opt-10-3-C"
+            },
+            {
+              "label": "D",
+              "value": "Fixture option D for question 4.",
+              "option_id": "opt-10-3-D"
+            }
+          ],
+          "blank_count": 0,
+          "child_count": 1,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g11",
+      "group_type": "fill_blanks_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-11-00",
+          "question_type": "fill_blanks",
+          "stem": "Fixture fill_blanks_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 5,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g12",
+      "group_type": "short_answer_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-12-00",
+          "question_type": "short_answer",
+          "stem": "Fixture short_answer_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        },
+        {
+          "index": 1,
+          "qid": "fixture-q-12-01",
+          "question_type": "short_answer",
+          "stem": "Fixture short_answer_group question 2: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        },
+        {
+          "index": 2,
+          "qid": "fixture-q-12-02",
+          "question_type": "short_answer",
+          "stem": "Fixture short_answer_group question 3: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        },
+        {
+          "index": 3,
+          "qid": "fixture-q-12-03",
+          "question_type": "short_answer",
+          "stem": "Fixture short_answer_group question 4: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g13",
+      "group_type": "oral_sentence_scoop_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-13-00",
+          "question_type": "oral_sentence_scoop",
+          "stem": "Fixture oral_sentence_scoop_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g14",
+      "group_type": "oral_personal_state_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-14-00",
+          "question_type": "oral_personal_state",
+          "stem": "Fixture oral_personal_state_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    },
+    {
+      "group_id": "fixture-g15",
+      "group_type": "multi_media_upload_group",
+      "questions": [
+        {
+          "index": 0,
+          "qid": "fixture-q-15-00",
+          "question_type": "multi_media_upload",
+          "stem": "Fixture multi_media_upload_group question 1: choose or fill the correct answer.",
+          "stem_source": "quesTextString",
+          "options": [],
+          "blank_count": 0,
+          "child_count": 0,
+          "has_answers": false
+        }
+      ]
+    }
+  ]
+}

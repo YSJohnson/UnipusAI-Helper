@@ -1,0 +1,1007 @@
+{
+  "url": "https://ucontent.unipus.cn/_ipublishpc_default/pc.html?...#/course-v3:<COURSE_ID>/courseware/u1/u1g7/u1g8/u1g22",
+  "frame_available": true,
+  "load_counts": {
+    "groups": 16,
+    "questions": 48,
+    "stems": 1
+  },
+  "totals": {
+    "groups": 16,
+    "groups_done": 1,
+    "questions": 38,
+    "supported_questions": 24,
+    "stem_missing": 38,
+    "unsupported_groups": 6,
+    "has_submit": 10
+  },
+  "groups": [
+    {
+      "index": 0,
+      "type": "discussion_group",
+      "done": false,
+      "supported": false,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": "nested bbs iframe",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "UYQ3d8cOoYeYaWEM",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [],
+          "qid": "iP5CJX6Jo12YkER7",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [],
+          "qid": "qxVgSdEjmdP8tTeT",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g00"
+    },
+    {
+      "index": 1,
+      "type": "single_choice_group",
+      "done": true,
+      "supported": true,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "pK3u53vFiNIQMSIV",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "OcExGC3HneYMPMPH",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "vEIvxyNwX3BMTVNJ",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g01"
+    },
+    {
+      "index": 2,
+      "type": "fill_blanks_group",
+      "done": false,
+      "supported": true,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "GB0B7ApBcn29zoUw",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g02"
+    },
+    {
+      "index": 3,
+      "type": "true_false_group",
+      "done": false,
+      "supported": true,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "MUci9Edvjh3pU90X",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "SII6J8esOleaigoD",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "EGPNyEzdi4hlHpdY",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g03"
+    },
+    {
+      "index": 4,
+      "type": "single_choice_group",
+      "done": false,
+      "supported": true,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "LDFkRfHIf52Pq79F",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "mSqmGyNAhSKICSRq",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "NGT7GT9Tuf6Z51r2",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g04"
+    },
+    {
+      "index": 5,
+      "type": "true_false_group",
+      "done": false,
+      "supported": true,
+      "question_count": 5,
+      "stem_missing_count": 5,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "wYv6YQWJzx1dYVpS",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "ugVVaPgsBvwBulhH",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "mW3vBxaVGTHVQYd4",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 3,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "e9xNqjHON87QIjba",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 4,
+          "options": [
+            {
+              "draggable": false,
+              "label": "T",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "F",
+              "value": null
+            }
+          ],
+          "qid": "LJCquIi40L5872oj",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g05"
+    },
+    {
+      "index": 6,
+      "type": "single_choice_group",
+      "done": false,
+      "supported": true,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "lR3f8hu5JPARKMI6",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "MLGzi3nn1fYkRycC",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "MqgEE30F8JDRzvnj",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g06"
+    },
+    {
+      "index": 7,
+      "type": "single_choice_group",
+      "done": false,
+      "supported": true,
+      "question_count": 3,
+      "stem_missing_count": 3,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "wxzNMC5Q2YeQ1EWW",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "CdU2j08JqMrP6JIu",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "kDJiCVu35aNQYRpG",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g07"
+    },
+    {
+      "index": 8,
+      "type": "fill_blanks_group",
+      "done": false,
+      "supported": true,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "TfYuSqUQPeJAX2iH",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g08"
+    },
+    {
+      "index": 9,
+      "type": "fill_blanks_choice_group",
+      "done": false,
+      "supported": false,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": "drag-and-drop word bank",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": true,
+              "label": "irritable",
+              "value": "irritable"
+            },
+            {
+              "draggable": true,
+              "label": "financial",
+              "value": "financial"
+            },
+            {
+              "draggable": true,
+              "label": "budget",
+              "value": "budget"
+            },
+            {
+              "draggable": true,
+              "label": "proportion",
+              "value": "proportion"
+            },
+            {
+              "draggable": true,
+              "label": "domestic",
+              "value": "domestic"
+            },
+            {
+              "draggable": true,
+              "label": "component",
+              "value": "component"
+            },
+            {
+              "draggable": true,
+              "label": "incorporate",
+              "value": "incorporate"
+            },
+            {
+              "draggable": true,
+              "label": "coordination",
+              "value": "coordination"
+            },
+            {
+              "draggable": true,
+              "label": "concrete",
+              "value": "concrete"
+            },
+            {
+              "draggable": true,
+              "label": "metabolism",
+              "value": "metabolism"
+            }
+          ],
+          "qid": "Kjr2dRyLTCFJL3YW",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g09"
+    },
+    {
+      "index": 10,
+      "type": "single_choice_group",
+      "done": false,
+      "supported": true,
+      "question_count": 4,
+      "stem_missing_count": 4,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "eeNLypKFX6wRx5jb",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "FFY6pah597lzzZa5",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "CgXFroykhh37eXTP",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 3,
+          "options": [
+            {
+              "draggable": false,
+              "label": "A",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "B",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "C",
+              "value": null
+            },
+            {
+              "draggable": false,
+              "label": "D",
+              "value": null
+            }
+          ],
+          "qid": "XLfYlNfNCCq6xCy6",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g10"
+    },
+    {
+      "index": 11,
+      "type": "fill_blanks_group",
+      "done": false,
+      "supported": true,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": null,
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "M5FoBb2vHh5Kr4qX",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g11"
+    },
+    {
+      "index": 12,
+      "type": "short_answer_group",
+      "done": false,
+      "supported": false,
+      "question_count": 4,
+      "stem_missing_count": 4,
+      "unsupported_reason": "Lexical long-text editor",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "AKrKAzblzHC19Yi2",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 1,
+          "options": [],
+          "qid": "MZ3X8JawJGsaqW7c",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 2,
+          "options": [],
+          "qid": "z9WP0EtX5chHe8la",
+          "stem": "",
+          "stem_missing": true
+        },
+        {
+          "blanks": [],
+          "index": 3,
+          "options": [],
+          "qid": "AuH7cUiODuXd63TI",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g12"
+    },
+    {
+      "index": 13,
+      "type": "oral_sentence_scoop_group",
+      "done": false,
+      "supported": false,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": "browser recording / speech evaluation",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "Eq3NItKUXCiiyQ4q",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g13"
+    },
+    {
+      "index": 14,
+      "type": "oral_personal_state_group",
+      "done": false,
+      "supported": false,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": "browser recording / speech evaluation",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "dXx188RqdbXRk41l",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g14"
+    },
+    {
+      "index": 15,
+      "type": "multi_media_upload_group",
+      "done": false,
+      "supported": false,
+      "question_count": 1,
+      "stem_missing_count": 1,
+      "unsupported_reason": "file upload",
+      "material": "",
+      "questions": [
+        {
+          "blanks": [],
+          "index": 0,
+          "options": [],
+          "qid": "eR5VsUCgvbnySu7C",
+          "stem": "",
+          "stem_missing": true
+        }
+      ],
+      "group_id": "fixture-g15"
+    }
+  ]
+}

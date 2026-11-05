@@ -408,6 +408,62 @@ Windows 端除了配置编辑器多一个最小化按钮，其余行为与 v3.9.
 
 ---
 
+---
+
+<!-- IPUB-READONLY-SECTION-START -->
+
+## U 校园 5.0 iframe 课件：只读探测与答题规划工具
+
+> 上游 `main` 已自带 U 校园 5.0 的课程目录选择器兼容和 iframe 答题执行器。下面这套工具**不改动、不重复实现**这些功能，只提供一套独立、可离线运行、完全只读的诊断工具链：用于排查新教材 / 新题型、跑回归测试，以及在不触碰页面的前提下验证大模型配置。设计与实测细节见 [`docs/ipub-readonly.md`](docs/ipub-readonly.md)。
+
+### 三个只读阶段
+
+| 阶段 | 解决什么 | 主要文件 |
+| --- | --- | --- |
+| 一 | 题目在 `iframe#ipublish-pc-book-easy-iframe` 里，看清分组结构和题型 | `ipub_adapter.py` |
+| 二 | 题干不在 DOM，而在 React 内存中的 `questionConfig.json` | `ipub_questions.py` |
+| 三 | 把题干 / 选项 / 空位数转成逐题的答案槽计划，可选让模型给**参考建议** | `ipub_plan.py` |
+
+三个阶段的统一入口是 `ipub_dryrun.py`，默认不做任何写操作，也不调用大模型。`tests/fixtures/` 是脱敏的页面抽取结果与合成题干 fixture，`tests/test_ipub_*.py` 是标准库 `unittest` 离线单测，不需要浏览器或网络。
+
+### 用法
+
+附加到 GUI 已启动的 Edge（端口以 GUI 日志中的 msedgedriver 地址为准）：
+
+```powershell
+.\.venv\Scripts\python.exe ipub_dryrun.py --driver-url http://127.0.0.1:59736 --json-out dryrun.json
+```
+
+`--no-stems` 退回阶段一 DOM 结果；`--stems-out stems.json` 保存题目结构（可能含教材原文，**不要提交到公开仓库**）。完全离线的回放、阶段三计划和单测：
+
+```powershell
+.\.venv\Scripts\python.exe ipub_dryrun.py --from-json tests/fixtures/ipub_dryrun_result.json --stems-from tests/fixtures/question_configs.json --plan --plan-out phase3_plan.json
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+阶段三按题型生成答案槽：单选 / 判断是 1 个受选项约束的槽，填空按空位数生成若干槽，选词填空的每个槽带词库，简答是 1 个文本槽；讨论、口语、媒体上传明确标记为不支持并给出原因。题干缺失时**不生成提示词、不猜题**。
+
+`--llm` 会显式向 `config.json` 里配置的 OpenAI 兼容接口请求参考建议，`--llm-limit N` 可限制调用次数，适合换 key 后做烟测；`--llm-limit 0` 连网络都不碰。建议只写进内存 / JSON 计划：
+
+```powershell
+.\.venv\Scripts\python.exe ipub_dryrun.py --from-json tests/fixtures/ipub_dryrun_result.json --stems-from tests/fixtures/question_configs.json --llm-limit 3 --plan-out phase3_llm_smoke.json
+```
+
+`--gui-support` 会解析主程序里的 `PublishQuestionParser.GROUP_KINDS`，离线给出
+「哪些题组 GUI 能自动答 / 会主动跳过 / 需要手动处理」的逐组报告，升级 GUI 版本后
+不用登录就能核对题型覆盖；`--support-out report.json` 可保存结果。
+
+```powershell
+.\.venv\Scripts\python.exe ipub_dryrun.py --from-json tests/fixtures/ipub_dryrun_result.json --gui-support
+```
+
+> [!IMPORTANT]
+> 整套工具**不会作答、不会点击、不会提交、不会读取或导出 `answers` 正确答案**，也不被任何答题执行器调用。`--llm` 产生的只是内存中的参考建议，不会写入课程页面。本项目的用途与合规边界见文末声明。
+
+<!-- IPUB-READONLY-SECTION-END -->
+
+---
+
 ## 致谢
 
 感谢优秀的开源土壤。
