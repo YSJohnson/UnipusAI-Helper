@@ -28,6 +28,26 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def ensure_localhost_no_proxy() -> None:
+    """避免 Selenium 把发往本机 msedgedriver 的 W3C 请求也走系统代理。
+
+    本机配置了 http_proxy / https_proxy 但没有 NO_PROXY 时，Selenium 4.49 会
+    用 urllib3 把 `POST http://localhost:<port>/session/.../url` 也交给代理，
+    结果是驱动返回 `unhandled request`：浏览器能启动、会话能创建，但导航、
+    execute_script、CDP 注入全部失败。只绕过 localhost，不影响访问外网所需的代理。
+    """
+    hosts = ('localhost', '127.0.0.1', '::1')
+    for key in ('NO_PROXY', 'no_proxy'):
+        parts = [p.strip() for p in os.environ.get(key, '').split(',') if p.strip()]
+        for host in hosts:
+            if host not in parts:
+                parts.append(host)
+        os.environ[key] = ','.join(parts)
+
+
+ensure_localhost_no_proxy()
+
+
 def ensure_writable_temp_dir() -> str:
     """确保 TEMP/TMP 指向可写目录。
 
@@ -10097,6 +10117,47 @@ class AISolver:
         return False
 
 
+def edge_add_init_script(driver, source: str, label: str = "") -> bool:
+    """安装 Page.addScriptToEvaluateOnNewDocument，兼容 msedgedriver 的 CDP 路径差异。
+
+    实测（Edge / msedgedriver 156.0.4314.58 + Selenium 4.49）：
+    * 全新 profile 启动时初始标签是 Edge 的 NTP/WebUI 页，CDP 注入常抛
+      "unhandled request"；旧代码没有捕获，直接导致整个 GUI 启动失败。
+    * 部分驱动只实现 `/ms/cdp/execute`，另一些客户端会发 `/goog/cdp/execute`。
+    这里依次尝试两个路径，并把注入失败降级为警告——反检测与录音增强脚本
+    都不是登录和答题的必要前提，不该因为锦上添花的注入阻断启动。
+    """
+    ce = getattr(driver, "command_executor", None)
+    commands = getattr(ce, "_commands", None) if ce is not None else None
+    if not commands:
+        return False
+
+    # Selenium 4.49 用字符串 "executeCdpCommand" 作为命令键，而不是 Command 枚举。
+    key = "executeCdpCommand"
+    own = dict(commands)          # 实例级副本，避免污染 Selenium 的类级命令表
+    ce._commands = own
+    original = own.get(key)
+    candidates = [original, ("POST", "/session/$sessionId/ms/cdp/execute")]
+    last_error = None
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            own[key] = candidate
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument", {"source": source}
+            )
+            return True
+        except Exception as exc:
+            last_error = exc
+    if original:
+        own[key] = original
+    logger.warning(
+        "CDP 注入%s失败（不影响启动）: %s", label or "", str(last_error)[:120]
+    )
+    return False
+
+
 class UCampusBot:
     """U校园机器人 - 组装所有组件"""
 
@@ -10108,7 +10169,10 @@ class UCampusBot:
             self._ensure_environment()
 
         self.driver = self._create_driver()
-        self.popup_watcher = PopupWatcher(self.driver)
+        # 登录线程会连续导航，弹窗监控若同时向同一个 WebDriver 会话发命令，
+        # msedgedriver 156 会返回 "unhandled request"。等登录结束再启用监控。
+        self.login_done = threading.Event()
+        self.popup_watcher = PopupWatcher(self.driver, self.login_done)
 
     def _ensure_environment(self):
         checker = EnvironmentChecker()
@@ -10207,16 +10271,13 @@ class UCampusBot:
             options.add_argument(f'--crash-dumps-dir={temp_dir}')
 
         driver = webdriver.Edge(options=options)
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
-        })
+        edge_add_init_script(
+            driver,
+            "Object.defineProperty(navigator, 'webdriver', {get: () => false});",
+            "反检测脚本",
+        )
         # 把麦克风轨道换成「页面自带原声」的载体，供跟读录音题使用
-        try:
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                "source": RECORD_MIC_BOOTSTRAP_JS
-            })
-        except Exception as exc:
-            logger.warning(f"录音注入脚本安装失败: {str(exc)[:100]}")
+        edge_add_init_script(driver, RECORD_MIC_BOOTSTRAP_JS, "录音增强脚本")
         return driver
 
     def _create_driver(self):
@@ -10258,9 +10319,12 @@ class UCampusBot:
 
     def _background_login_flow(self):
         gui_log_queue.put(" 正在与 U校园 建立连接，请稍候...")
-        success = self._login()
-        if success:
-            self.gui.after(0, self.gui.enable_scan_button)
+        try:
+            success = self._login()
+            if success:
+                self.gui.after(0, self.gui.enable_scan_button)
+        finally:
+            self.login_done.set()
 
     def _login(self) -> bool:
         try:
@@ -10512,18 +10576,26 @@ class UCampusBot:
 class PopupWatcher:
     """弹窗监控器"""
 
-    def __init__(self, driver):
+    def __init__(self, driver, ready: "threading.Event | None" = None):
         self.driver = driver
+        self.ready = ready
 
     def run(self):
+        # 登录期间不与登录线程争用同一个 WebDriver 会话。
+        if self.ready is not None and not self.ready.wait(180):
+            logger.warning("登录超过 180 秒未完成，弹窗监控仍未启用")
+        backoff = 0.5
         while True:
             try:
                 self._click_known_buttons()
                 time.sleep(0.5)
+                backoff = 0.5
             except Exception as e:
-                error_msg = str(e)
-                print(f"操作失败: {error_msg[:50]}")
-                logger.error(f"详细错误: {error_msg}", exc_info=True)
+                # 旧版在异常分支没有休眠，驱动一旦报错就会以 CPU 速度刷屏
+                # （实测 80 秒写了 9 万行、历史日志涨到 17GB）。这里退避并降噪。
+                logger.warning("弹窗监控执行失败: %s", str(e)[:100])
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
 
     def _click_known_buttons(self):
         js = """
