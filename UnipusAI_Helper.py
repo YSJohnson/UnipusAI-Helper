@@ -385,6 +385,59 @@ def is_expression_bank_question(q: "Question") -> bool:
     return bool(EXPRESSION_FORM_PATTERN.search(text)
                 and EXPRESSION_ONCE_PATTERN.search(text))
 
+# Cloze 下拉选择题：不同教材用的下拉组件不一样（Ant Select / 自绘 / 原生 select），
+# 但占位文案是统一的「点击选择」。优先按文案定位，class 只作为兜底，避免整题漏判。
+CLOZE_DROPDOWN_PLACEHOLDER = '点击选择'
+DROPDOWN_TRIGGER_SELECTOR = (
+    '.scoop-select-wrapper, .ant-select, .ant-select-selector, '
+    '.ant-dropdown-trigger, [role="combobox"], select'
+)
+
+DROPDOWN_TRIGGER_JS = """
+const root = arguments[0];
+const SEL = %s;
+const LABEL = %s;
+const visible = (el) => el && el.getClientRects && el.getClientRects().length > 0;
+const byText = [];
+const seen = new Set();
+const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+let node;
+while ((node = walker.nextNode())) {
+    if ((node.textContent || '').indexOf(LABEL) < 0) continue;
+    let el = node.parentElement;
+    let picked = null;
+    for (let i = 0; i < 4 && el && el !== root; i++) {
+        if (el.matches('a,button,[role="button"],[role="combobox"],[class*="select"],[class*="dropdown"],[tabindex]')) {
+            picked = el;
+            break;
+        }
+        el = el.parentElement;
+    }
+    const target = picked || node.parentElement;
+    if (visible(target) && !seen.has(target)) { seen.add(target); byText.push(target); }
+}
+if (byText.length) return byText;
+const bySelector = [];
+root.querySelectorAll(SEL).forEach(function (el) {
+    if (visible(el) && !seen.has(el)) { seen.add(el); bySelector.push(el); }
+});
+return bySelector;
+""" % (json.dumps(DROPDOWN_TRIGGER_SELECTOR, ensure_ascii=False),
+       json.dumps(CLOZE_DROPDOWN_PLACEHOLDER, ensure_ascii=False))
+
+
+def find_dropdown_triggers(driver, root):
+    """返回容器内可见的下拉触发器元素列表（不依赖具体组件 class）。"""
+    try:
+        return driver.execute_script(DROPDOWN_TRIGGER_JS, root) or []
+    except Exception:
+        return []
+
+
+def has_visible_dropdown(driver, root) -> bool:
+    return bool(find_dropdown_triggers(driver, root))
+
+
 # 「已给出的首字母」只可能是短短的字母串；这些常用词是句子里正常出现的词，不是提示
 PREFIX_STOPWORDS = {
     'a', 'an', 'the', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'for', 'with', 'by',
@@ -1212,6 +1265,10 @@ class QuestionParser:
                         c.find_elements(By.CSS_SELECTOR, '.question-inputbox, .option, .fe-scoop, textarea') or
                         c.find_elements(By.CSS_SELECTOR, 'input[type="text"]')
                 )
+                # Cloze 下拉选择题只有自绘下拉、没有 input / textarea，
+                # 不补充探测会让整个 .layout-container 在容器发现阶段被丢弃。
+                if not has_content:
+                    has_content = has_visible_dropdown(self.driver, c)
                 if has_content and c.is_displayed():
                     valid_containers.append(c)
             except:
@@ -2974,20 +3031,83 @@ class DropdownSelectStrategy(QuestionParserStrategy):
     """下拉选择填空题解析策略"""
 
     def can_parse(self, container, driver) -> bool:
-        selects = container.find_elements(By.CSS_SELECTOR, '.scoop-select-wrapper, select, .ant-dropdown-trigger')
-        return bool(selects)
+        selects = container.find_elements(By.CSS_SELECTOR, DROPDOWN_TRIGGER_SELECTOR)
+        return bool(selects) or has_visible_dropdown(driver, container)
+
+    @staticmethod
+    def _cloze_material(driver, container) -> str:
+        """取整页题干，把「点击选择」替换成 ____，模型才能看见空位与编号。"""
+        try:
+            raw = driver.execute_script("""
+                const clone = arguments[0].cloneNode(true);
+                const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+                let n;
+                while ((n = walker.nextNode())) {
+                    if ((n.textContent || '').trim() === '点击选择') n.textContent = ' ____ ';
+                }
+                return (clone.textContent || '').trim();
+            """, container) or ""
+        except Exception:
+            return ""
+        return re.sub(r'\s+', ' ', raw).strip()
+
+    @staticmethod
+    def _peek_dropdown_options(driver, trigger) -> List[str]:
+        """点开第一个下拉抓候选词再收起；新版 Cloze 的选项只在浮层里。"""
+        try:
+            ActionChains(driver).move_to_element(trigger).click().perform()
+            time.sleep(0.5)
+            items = driver.find_elements(By.CSS_SELECTOR,
+                                         '.ant-select-item-option, .ant-dropdown-menu-item, '
+                                         '[role="option"], li[class*="option"]')
+            options = []
+            for item in items:
+                try:
+                    if not item.is_displayed():
+                        continue
+                    label = (item.text or '').strip()
+                    if label and label != CLOZE_DROPDOWN_PLACEHOLDER and label not in options:
+                        options.append(label)
+                except Exception:
+                    continue
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            return options
+        except Exception:
+            return []
 
     def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
         blanks = []
         select_elements = container.find_elements(By.CSS_SELECTOR, '.scoop-select-wrapper')
+        # 新版 Cloze 没有 .scoop-select-wrapper：回退到通用探测，
+        # 否则 banked_blanks 为空会被 Question.is_interactive() 判成非交互题。
+        if not select_elements:
+            select_elements = find_dropdown_triggers(driver, container)
 
         for i, elem in enumerate(select_elements):
             context = ""
             try:
-                context_elem = elem.find_element(By.XPATH, './ancestor::li')
-                context = context_elem.text.strip()
-            except:
-                pass
+                context_elem = elem.find_element(By.XPATH,
+                                                 './ancestor::li[1] | ./ancestor::p[1]')
+                raw = driver.execute_script("""
+                    const box = arguments[0], trigger = arguments[1];
+                    const clone = box.cloneNode(true);
+                    const label = (trigger.textContent || '').trim();
+                    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+                    let n, done = false;
+                    while ((n = walker.nextNode())) {
+                        if (!done && label && (n.textContent || '').trim() === label) {
+                            n.textContent = ' ____ ';
+                            done = true;
+                        }
+                    }
+                    return (clone.textContent || '').trim();
+                """, context_elem, elem) or ""
+                context = re.sub(r'\s+', ' ', raw).strip()
+            except Exception:
+                try:
+                    context = elem.find_element(By.XPATH, './ancestor::p[1]').text.strip()
+                except Exception:
+                    context = ""
 
             options = []
             try:
@@ -3003,7 +3123,7 @@ class DropdownSelectStrategy(QuestionParserStrategy):
                     option_elems = select.find_elements(By.TAG_NAME, 'option')
                     for opt in option_elems:
                         text = opt.text.strip()
-                        if text and text not in ['', '点击选择']:
+                        if text and text not in ['', CLOZE_DROPDOWN_PLACEHOLDER]:
                             options.append(text)
                 except:
                     pass
@@ -3019,13 +3139,21 @@ class DropdownSelectStrategy(QuestionParserStrategy):
         text = title_elem.text.strip() if title_elem else "下拉选择填空"
         if directions:
             text = directions + text
+        material = self._cloze_material(driver, container)
+        if material:
+            text += "\n【全文】" + material[:6000]
+
+        banked_options = list(dict.fromkeys(
+            opt for b in blanks for opt in b['options']))
+        if not banked_options and blanks:
+            banked_options = self._peek_dropdown_options(driver, blanks[0]['element'])
         return Question(
             number=question_number,
             text=text,
             q_type=QuestionType.DROPDOWN_SELECT,
             element=container,
             banked_blanks=blanks,
-            banked_options=list(set(opt for b in blanks for opt in b['options']))
+            banked_options=banked_options
         )
 
 
@@ -3977,7 +4105,10 @@ class PromptBuilder:
         # 题面和空号都在 q.text 里，此时退回填空式提示词，否则模型看不到题目。
         if not q.banked_blanks:
             lines = [f"{q.number}. 【选择填空】{q.text}"]
-            total = q.answer_count or len(re.findall(r'\(\d+\)', q.text)) or 1
+            # Cloze 页编号是 1) 2) 而不是 (1) (2)，两种都要数得出来
+            total = (q.answer_count
+                     or len(re.findall(r'\(\d+\)|\b\d{1,2}\)', q.text))
+                     or 1)
             lines.append(f"   （共 {total} 个空，按空号 1..{total} 顺序作答）")
             if q.banked_options:
                 lines.append(f"   可选选项: {', '.join(q.banked_options)}")
@@ -3991,9 +4122,15 @@ class PromptBuilder:
             f"   可选选项: {', '.join(q.banked_options)}",
             ""
         ]
+        # Cloze 是一整篇文章，只给空位附近一小段会让模型看不到上下文与编号。
+        for line in (q.text or "").splitlines():
+            if line.startswith("【全文】"):
+                lines.append(f"   全文: {line[len('【全文】'):].strip()[:6000]}")
+                break
+        lines.append("")
 
         for i, blank in enumerate(q.banked_blanks, 1):
-            context = blank['context'][:200] + "..." if len(blank['context']) > 200 else blank['context']
+            context = blank['context'][:400] + "..." if len(blank['context']) > 400 else blank['context']
             context = re.sub(r'<[^>]+>', '', context)
             lines.append(f"   空{i}: {context}")
 
@@ -5107,7 +5244,13 @@ class AnswerExecutor:
                 )
                 time.sleep(0.5)
 
-                trigger = select_wrapper.find_element(By.CSS_SELECTOR, '.ant-dropdown-trigger')
+                try:
+                    trigger = select_wrapper.find_element(
+                        By.CSS_SELECTOR,
+                        '.ant-dropdown-trigger, .ant-select-selector, [role="combobox"]')
+                except NoSuchElementException:
+                    # 通用探测拿到的 blank['element'] 本身就是触发器
+                    trigger = select_wrapper
 
                 actions = ActionChains(self.driver)
                 actions.move_to_element(trigger).click().perform()
@@ -5121,7 +5264,8 @@ class AnswerExecutor:
                             EC.presence_of_element_located((
                                 By.CSS_SELECTOR,
                                 '.ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu, '
-                                '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item'
+                                '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item, '
+                                '[role="listbox"], [class*="dropdown"] li'
                             ))
                         )
                         if dropdown_menu.is_displayed():
@@ -5160,6 +5304,25 @@ class AnswerExecutor:
                             break
                     except Exception as e:
                         continue
+
+                if not option_clicked:
+                    # 自绘下拉的候选项不一定带 ant-* class，按 role / 类名关键字再找一轮
+                    try:
+                        for opt in self.driver.find_elements(
+                                By.CSS_SELECTOR,
+                                '[role="option"], .ant-select-item-option, '
+                                '.ant-dropdown-menu-item, li[class*="option"]'):
+                            if not opt.is_displayed():
+                                continue
+                            label = (opt.text or '').strip()
+                            if label and (label.lower() == ans.lower()
+                                          or ans.lower() in label.lower()):
+                                ActionChains(self.driver).move_to_element(opt).click().perform()
+                                print(f"         通用候选项点击: {label[:20]}")
+                                option_clicked = True
+                                break
+                    except Exception:
+                        pass
 
                 if not option_clicked:
                     for xpath in option_selectors[3:]:
@@ -5291,7 +5454,8 @@ class AnswerExecutor:
             var wrapper = arguments[0];
             var value = arguments[1];
 
-            var trigger = wrapper.querySelector('.ant-dropdown-trigger');
+            var trigger = wrapper.querySelector('.ant-dropdown-trigger, .ant-select-selector, [role="combobox"]') || wrapper;
+            if (!trigger) return false;
             var events = ['mousedown', 'focus', 'click', 'input', 'change', 'blur'];
 
             events.forEach(function(eventType) {
