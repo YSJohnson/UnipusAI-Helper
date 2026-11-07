@@ -1540,7 +1540,17 @@ class BankedClozeStrategy(QuestionParserStrategy):
             context = ""
             try:
                 context_elem = scoop.find_element(By.XPATH, './ancestor::p')
-                context = context_elem.text.strip()
+                # WebElement.text 不含 input 的 value，空位会在上下文里凭空消失。
+                # 克隆整句，把输入框换成 ____ 占位符，模型才知道空在哪、前后是什么。
+                context = driver.execute_script("""
+                    const p = arguments[0];
+                    const clone = p.cloneNode(true);
+                    for (const el of clone.querySelectorAll('input, textarea')) {
+                        el.replaceWith(document.createTextNode(' ____ '));
+                    }
+                    return (clone.textContent || '').trim();
+                """, context_elem) or ""
+                context = re.sub(r'\s+', ' ', context).strip()
             except:
                 try:
                     context = scoop.text.strip()
@@ -1564,14 +1574,14 @@ class BankedClozeStrategy(QuestionParserStrategy):
         print(f"      找到 {len(banked_blanks)} 个填空位置")
 
         # 只给每个空 180 字的尾巴，模型猜不出该填哪个搭配；把整段题面（含词库）一起给它
-        material = FillInStrategy._page_material(container, limit=2000)
+        material = FillInStrategy._page_material(container, limit=6000)
         question_text = f"选词填空（{len(banked_blanks)}个空）"
         if material:
             question_text += f"\n【全文】{material}"
         if banked_options:
-            question_text += f"\n可选选项: {', '.join(banked_options[:8])}"
-            if len(banked_options) > 8:
-                question_text += f" 等共{len(banked_options)}个"
+            # 词库必须完整给出：10 个表达的题组用 [:8] 会把后两个藏成「等共 10 个」，
+            # 模型无法在「每个表达只用一次」的约束下做全局分配。
+            question_text += f"\n可选选项: {', '.join(banked_options)}"
 
 
         return Question(
@@ -2837,8 +2847,13 @@ class FillInStrategy(QuestionParserStrategy):
         )
 
     @staticmethod
-    def _page_material(container, limit: int = 1500) -> str:
-        """取当前可见题面（含词库），让模型知道可选的搭配/单词表。"""
+    def _page_material(container, limit: int = 6000) -> str:
+        """取当前可见题面（含词库），让模型知道可选的搭配/单词表。
+
+        Directions 和词库都排在题面最前面，原来用 text[-limit:] 从尾部截断，
+        Expressions in use 这类 10 句以上的题组会把整段词库切掉（模型只能盲猜）。
+        改为从头保留，并把上限放宽到能容纳整页题面。
+        """
         try:
             text = container.parent.execute_script("""
                 const root = arguments[0];
@@ -2848,7 +2863,7 @@ class FillInStrategy(QuestionParserStrategy):
             """, container) or ""
         except Exception:
             text = ""
-        return text[-limit:] if len(text) > limit else text
+        return text[:limit] if len(text) > limit else text
 
 
 class VideoStrategy(QuestionParserStrategy):
@@ -3724,7 +3739,7 @@ class PromptBuilder:
         lines.append("")
 
         for i, blank in enumerate(q.banked_blanks, 1):
-            context = blank['context'][:250] + "..." if len(blank['context']) > 250 else blank['context']
+            context = blank['context'][:400] + "..." if len(blank['context']) > 400 else blank['context']
             context = re.sub(r'<[^>]+>', '', context)
             lines.append(f"   空{i}: {context}")
 
