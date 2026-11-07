@@ -4239,7 +4239,9 @@ class AnswerExecutor:
                 try:
                     clean_word = word.strip()
                     clean_word = self._strip_given_prefix(blank.get('hint', ''), clean_word)
-                    matched = self._match_to_option(clean_word, q.banked_options, is_phrase_mode)
+                    matched = self._match_to_option(
+                        clean_word, q.banked_options, is_phrase_mode,
+                        allow_rewrite=not is_expression_bank_question(q))
                     if matched:
                         clean_word = matched
                         print(f"        匹配到选项: {clean_word}")
@@ -4250,15 +4252,12 @@ class AnswerExecutor:
                     )
                     time.sleep(0.3)
 
-                    blank['input'].clear()
-                    time.sleep(0.1)
-                    blank['input'].send_keys(clean_word)
-
-                    self.driver.execute_script("""
-                        arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
-                        arguments[0].dispatchEvent(new Event('change', {bubbles: true}));
-                        arguments[0].dispatchEvent(new Event('blur', {bubbles: true}));
-                    """, blank['input'])
+                    # 与 _fill_fill_in 走同一套写入：真实键盘输入 + 回读校验，
+                    # 失败时用 React native setter 兜底。原来只 send_keys 再派发
+                    # Event('input') 且不回读，输入没生效也会算成功并自动交卷。
+                    if not self._fill_text_input_verified(blank['input'], clean_word):
+                        print(f"        空{i + 1}: 写入后校验失败，跳过该空")
+                        continue
 
                     print(f"        空{i + 1}: {clean_word}")
                     success_count += 1
@@ -4270,7 +4269,8 @@ class AnswerExecutor:
 
         return success_count > 0
 
-    def _match_to_option(self, answer: str, options: List[str], is_phrase_mode: bool) -> Optional[str]:
+    def _match_to_option(self, answer: str, options: List[str], is_phrase_mode: bool,
+                         allow_rewrite: bool = True) -> Optional[str]:
         if not answer or not options:
             return None
 
@@ -4290,7 +4290,11 @@ class AnswerExecutor:
                             return answer
                     continue
 
+                # 短语变形题里词库是原形、正确答案是变形形式；把部分匹配吸附回
+                # 词库原文会直接把对的改错（equipped with -> be equipped with）。
                 if answer_lower in opt_lower and len(answer_lower) >= 4:
+                    if not allow_rewrite:
+                        continue
                     return opt
                 if opt_lower in answer_lower:
                     return answer
