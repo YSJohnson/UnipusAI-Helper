@@ -8342,16 +8342,29 @@ class AISolver:
 
     @staticmethod
     def _parse_numbered_map(text: str) -> Dict[int, str]:
-        """把 "1.unhappy 2.labourer" 解析成 {1: 'unhappy', 2: 'labourer'}。"""
+        """把 "1.on average 2.come across" 解析成 {1: 'on average', 2: 'come across'}。
+
+        答案经常是多词短语（on average / with respect to / turn one's nose up），
+        必须在「下一个编号」处截断，不能按空格切。老实现按非空白字符匹配，只取到首个单词，
+        结果把 on average 回填成 on、come across 回填成 come，整题判错。
+        """
         result: Dict[int, str] = {}
-        for num, value in re.findall(r'(?:^|[\s,;，；])(\d{1,2})\s*[.、:：)）]\s*([^\s,;，；]+)', text or ""):
-            try:
-                result.setdefault(int(num), value.strip(' .,;，。；'))
-            except ValueError:
-                continue
+        if not (text or '').strip():
+            return result
+        marker = re.compile(r'(?:^|[\s,;，；])(?:空\s*)?(\d{1,2})\s*[.、:：)）]')
+        matches = list(marker.finditer(text))
+        for i, match in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            value = text[match.end():end].strip().strip(' .,;，。；')
+            if value:
+                result.setdefault(int(match.group(1)), value)
         if not result:
-            words = [w for w in re.split(r'[\s,;，；]+', (text or '').strip()) if w]
-            result = {i + 1: w for i, w in enumerate(words)}
+            # 没有编号时按行降级，仍然保留整行的多词内容
+            for i, line in enumerate((text or '').splitlines(), 1):
+                cleaned = re.sub(r'^\s*(?:空\s*)?\d{1,2}\s*[.、:：)）]\s*', '', line)
+                cleaned = cleaned.strip().strip(' .,;，。；')
+                if cleaned:
+                    result[i] = cleaned
         return result
 
     def _load_reading_context_for_current_page(self) -> bool:
