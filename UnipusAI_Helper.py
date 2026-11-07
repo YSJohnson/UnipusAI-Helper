@@ -367,6 +367,7 @@ EXPRESSION_BANK_HINTS = [
     "3. take ... for granted 的 ... 要换成句子需要的宾语；put one's feet up 的 one's 要按主语换成 their / his / her。",
     "4. 词库里每个表达恰好用一次：不要重复、不要漏用；先通读全部句子做全局分配，再逐空给答案。",
     "5. 每个空可以包含多个单词，答案里不要带括号注释、词形解释或其它说明。",
+    "6. 空位在句首时首字母必须大写：At the heart of / Early on / In the course of；在句中保持小写：refrain from。平台大小写也计分。",
 ]
 
 
@@ -4246,6 +4247,13 @@ class AnswerExecutor:
                         clean_word = matched
                         print(f"        匹配到选项: {clean_word}")
 
+                    # 句首空必须首字母大写（平台大小写也判分），用上下文里的 ____ 定位
+                    capitalized = self._capitalize_if_sentence_initial(
+                        blank.get('context', ''), clean_word)
+                    if capitalized != clean_word:
+                        print(f"        句首空补大写: {clean_word} -> {capitalized}")
+                        clean_word = capitalized
+
                     self.driver.execute_script(
                         "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
                         blank['input']
@@ -4268,6 +4276,25 @@ class AnswerExecutor:
                     logger.error(f"详细错误: {error_msg}", exc_info=True)
 
         return success_count > 0
+
+    @staticmethod
+    def _capitalize_if_sentence_initial(context: str, answer: str) -> str:
+        """空位在句首时补首字母大写（平台把大小写也计入判分）。
+
+        BankedClozeStrategy 的上下文用 ____ 标出空位：把 ____ 之前的文字去掉
+        行首题号后，若为空或以句末标点结尾，就认为该空在句首。上下文没有 ____
+        时不做猜测，交给提示词约束，避免把句中的答案误改成大写。
+        """
+        if not answer or not answer[0].isalpha() or answer[0].isupper():
+            return answer
+        text = re.sub(r'<[^>]+>', '', context or '')
+        if '____' not in text:
+            return answer
+        before = text.split('____', 1)[0]
+        before = re.sub(r'^\s*\d{1,2}\s*[.、)）]\s*', '', before).strip()
+        if not before or re.search(r'[.!?;:。！？；：]\s*$', before):
+            return answer[0].upper() + answer[1:]
+        return answer
 
     def _match_to_option(self, answer: str, options: List[str], is_phrase_mode: bool,
                          allow_rewrite: bool = True) -> Optional[str]:
