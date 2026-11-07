@@ -352,6 +352,38 @@ class Question:
 CJK_HINT_PATTERN = re.compile(r'[（(]\s*([\u4e00-\u9fa5][^（）()]{0,40}?)\s*[）)]')
 CJK_CHAR_PATTERN = re.compile(r'[\u4e00-\u9fa5]')
 
+# Expressions in use / Words in use：Directions 要求「用所给表达填空、按需变形、每个只用一次」
+EXPRESSION_BANK_PATTERN = re.compile(
+    r'expressions?\s+given\s+below|fill\s+in\s+the\s+blanks\s+with\s+the\s+expressions',
+    re.I,
+)
+EXPRESSION_FORM_PATTERN = re.compile(r'change\s+the\s+form', re.I)
+EXPRESSION_ONCE_PATTERN = re.compile(r'each\s+expression|expressions?\s+can\s+be\s+used', re.I)
+
+EXPRESSION_BANK_HINTS = [
+    "【短语变形填空】请输出按句子语法变形后的完整表达，不要照抄词库原形。",
+    "1. 不规则动词整体变化：dig up→dug up、take up→took up、come to the rescue→came to the rescue。",
+    "2. 空格若缺助动词或 be 动词，要一并写进空里：will get away from、are equipped with（be 随主语变位）。",
+    "3. take ... for granted 的 ... 要换成句子需要的宾语；put one's feet up 的 one's 要按主语换成 their / his / her。",
+    "4. 词库里每个表达恰好用一次：不要重复、不要漏用；先通读全部句子做全局分配，再逐空给答案。",
+    "5. 每个空可以包含多个单词，答案里不要带括号注释、词形解释或其它说明。",
+]
+
+
+def is_expression_bank_question(q: "Question") -> bool:
+    """Directions 明确要求「用所给表达填空并按需变形」的短语题。
+
+    用 Directions 文本判定，不依赖词库容器的 class——同一题型在不同教材里
+    渲染结构并不一致，靠 DOM 特征识别容易整题漏判、退化成普通填空。
+    """
+    text = f"{getattr(q, 'directions', '') or ''}\n{getattr(q, 'text', '') or ''}"
+    if EXPRESSION_BANK_PATTERN.search(text):
+        return True
+    # 只有「change the form」+「each expression ... only once」同时出现才算，
+    # 避免把 Words in use（单词变形）也当成多词短语题。
+    return bool(EXPRESSION_FORM_PATTERN.search(text)
+                and EXPRESSION_ONCE_PATTERN.search(text))
+
 # 「已给出的首字母」只可能是短短的字母串；这些常用词是句子里正常出现的词，不是提示
 PREFIX_STOPWORDS = {
     'a', 'an', 'the', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'for', 'with', 'by',
@@ -3577,8 +3609,9 @@ class PromptBuilder:
 
     def _banked_cloze_hints(self) -> List[str]:
         return [
-            "【重要提示】这是选词填空题，请从给定的单词列表中选择最合适的填入空白处。\n",
-            "【格式要求】只需返回答案本身，不要添加括号注释、不要解释、不要变形说明！"
+            "【重要提示】这是选词填空题，请从给定的单词/短语列表中选择最合适的填入空白处。\n",
+            "【格式要求】只需返回答案本身，不要添加括号注释、不要解释、不要变形说明！",
+            "【词形】若 Directions 要求 Change the form where necessary，答案必须是变形后的形式，不是词库原样。"
         ]
 
     def _get_builder_method(self, q_type: QuestionType) -> Callable[[Question], List[str]]:
@@ -3725,6 +3758,10 @@ class PromptBuilder:
         if material:
             lines.append(f"   全文: {material[:1800]}")
         lines.append("   注意：题干里的词库一般每个词只能用一次，且必须按语法改变词形。")
+        if (q.directions or '').strip():
+            lines.append(f"   Directions: {q.directions.strip()[:400]}")
+        if is_expression_bank_question(q):
+            lines.extend(EXPRESSION_BANK_HINTS)
 
         if is_phrase:
             lines.extend([
@@ -3781,6 +3818,10 @@ class PromptBuilder:
         lines = [f"{q.number}. 【填空】{q.text}"]
         if len(q.inputs) > 1:
             lines.append(f"   （共 {len(q.inputs)} 个空）")
+        # 静态词库 chip 不会被 BankedClozeStrategy 命中，这类题会落到这里且
+        # banked_options 为空；用 Directions 补上短语变形的约束。
+        if is_expression_bank_question(q):
+            lines.extend(EXPRESSION_BANK_HINTS)
         if q.banked_options:
             lines.append(f"   可选词: {', '.join(q.banked_options)}")
             lines.append("   （只能从可选词中选择；必要时改变词形：单复数/时态/词性/派生词）")
@@ -3904,10 +3945,10 @@ class PromptBuilder:
             lines.append("判断依据：题目明确标注'多选'或有多个正确选项时选多个，否则单选")
 
         if QuestionType.BANKED_CLOZE in type_counts or QuestionType.DROPDOWN_SELECT in type_counts:
-            lines.append("选词/选择填空: 1.word1 2.word2 ...")
+            lines.append("选词/选择填空: 1.答案1 2.答案2 ...（答案可以是多词短语）")
 
         if QuestionType.FILL_IN in type_counts:
-            lines.append("填空题: 1.答案1 2.答案2 ...")
+            lines.append("填空题: 1.答案1 2.答案2 ...（答案可以是多词短语）")
 
         if QuestionType.TRUE_FALSE in type_counts:
             lines.append("判断题: 每题回答 T 或 F，如：1.T 2.F")
@@ -8209,6 +8250,7 @@ class AISolver:
         if not total:
             return False
         filled = 0
+        used_answers: List[str] = []
         print(f"    空位较多（{total} 个），拆成每 {chunk_size} 空一批作答")
 
         pending = [(start, min(start + chunk_size, total)) for start in range(0, total, chunk_size)]
@@ -8252,6 +8294,10 @@ class AISolver:
                 continue
             prompt += (f"\n本批只包含第 {start + 1}-{end} 空，请按这些空号作答，"
                        f"格式：{start + 1}.答案 {start + 2}.答案 ...")
+            if used_answers:
+                prompt += ("\n【已用答案】前面批次已填入：" + "；".join(used_answers) +
+                           "。词库里的每个表达只能用一次，本批不得重复使用，"
+                           "请优先选取尚未使用的表达。")
             response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
             if not response:
                 # 推理型模型偶尔整批返回空（token 全烧在思考上），把这批再拆小重问
@@ -8262,7 +8308,7 @@ class AISolver:
                 else:
                     # 只剩 1-2 个空还拿不到答案：换一种更短的问法再试一次
                     retry_prompt = (f"【填空】请只回答第 {start + 1}-{end} 空，"
-                                    f"每空一个单词，格式：{start + 1}.答案\n"
+                                    f"每空一个答案（可以是多词短语），格式：{start + 1}.答案\n"
                                     f"{q.text[:1200]}")
                     for item in sub_blanks:
                         retry_prompt += f"\n空{item['index'] + 1}: 提示 {item.get('hint', '') or '无'}；前文 {item.get('context', '')[-80:]}"
@@ -8283,6 +8329,7 @@ class AISolver:
                 try:
                     if self.executor._fill_text_input_verified(inp, ans):
                         filled += 1
+                        used_answers.append(ans)
                 except Exception as exc:
                     print(f"    空{global_no} 写入失败: {str(exc)[:50]}")
             print(f"    第 {start + 1}-{end} 空已处理（累计 {filled}/{total}）")
@@ -8884,9 +8931,12 @@ class AISolver:
 
                 # 空位特别多的填空题（如 28 空的首字母搭配）一次性问模型时，
                 # 推理型模型容易把 token 全烧在思考上导致返回空；拆成小块逐段问更稳。
+                # 短语变形填空要求「每个表达只用一次」，必须一次性看到全部空位做
+                # 全局分配；拆批会让后一批重复选用已用过的表达。
                 large_fills = [q for q in normal_questions
                                if q.q_type in (QuestionType.FILL_IN, QuestionType.BANKED_CLOZE)
-                               and len(q.inputs) > 8]
+                               and len(q.inputs) > 8
+                               and not is_expression_bank_question(q)]
                 for q in large_fills:
                     if self._should_stop():
                         return False
