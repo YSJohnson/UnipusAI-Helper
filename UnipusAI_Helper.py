@@ -4268,7 +4268,7 @@ class AnswerExecutor:
                     print(f"      填空 {i + 1} 失败:{error_msg[:50]} ")
                     logger.error(f"详细错误: {error_msg}", exc_info=True)
 
-        return success_count > 0
+        return bool(q.banked_blanks) and success_count == len(q.banked_blanks)
 
     def _match_to_option(self, answer: str, options: List[str], is_phrase_mode: bool,
                          allow_rewrite: bool = True) -> Optional[str]:
@@ -8301,7 +8301,7 @@ class AISolver:
                 continue
             prompt += (f"\n本批只包含第 {start + 1}-{end} 空，请按这些空号作答，"
                        f"格式：{start + 1}.答案 {start + 2}.答案 ...")
-            if used_answers:
+            if used_answers and re.search(r'\b(?:only\s+once|once\s+only)\b', q.directions or '', re.I):
                 prompt += ("\n【已用答案】前面批次已填入：" + "；".join(used_answers) +
                            "。词库里的每个表达只能用一次，本批不得重复使用，"
                            "请优先选取尚未使用的表达。")
@@ -8363,11 +8363,11 @@ class AISolver:
                 result.setdefault(int(match.group(1)), value)
         if not result:
             # 没有编号时按行降级，仍然保留整行的多词内容
-            for i, line in enumerate((text or '').splitlines(), 1):
+            for line in (text or '').splitlines():
                 cleaned = re.sub(r'^\s*(?:空\s*)?\d{1,2}\s*[.、:：)）]\s*', '', line)
                 cleaned = cleaned.strip().strip(' .,;，。；')
                 if cleaned:
-                    result[i] = cleaned
+                    result[len(result) + 1] = cleaned
         return result
 
     def _load_reading_context_for_current_page(self) -> bool:
