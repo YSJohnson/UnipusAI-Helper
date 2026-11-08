@@ -98,7 +98,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.3"
+APP_VERSION = "3.9.4"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -273,6 +273,7 @@ class QuestionType(Enum):
     BANKED_CLOZE = auto()
     VOCABULARY_TEST = auto()  # 词汇测试（英汉互译）
     VIDEO = auto()  # 纯视频页面
+    AUDIO = auto()  # 纯听音频页面，需要播放至自然结束
     DISCUSSION_BOARD = auto()
     SELF_CHECK = auto()
     MY_VOICE_TEXT = auto()
@@ -319,7 +320,7 @@ class Question:
 
     def is_interactive(self) -> bool:
         """是否有交互元素"""
-        if self.q_type in [QuestionType.VIDEO,
+        if self.q_type in [QuestionType.VIDEO, QuestionType.AUDIO,
                            QuestionType.VOCABULARY_FLASHCARD,  # 闪卡需要交互
                            QuestionType.DISCUSSION_BOARD,
                            QuestionType.RECORD,
@@ -337,7 +338,7 @@ class Question:
 
     @property
     def needs_speech_script(self) -> bool:
-        """录音题里有没有「页面没给原声」的条目。
+        """录音题里有没有既无原声、也无指定朗读文本的条目。
 
         Vocabulary / Exercise 1 的跟读题自带参考音频，直接把原声喂进麦克风即可；
         Exercise 2 这类主观题只有一个计时录音按钮，没有原声，只能先让模型写口语稿
@@ -346,7 +347,8 @@ class Question:
         items = self.record_items or []
         if not items:
             return False
-        return any(not (item.get('url') or '').strip() for item in items)
+        return any(not (item.get('url') or '').strip()
+                   and not (item.get('text') or '').strip() for item in items)
 
 
 CJK_HINT_PATTERN = re.compile(r'[（(]\s*([\u4e00-\u9fa5][^（）()]{0,40}?)\s*[）)]')
@@ -745,7 +747,7 @@ class OpenAICompatibleClient:
         """发送问题并获取回答
 
         推理型模型（如 deepseek-flash）可能把 max_tokens 全部消耗在 reasoning 上，
-        导致 content 为空且 finish_reason=length；这里自动放宽预算重试一次。
+        导致 content 为空且 finish_reason=length；这里在重试次数内调整预算和问法。
         """
         print(f"当前ai对话历史共{len(self.conversation_history)}条")
         # 推理型模型会把预算全烧在 reasoning 上，配置值太小时必然拿不到正文；
@@ -825,10 +827,14 @@ class OpenAICompatibleClient:
                     print("=" * 60 + "\n")
 
                 if not answer:
-                    if finish_reason == 'length' and max_tokens < 32768:
-                        max_tokens = min(max_tokens * 2, 32768)
-                        print(f"推理耗尽 token（finish_reason=length），放宽 max_tokens 到 "
-                              f"{max_tokens} 重试")
+                    if finish_reason == 'length':
+                        if attempt == retry_count - 1:
+                            print("推理耗尽 token，已达到最大重试次数")
+                            return None
+                        if max_tokens < 32768:
+                            max_tokens = min(max_tokens * 2, 32768)
+                        print(f"推理耗尽 token（finish_reason=length），使用 max_tokens="
+                              f"{max_tokens} 和简化问法重试")
                         continue
                     print(f"模型返回空内容（finish_reason={finish_reason}）")
                     return None
@@ -915,6 +921,7 @@ class QuestionParser:
         self.driver = driver
         self.strategies: List[QuestionParserStrategy] = [
             VideoStrategy(),
+            AudioStrategy(),
             DiscussionBoardStrategy(),
             RecordStrategy(),  # 跟读录音题：靠 .record-icon.button-record 判定，必须在通用策略之前
             ChecklistStrategy(),
@@ -1257,6 +1264,7 @@ class QuestionParser:
             row = None
             for xpath in (
                 "ancestor::*[contains(@class,'oral-study-sentence')][1]",
+                "ancestor::div[contains(@class,'oral-paragraph-container')][1]",
                 "ancestor::div[contains(@class,'record-button-group')][1]",
                 "ancestor::div[contains(@class,'layoutBody-container')][1]",
             ):
@@ -1971,17 +1979,26 @@ const maxDur = (typeof arguments[2] === 'number') ? arguments[2] : 0;
 """
 
 RECORD_ITEMS_JS = r"""
-return Array.from((arguments[0] || document).querySelectorAll('.record-button-wrap'))
-  .map(function (wrap) {
-    const audio = wrap.querySelector('audio');
+const root = arguments[0] || document;
+return Array.from(arguments[1])
+  .map(function (button) {
+    const wrap = button.closest('.record-button-wrap');
+    const paragraph = button.closest('.oral-paragraph-container');
+    const row = button.closest('.oral-study-sentence') || paragraph || root;
+    // 段落跟读的样音在播放器中，回放录音在另一只 record-button-wrap 中。
+    const audio = paragraph
+      ? paragraph.querySelector('.paragraphPlayerContainer audio:not(.audio-replay audio)')
+      : (wrap && wrap.querySelector('audio:not(.audio-replay audio)'));
     const raw = audio ? (audio.getAttribute('src') || audio.getAttribute('title') || '') : '';
-    const song = wrap.querySelector('.question-audio.audio-origin');
-    const row = wrap.closest('.oral-study-sentence') || wrap.parentElement;
+    const song = wrap && wrap.querySelector('.question-audio.audio-origin');
+    const passage = paragraph && paragraph.querySelector('.sentence-html-container');
+    const text = passage ? (passage.innerText || '').replace(/\([wWsS]\)/g, ' ') : '';
     const lines = row ? ((row.innerText || '').split('\n').map(function (s) { return s.trim(); })
       .filter(function (s) { return s.length > 0; })) : [];
     return {
       raw: raw,
-      name: lines.length ? lines[0] : '',
+      name: text.trim() || (lines.length ? lines[0] : ''),
+      text: text.replace(/\s+/g, ' ').trim(),
       lines: lines.slice(0, 4),
       src: song ? (song.getAttribute('title') || '') : ''
     };
@@ -2010,7 +2027,7 @@ return (function (root, idx, selectors) {
   // 麦克风按钮所在的 .record-button-group 里什么都没有，所以要看更大的作用域。
   // 但只有「整块里就一个录音按钮」时才上扩，避免跟读题多行共用外层时串分。
   let scope = row;
-  const outer = row.closest('.p-oral-personal-state');
+  const outer = row.closest('.oral-paragraph-container, .p-oral-personal-state');
   if (outer && !row.querySelector('.score_layout') &&
       outer.querySelectorAll(sel).length === 1) {
     scope = outer;
@@ -2025,7 +2042,8 @@ return (function (root, idx, selectors) {
   // 录完之后平台会上传音频并给一个可回放的 <audio src="http://...mp3">；
   // 题目自带原声放在 .record-button-wrap 里，不能算作答结果。
   const audios = Array.from(scope.querySelectorAll('audio')).filter(function (a) {
-    if (a.closest('.record-button-wrap')) { return false; }
+    if (a.closest('.paragraphPlayerContainer')) { return false; }
+    if (a.closest('.record-button-wrap') && !a.closest('.audio-replay')) { return false; }
     return ((a.getAttribute('src') || '').length > 0);
   });
   const blob = audios.filter(function (a) {
@@ -2351,7 +2369,8 @@ class RecordStrategy(QuestionParserStrategy):
         # 参考音频挂在 .record-button-wrap 里的 <audio>，src 后面带
         # #duration=..&name=..，这里一次性用 JS 读出来，比多层 XPath 稳。
         try:
-            metas = driver.execute_script(RECORD_ITEMS_JS, container) or []
+            metas = driver.execute_script(
+                RECORD_ITEMS_JS, container, buttons) or []
         except Exception:
             metas = []
 
@@ -2371,11 +2390,12 @@ class RecordStrategy(QuestionParserStrategy):
                     meta['duration'] = float(match.group(1))
                 lines = [str(line).strip() for line in (info.get('lines') or []) if str(line).strip()]
                 meta['lines'] = lines
+                meta['text'] = (info.get('text') or '').strip()
                 if not meta['name']:
                     meta['name'] = (info.get('name') or '').strip()
             if not meta['name']:
                 meta['name'] = (button.get_attribute('title') or '').strip()
-            # 没有原声 = 主观计时录音题，只能靠模型写稿 + TTS
+            # 段落跟读优先用样音；无样音时只朗读给定段落，不生成新稿。
             meta['needs_tts'] = not meta['url']
             items.append(meta)
 
@@ -2897,6 +2917,32 @@ class FillInStrategy(QuestionParserStrategy):
         except Exception:
             text = ""
         return text[:limit] if len(text) > limit else text
+
+
+class AudioStrategy(QuestionParserStrategy):
+    """只有听力材料、没有作答控件的页面。"""
+
+    ANSWER_SELECTOR = ('video, textarea, input:not([type="hidden"]), .fe-scoop, '
+                       '.question-common-abs-choice, .option, .option-wrap, '
+                       '.ant-radio-wrapper, .ant-checkbox-wrapper, '
+                       '.oral-paragraph-container, .oral-study-sentence')
+
+    def can_parse(self, container, driver) -> bool:
+        if container.find_elements(By.CSS_SELECTOR, self.ANSWER_SELECTOR):
+            return False
+        if find_record_buttons(driver, container):
+            return False
+        return bool(container.find_elements(By.CSS_SELECTOR, 'audio[src]:not([src=""]), audio source[src]'))
+
+    def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
+        return Question(number=question_number, text="音频听读页面",
+                        q_type=QuestionType.AUDIO, element=container, directions=directions)
+
+    @classmethod
+    def is_audio_only_page(cls, driver) -> bool:
+        containers = driver.find_elements(By.CSS_SELECTOR, '.layoutBody-container')
+        visible = [node for node in containers if node.is_displayed()]
+        return bool(visible) and all(cls().can_parse(node, driver) for node in visible)
 
 
 class VideoStrategy(QuestionParserStrategy):
@@ -4464,7 +4510,7 @@ class AnswerExecutor:
 
         done = sum(1 for i in range(len(items)) if self._row_done(q, i))
         print(f"\t录音题完成 {done}/{len(items)} 条")
-        return done > 0
+        return done == len(items)
 
     def _row_state(self, q: Question, idx: int) -> Optional[dict]:
         try:
@@ -4507,11 +4553,9 @@ class AnswerExecutor:
                     and re.search(r'[A-Za-z]{3}', fallback)
                     and not CJK_CHAR_PATTERN.search(fallback)):
                 text = fallback
-        if not text:
-            return [''] * count
-        if count == 1:
-            return [text]
-        return self._split_speech(text, count)
+        texts = self._split_speech(text, count) if text and count > 1 else [text] * count
+        return [(item.get('text') or '').strip() or texts[idx]
+                for idx, item in enumerate(q.record_items)]
 
     @staticmethod
     def _split_speech(text: str, count: int) -> List[str]:
@@ -7384,6 +7428,71 @@ class DiscussionBoardHandler(ContentHandler):
         return ""
 
 
+class AudioHandler(ContentHandler):
+    """完整播放纯听力任务，只有自然结束才算成功。"""
+
+    def __init__(self, driver, stop_requested: threading.Event):
+        self.driver = driver
+        self.stop_requested = stop_requested
+
+    def can_handle(self, question: Question) -> bool:
+        return question.q_type == QuestionType.AUDIO
+
+    def handle(self, question: Question) -> bool:
+        audios = question.element.find_elements(By.TAG_NAME, 'audio')
+        if not audios:
+            return False
+        for index, audio in enumerate(audios, 1):
+            if self.stop_requested.is_set():
+                return False
+            print(f"     播放第 {index}/{len(audios)} 段音频，等待完整播放...")
+            try:
+                self.driver.execute_script("""
+                    const audio = arguments[0];
+                    audio.loop = false;
+                    audio.playbackRate = 1;
+                    audio.currentTime = 0;
+                    audio.__ucampusPlayError = '';
+                    const playing = audio.play();
+                    if (playing && playing.catch) playing.catch(error => {
+                        audio.__ucampusPlayError = String(error);
+                    });
+                """, audio)
+                last_time = 0.0
+                progress_at = time.monotonic()
+                while not self.stop_requested.is_set():
+                    state = self.driver.execute_script("""
+                        const audio = arguments[0];
+                        return {time: audio.currentTime || 0, ended: audio.ended,
+                                error: !!audio.error || !!audio.__ucampusPlayError};
+                    """, audio) or {}
+                    current = float(state.get('time') or 0)
+                    if state.get('error'):
+                        print("     音频播放失败，保留任务以便重试")
+                        return False
+                    if state.get('ended') and current > 0:
+                        print(f"     第 {index} 段音频已完整播放（{current:.1f}s）")
+                        break
+                    if current > last_time:
+                        last_time, progress_at = current, time.monotonic()
+                    if time.monotonic() - progress_at > 30:
+                        print("     音频加载或播放停滞，保留任务以便重试")
+                        return False
+                    if self.stop_requested.wait(0.25):
+                        return False
+                else:
+                    return False
+            except Exception as exc:
+                print(f"     音频播放失败: {str(exc)[:80]}")
+                return False
+            finally:
+                try:
+                    self.driver.execute_script('arguments[0].pause();', audio)
+                except Exception:
+                    pass
+        return not self.stop_requested.is_set()
+
+
 class SelfCheckHandler(ContentHandler):
     """Self-check 词汇勾选处理器"""
 
@@ -8052,6 +8161,7 @@ class AISolver:
                                                       stop_requested=self.stop_requested)
         self.video_handler = VideoHandler(driver, self.config, self.stop_requested)
         self.content_handlers: List[ContentHandler] = [
+            AudioHandler(driver, self.stop_requested),
             self.video_handler,
             FlashcardHandler(driver, self.stop_requested),
             SelfCheckHandler(driver, self.stop_requested),
@@ -8892,7 +9002,13 @@ class AISolver:
                         return False
                     if handler.can_handle(q):
                         print(f"     使用 {handler.__class__.__name__} 处理")
-                        handler.handle(q)
+                        handled = handler.handle(q)
+                        if q.q_type == QuestionType.AUDIO:
+                            if not handled or self._should_stop():
+                                self.processed_hashes.discard(content_hash)
+                                return False
+                            special_handled = True
+                            break
                         if self._should_stop():
                             return False
                         special_handled = True
@@ -8909,6 +9025,7 @@ class AISolver:
             normal_questions = [q for q in questions if q.q_type not in [
                 QuestionType.VOCABULARY_FLASHCARD,
                 QuestionType.VIDEO,
+                QuestionType.AUDIO,
                 QuestionType.SELF_CHECK,
                 QuestionType.DISCUSSION_BOARD
             ]]
@@ -9990,8 +10107,8 @@ class AISolver:
         if self._has_video_on_page():
             return
 
-        # 跟读录音题的原声就是题目本身，不需要转写进上下文
-        if find_record_buttons(self.driver):
+        # 纯听音频任务只播放，跟读题直接使用样音，均不需要转写。
+        if find_record_buttons(self.driver) or AudioStrategy.is_audio_only_page(self.driver):
             return
 
         if not self._has_audio_on_page():
