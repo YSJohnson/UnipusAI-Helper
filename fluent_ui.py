@@ -18,6 +18,10 @@ except ImportError:
 from typing import Dict
 from urllib.parse import parse_qs, urlsplit
 
+from task_grading import (
+    READ_GRADING_JS, assign_task_scoring, build_grading_index, grading_text, selectable_task,
+)
+
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal, QRect, QSize
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QTextCursor, QKeySequence
 from PyQt5.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget, QShortcut
@@ -227,6 +231,14 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_select_visible.hide()
         task_toolbar.addWidget(self.btn_select_visible)
         task_layout.addLayout(task_toolbar)
+
+        self.exclude_ungraded = CheckBox("排除不计分任务")
+        self.exclude_ungraded.setStyleSheet('CheckBox { background: transparent; }')
+        self.exclude_ungraded.setToolTip(
+            "启用时取消勾选明确不计分的任务，默认勾选和批量选择也会排除它们；计分未知的任务保留。\n"
+            "不计分任务仍可能影响学习进度和时长，可单独手动勾选。关闭后可重新点击批量选择按钮。")
+        self.exclude_ungraded.stateChanged.connect(self._on_grading_filter_changed)
+        task_layout.addWidget(self.exclude_ungraded)
 
         self.task_scroll = ScrollArea()
         self.task_scroll.setWidgetResizable(True)
@@ -672,12 +684,14 @@ class FluentModernGUI(MSFluentWindow):
                 except Exception:
                     label = (unit_tab.text or "").strip()
                 display_name, is_preview = self._parse_unit_label(label)
+                unit_id = re.fullmatch(r'id-(.+)-tab', unit_tab.get_attribute('id') or '')
                 unit_infos.append({
                     "index": unit_idx,
                     "label": label,
                     "display": display_name,
                     "is_preview": is_preview,
                     "element": unit_tab,
+                    "unit_id": unit_id.group(1) if unit_id else '',
                 })
 
             active_info = next((i for i in unit_infos if self._is_active_unit(i["element"])), None)
@@ -735,6 +749,7 @@ class FluentModernGUI(MSFluentWindow):
                         "status_text": (task.get("status") or "").strip(),
                         "_element": element,
                         "_unit_idx": info["index"],
+                        "_unit_id": info.get("unit_id", ""),
                         "_section_title": section_title,
                         "_name_occurrence": occurrence,
                         "_directory_url": directory_url,
@@ -750,16 +765,40 @@ class FluentModernGUI(MSFluentWindow):
                 }
                 self.gui_log_queue.put(f"仅扫描当前单元: {info['display']}（不切换其它单元）")
                 collect_unit(info, click_tab=bool(player_unit))
-                return tabs
-
-            for info in unit_infos:
-                collect_unit(info, click_tab=True)
+            else:
+                for info in unit_infos:
+                    collect_unit(info, click_tab=True)
         except Exception as e:
             if player_unit:
                 self.gui_log_queue.put(f'播放器任务扫描失败: {str(e)[:100]}')
             if self.logger:
                 self.logger.debug(f"课程目录扫描未命中: {e}")
+        if tabs:
+            self._enrich_task_grading(tabs)
         return tabs
+
+    def _enrich_task_grading(self, tabs):
+        """读取学习记录，不切换目录单元，也不触发任务学习或提交。"""
+        index = {}
+        try:
+            route = urlsplit(self.driver.current_url)
+            resource = re.fullmatch(r'/app/cmgt/resource-detail/(\d+)/?', route.path)
+            unit_ids = list(dict.fromkeys(t['_unit_id'] for t in tabs if t.get('_unit_id')))
+            if route.hostname == 'ucloud.unipus.cn' and resource and unit_ids:
+                self.gui_log_queue.put('正在读取学习记录中的计分标记...')
+                result = self.driver.execute_async_script(READ_GRADING_JS, resource.group(1), unit_ids) or {}
+                index = build_grading_index(result.get('units') or [])
+        except Exception:
+            # 不让记录接口失败阻断目录扫描，且不在日志中暴露响应或登录凭据。
+            self.gui_log_queue.put('学习记录计分标记读取失败，保留任务并标记为计分未知')
+        assign_task_scoring(tabs, index)
+        for tab in tabs:
+            tab['display'] += f" · {grading_text(tab['is_scored'])}"
+        ungraded = sum(t['is_scored'] is False for t in tabs)
+        unknown = sum(t['is_scored'] is None for t in tabs)
+        self.gui_log_queue.put(
+            f'计分标记：计分 {len(tabs) - ungraded - unknown}，不计分 {ungraded}，未知 {unknown}'
+            + ('；未知任务不会被排除，请按需检查学习记录' if unknown else ''))
 
     @staticmethod
     def _format_task_display(compulsory, unit_name, section, name, status_text):
@@ -854,20 +893,13 @@ class FluentModernGUI(MSFluentWindow):
         done_count = sum(1 for t in self._all_tabs if t.get("status") == "done")
         pending_compulsory = [
             i for i, t in enumerate(self._all_tabs)
-            if t.get("is_compulsory", False) and t.get("status") != "done"
+            if t.get("is_compulsory", False) and t.get("status") != "done" and self._bulk_selectable(t)
         ]
-        if current_unit_only:
-            self._selected_tab_keys = {self._tab_key(i, self._all_tabs[i]) for i in pending_compulsory}
-        else:
-            self._selected_tab_keys = {
-                self._tab_key(i, tab)
-                for i, tab in enumerate(self._all_tabs)
-                if tab.get("is_compulsory", False) and tab.get("status") != "done"
-            }
+        self._selected_tab_keys = {self._tab_key(i, self._all_tabs[i]) for i in pending_compulsory}
         compulsory_count = sum(1 for t in self._all_tabs if t.get("is_compulsory", False))
         self.gui_log_queue.put(
             f"必修: {compulsory_count}, 选修: {len(self._all_tabs) - compulsory_count}, "
-            f"已完成: {done_count}, 未完成必修: {len(pending_compulsory)}")
+            f"已完成: {done_count}, 待勾选必修: {len(pending_compulsory)}")
 
         groups = {}
         for i, tab in enumerate(self._all_tabs):
@@ -919,8 +951,8 @@ class FluentModernGUI(MSFluentWindow):
     def _elide(self, text: str, indent: int = 0) -> str:
         fm = QFontMetrics(getFont(self._task_text_px(), QFont.Weight.Medium))
         viewport = self.task_scroll.viewport().width() if getattr(self, "task_scroll", None) else 0
-        # 徽章 + 勾选框 + 状态胶囊约占 175px；viewport 还没完成布局时退回保守值
-        base = viewport - 175 if viewport >= 520 else 500
+        # 为必修、计分和完成状态留出空间。
+        base = viewport - 260 if viewport >= 520 else 500
         return fm.elidedText(text or "", Qt.ElideRight, max(180, base - indent))
 
     def _collapsible(self, header_row, body, indices):
@@ -1046,11 +1078,13 @@ class FluentModernGUI(MSFluentWindow):
         row_layout.addWidget(checkbox, 1)
 
         status_pill = self._task_status_label(tab)
+        grading_pill = self._task_grading_label(tab)
+        row_layout.addWidget(grading_pill, 0)
         row_layout.addWidget(status_pill, 0)
 
         self._tab_widget_items.append({
             "index": idx, "key": key, "checkbox": checkbox,
-            "row": row, "status": status_pill, "badge": badge,
+            "row": row, "status": status_pill, "badge": badge, "grading": grading_pill,
         })
         return row
 
@@ -1106,10 +1140,20 @@ class FluentModernGUI(MSFluentWindow):
         self._style_task_status(label)
         return label
 
+    def _task_grading_label(self, tab: Dict):
+        scored = tab.get('is_scored')
+        label = self._label(grading_text(scored), 12, '#f4f7fb', 600)
+        label.setProperty('labelKind', 'taskStatus')
+        label.setProperty('taskStatus', 'graded' if scored is True else 'unknown')
+        label.setToolTip('来自学习记录的计分标记；不计分任务仍可能影响学习进度和时长。'
+                         if scored is not None else '未能确认此任务的计分状态，批量选择时会保留。')
+        self._style_task_status(label)
+        return label
+
     def _style_task_status(self, label):
         """状态胶囊：底色/文字色固定深色主题配色。"""
         status = label.property("taskStatus") or "unknown"
-        palette = {"done": "#37d987", "doing": "#ffb25f", "todo": "#8fb2ff", "unknown": "#9fa8b4"}
+        palette = {"done": "#37d987", "doing": "#ffb25f", "todo": "#8fb2ff", "unknown": "#9fa8b4", "graded": "#8fb2ff"}
         color = palette.get(status, palette["unknown"])
         bg = "rgba(255,255,255,0.06)"
         size = (label.property("fontSize") or 12) * self.font_scale
@@ -1173,22 +1217,36 @@ class FluentModernGUI(MSFluentWindow):
             return True
         haystack = " ".join(str(tab.get(part) or "") for part in
                             ("l1_title", "section", "unit_label", "status_text"))
+        haystack += ' ' + grading_text(tab.get('is_scored'))
         return query in haystack.lower()
+
+    def _bulk_selectable(self, tab):
+        return selectable_task(tab, self.exclude_ungraded.isChecked())
+
+    def _on_grading_filter_changed(self, *_):
+        if not self.exclude_ungraded.isChecked():
+            return
+        removed = 0
+        for item in self._tab_widget_items:
+            if not self._bulk_selectable(self._all_tabs[item['index']]):
+                removed += int(item['checkbox'].isChecked())
+                self._set_task_selected(item, False)
+        self.gui_log_queue.put(f'已取消勾选 {removed} 项不计分任务；仍可单独手动勾选')
 
     def _on_select_all(self):
         for item in self._tab_widget_items:
-            self._set_task_selected(item, True)
+            self._set_task_selected(item, self._bulk_selectable(self._all_tabs[item['index']]))
 
     def _on_select_compulsory(self):
         for item in self._tab_widget_items:
             tab = self._all_tabs[item["index"]]
-            self._set_task_selected(item, tab.get("is_compulsory", False))
+            self._set_task_selected(item, tab.get("is_compulsory", False) and self._bulk_selectable(tab))
 
     def _on_select_pending(self):
         selected = 0
         for item in self._tab_widget_items:
             tab = self._all_tabs[item["index"]]
-            pending = tab.get("is_compulsory", False) and tab.get("status") != "done"
+            pending = tab.get("is_compulsory", False) and tab.get("status") != "done" and self._bulk_selectable(tab)
             self._set_task_selected(item, pending)
             selected += 1 if pending else 0
         self.gui_log_queue.put(f"已勾选未完成必修 {selected} 项")
@@ -1201,7 +1259,7 @@ class FluentModernGUI(MSFluentWindow):
         query = self.task_search.text().lower()
         for item in self._tab_widget_items:
             tab = self._all_tabs[item["index"]]
-            if self._task_matches_query(tab, query):
+            if self._task_matches_query(tab, query) and self._bulk_selectable(tab):
                 self._set_task_selected(item, True)
 
     def _on_search_key(self, *_):
