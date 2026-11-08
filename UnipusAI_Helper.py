@@ -285,6 +285,7 @@ class QuestionType(Enum):
     MATCHING = auto()  # 人物 A-F ↔ 陈述 的匹配题（空里只填字母）
     RECORD = auto()  # 跟读/朗读录音题（course-v2 播放器 oral-study 题型）
     LINK_MATCH = auto()  # 连线匹配（course-v3 播放器 React Flow 拖拽连线，text_match_group）
+    PARAGRAPH_MATCH = auto()  # 段落信息匹配（Skimming and scanning，空里只填段落字母 A-O）
 
 
 @dataclass
@@ -973,6 +974,7 @@ class QuestionParser:
     def __init__(self, driver):
         self.driver = driver
         self.strategies: List[QuestionParserStrategy] = [
+            ParagraphMatchingStrategy(),  # 段落信息匹配：条件最独特，放最前避免被通用策略抢走
             VideoStrategy(),
             AudioStrategy(),
             DiscussionBoardStrategy(),
@@ -3203,6 +3205,96 @@ class DropdownSelectStrategy(QuestionParserStrategy):
         )
 
 
+class ParagraphMatchingStrategy(QuestionParserStrategy):
+    """段落信息匹配题（Skimming and scanning）：读字母段落，给陈述填段落字母。
+
+    DOM（Section B Extensive reading / Skimming and scanning）：
+      .layout-material-container .component-htmlview ol[upper-alpha] > li  → 段落
+      .question-common-abs-textmatch .input-wrapper
+          > input.textbox                       → 每题一个字母输入框
+          > .component-htmlview p              → 陈述文本
+
+    FillInStrategy 见到 .layout-material-container 会直接放弃；MatchingStrategy
+    只认 .fe-scoop + A-F 人物题；两者都覆盖不到本结构，必须单独识别。
+    段落字母由 CSS `list-style-type: upper-alpha` 生成、不在 textContent 里，
+    所以要按 <li> 顺序补上 A./B./… 前缀，字母池随段落数动态生成。
+    """
+
+    REPLY_SELECTOR = '.question-common-abs-textmatch .input-wrapper'
+    INPUT_SELECTOR = REPLY_SELECTOR + ' input.textbox'
+
+    def can_parse(self, container, driver) -> bool:
+        return len(container.find_elements(
+            By.CSS_SELECTOR, self.INPUT_SELECTOR)) >= 2
+
+    @staticmethod
+    def _paragraph_material(driver, container) -> Dict:
+        try:
+            raw = driver.execute_script("""
+                var root = arguments[0];
+                var scope = root.querySelector('.layout-material-container') || root;
+                var out = [], letters = [];
+                var title = scope.querySelector('.component-htmlview > p');
+                if (title) out.push((title.innerText || title.textContent || '').trim());
+                var ol = scope.querySelector('ol');
+                if (ol) {
+                    var lis = [].filter.call(ol.children, function (n) {
+                        return n.tagName === 'LI';
+                    });
+                    for (var i = 0; i < lis.length; i++) {
+                        var L = String.fromCharCode(65 + i);
+                        letters.push(L);
+                        out.push(L + '. ' + (lis[i].innerText || lis[i].textContent || '').trim());
+                    }
+                }
+                if (!out.length) out.push((scope.innerText || scope.textContent || '').trim());
+                return {text: out.join('\\n'), letters: letters};
+            """, container)
+            if not isinstance(raw, dict):
+                return {'text': '', 'letters': []}
+            text = re.sub(r'\n{3,}', '\n\n', raw.get('text') or '').strip()
+            return {'text': text, 'letters': raw.get('letters') or []}
+        except Exception:
+            return {'text': '', 'letters': []}
+
+    @staticmethod
+    def _statements(driver, container) -> List[str]:
+        try:
+            raw = driver.execute_script("""
+                var root = arguments[0];
+                return [].map.call(
+                    root.querySelectorAll('.question-common-abs-textmatch .input-wrapper'),
+                    function (w) {
+                        var p = w.querySelector('.component-htmlview');
+                        return p ? (p.innerText || p.textContent || '').trim() : '';
+                    });
+            """, container) or []
+        except Exception:
+            return []
+        return [re.sub(r'\s+', ' ', str(s)).strip() for s in raw]
+
+    def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
+        inputs = container.find_elements(By.CSS_SELECTOR, self.INPUT_SELECTOR)
+        statements = self._statements(driver, container)
+        if len(statements) < len(inputs):
+            statements += [''] * (len(inputs) - len(statements))
+        material = self._paragraph_material(driver, container)
+        text = material.get('text') or ''
+        if directions:
+            text = '【题目要求】' + directions + '\n' + text
+        return Question(
+            number=question_number,
+            text=text,
+            q_type=QuestionType.PARAGRAPH_MATCH,
+            element=container,
+            inputs=inputs,
+            banked_options=material.get('letters') or [],
+            banked_blanks=[{'index': i, 'statement': s}
+                           for i, s in enumerate(statements[:len(inputs)])],
+            directions=directions,
+        )
+
+
 class MatchingStrategy(QuestionParserStrategy):
     """人物 A-F ↔ 陈述 的匹配题。
 
@@ -3807,6 +3899,7 @@ class PromptBuilder:
             QuestionType.LISTENING_CHOICE: self._build_listening_choice,
             QuestionType.VIDEO_CHOICE: self._build_video_choice,
             QuestionType.MATCHING: self._build_matching,
+            QuestionType.PARAGRAPH_MATCH: self._build_paragraph_match,
             QuestionType.LINK_MATCH: self._build_link_match,
         }
         return builders.get(q_type, self._build_unknown)
@@ -3843,6 +3936,26 @@ class PromptBuilder:
             "   请根据音频/视频转写判断每个人说了哪一句，",
             f"   只返回 {{空号}}.{{字母}}，例如 1.A 2.C（共 {len(q.banked_blanks)} 个空）",
             "   同一个字母可以在不同题里重复使用，但如果人数与陈述数相同则不要重复。",
+            "",
+        ])
+        return lines
+
+    def _build_paragraph_match(self, q: Question) -> List[str]:
+        letters = q.banked_options or list("ABCDEFGHIJKLMNO")
+        lines = [
+            f"{q.number}. 【段落信息匹配】阅读带字母的段落，判断每条陈述出自哪一段",
+            f"   可选段落字母: {' '.join(letters)}",
+            "   【阅读材料】",
+            (q.text or "")[:12000],
+            "",
+            "   【陈述】",
+        ]
+        for item in q.banked_blanks:
+            lines.append(f"   {item['index'] + 1}. {item.get('statement', '')}")
+        lines.extend([
+            "",
+            "   要求：每条陈述只填一个段落字母，不要写单词或句子；同一个段落可以被多条陈述重复选用。",
+            f"   只返回 空号.字母，例如 1.{letters[0]} 2.{letters[-1]}（共 {len(q.banked_blanks)} 个空）",
             "",
         ])
         return lines
@@ -4140,6 +4253,9 @@ class PromptBuilder:
         if QuestionType.MATCHING in type_counts:
             lines.append("匹配题: 每空一个字母，格式：1.B 2.A 3.F（不要写单词）")
 
+        if QuestionType.PARAGRAPH_MATCH in type_counts:
+            lines.append("段落信息匹配: 1.H 2.N ...（只填段落字母，同一段可重复）")
+
         if QuestionType.LINK_MATCH in type_counts:
             lines.append("连线匹配: 提示序号配选项字母，格式：1.D 2.C 3.A 4.B（不要写选项原文）")
 
@@ -4211,6 +4327,7 @@ class AnswerExecutor:
             QuestionType.MY_VOICE_TEXT: self._fill_text,
             QuestionType.LISTENING_FILL_IN: self._fill_listening_fill_in,
             QuestionType.MATCHING: self._fill_matching,
+            QuestionType.PARAGRAPH_MATCH: self._fill_paragraph_match,
             QuestionType.RECORD: self._answer_record,
         }
 
@@ -5100,6 +5217,49 @@ class AnswerExecutor:
             else:
                 print(f"\t空{idx + 1}: 写入 {letter} 失败")
         return success == total or (success > 0 and success == len(q.inputs))
+
+    def _fill_paragraph_match(self, q: Question, answer: str) -> bool:
+        """段落信息匹配：每个输入框只写一个段落字母。"""
+        total = len(q.inputs) or len(q.banked_blanks)
+        pool = [str(x).upper() for x in (q.banked_options or [])] or list("ABCDEFGHIJKLMNO")
+        letters = self._parse_paragraph_letters(answer, total, pool)
+        if not any(letters):
+            print(f"\t段落匹配没有解析出字母: {answer[:80]}")
+            return False
+        print(f"\t段落匹配答案: {letters}")
+        success = 0
+        for idx, inp in enumerate(q.inputs):
+            letter = letters[idx] if idx < len(letters) else ""
+            if not letter:
+                continue
+            try:
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", inp)
+                time.sleep(0.1)
+            except Exception:
+                pass
+            if self._fill_text_input_verified(inp, letter):
+                success += 1
+            else:
+                print(f"\t空{idx + 1}: 写入 {letter} 失败")
+        return success == total
+
+    @staticmethod
+    def _parse_paragraph_letters(answer: str, total: int, pool: List[str]) -> List[str]:
+        """解析 1.H 2.N 形式的答案；字母池由段落数决定，支持 A-Z 与重复使用。"""
+        text = (answer or "").upper()
+        valid = set(pool)
+        found = {}
+        for num, letter in re.findall(
+                r'(?:^|[\s,;，；])(\d{1,2})\s*[.、:：)）=\-]?\s*([A-Z])(?![A-Z])', text):
+            idx = int(num) - 1
+            if 0 <= idx < total and letter in valid:
+                found.setdefault(idx, letter)
+        if found:
+            return [found.get(i, "") for i in range(total)]
+        seq = [c for c in re.findall(r'(?<![A-Z])([A-Z])(?![A-Z])', text)
+               if c in valid]
+        return (seq + [""] * total)[:total]
 
     @staticmethod
     def _parse_matching_letters(answer: str, total: int, pool: List[str]) -> List[str]:
