@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     CardWidget,
     CheckBox,
+    ComboBox,
     FluentIcon as FIF,
     InfoBar,
     InfoBarPosition,
@@ -54,18 +55,72 @@ DEFAULT_CONFIG = {
     "tts_engine": "auto",
     "tts_voice": "",
     "tts_proxy": "",
+    # 提交前停留：非听力题 1 分半 ± 30 秒；听力题 = 音频时长 + 10~20 秒
+    "hold_enabled": True,
+    "hold_normal_seconds": 90,
+    "hold_normal_jitter": 30,
+    "hold_listening_pad_min": 10,
+    "hold_listening_pad_max": 20,
+    "hold_listening_fallback": 120,
+    "audio_probe_timeout": 15,
+    # 界面默认主题：dark / light / system
+    "default_theme": "dark",
 }
 
-PALETTE = {
-    "bg": "#17191d",
-    "panel": "#202328",
-    "panel_border": "#2c3138",
-    "top": "#202328",
-    "input": "#14171b",
-    "input_border": "#303640",
-    "text": "#f4f7fb",
-    "muted": "#a7b0bb",
+# 深色 / 浅色两套配色，按配置里的 default_theme 选用
+PALETTES = {
+    "dark": {
+        "bg": "#17191d",
+        "panel": "#202328",
+        "panel_border": "#2c3138",
+        "top": "#202328",
+        "input": "#14171b",
+        "input_border": "#303640",
+        "text": "#f4f7fb",
+        "muted": "#a7b0bb",
+    },
+    "light": {
+        "bg": "#f3f6fa",
+        "panel": "#ffffff",
+        "panel_border": "#dfe5ec",
+        "top": "#ffffff",
+        "input": "#ffffff",
+        "input_border": "#cbd5e1",
+        "text": "#1f2933",
+        "muted": "#667085",
+    },
 }
+
+# 当前生效配色，启动时按配置切换
+PALETTE = dict(PALETTES["dark"])
+
+
+# 下拉框顺序 -> 配置取值的映射，与 _build_form_area 里的 addItem 顺序保持一致
+_THEME_VALUES = ("dark", "light", "system")
+
+
+def resolve_theme(raw) -> str:
+    """把配置里的 default_theme 归一化成 dark / light / system。"""
+    value = str(raw or "").strip().lower()
+    if value in ("light", "白", "浅色", "bright", "day"):
+        return "light"
+    if value in ("system", "auto", "跟随系统"):
+        return "system"
+    return "dark"
+
+
+def palette_is_dark(theme: str) -> bool:
+    """system 时读系统配色明度，其余直接按取值判断。"""
+    if theme == "light":
+        return False
+    if theme == "system":
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                return app.palette().color(app.palette().Window).lightness() < 128
+        except Exception:
+            pass
+    return True
 
 
 def load_config():
@@ -99,10 +154,18 @@ def save_config(data: dict):
 
 class ConfigEditor(QWidget):
     def __init__(self):
+        # 高 DPI 必须在 QApplication 创建前设置（4K 屏 200% 缩放）
+        from dpi_helper import enable_high_dpi
+        enable_high_dpi()
         self._qt_app = QApplication.instance() or QApplication(sys.argv)
-        setTheme(Theme.DARK)
-        super().__init__()
         self.cfg = load_config()
+        # 主题跟着配置走：深色就用深色 palette，浅色反之，跟随系统则读系统明度
+        global PALETTE
+        self.theme_mode = resolve_theme(self.cfg.get("default_theme"))
+        self.is_dark = palette_is_dark(self.theme_mode)
+        PALETTE = dict(PALETTES["dark" if self.is_dark else "light"])
+        setTheme(Theme.DARK if self.is_dark else Theme.LIGHT)
+        super().__init__()
         self.entries = {}
         self._drag_active = False
         self._drag_position = QPoint()
@@ -113,7 +176,19 @@ class ConfigEditor(QWidget):
     def _init_window(self):
         self.setObjectName("windowRoot")
         self.setWindowTitle("UnipusAI Helper 配置编辑器")
-        self.resize(820, 860)
+        # 按屏幕可用区域比例自适应，避免 4K 下窗口偏小、1080p 下超出屏幕
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is not None and avail.width() > 0:
+            width = max(700, min(1000, int(avail.width() * 0.58)))
+            height = max(720, min(1100, int(avail.height() * 0.88)))
+            self.resize(width, height)
+            self.move(
+                avail.x() + (avail.width() - width) // 2,
+                avail.y() + (avail.height() - height) // 2,
+            )
+        else:
+            self.resize(820, 860)
         self.setMinimumSize(700, 720)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         if sys.platform == "darwin":
@@ -182,6 +257,12 @@ class ConfigEditor(QWidget):
         self._add_text_row(form, "tts_engine", "录音题 TTS 引擎", "auto / edge / sapi / off")
         self._add_text_row(form, "tts_voice", "TTS 音色（可选）", "留空用默认英语音色，如 en-US-AriaNeural")
         self._add_text_row(form, "tts_proxy", "TTS 代理（可选）", "走代理时填，如 http://127.0.0.1:7890")
+        self._add_text_row(form, "hold_normal_seconds", "普通题停留(秒)", "默认 90，即 1 分半")
+        self._add_text_row(form, "hold_normal_jitter", "普通题抖动(秒)", "默认 30，即 ±30 秒")
+        self._add_text_row(form, "hold_listening_pad_min", "听力题额外停留(最小秒)", "默认 10，音频时长之外再加")
+        self._add_text_row(form, "hold_listening_pad_max", "听力题额外停留(最大秒)", "默认 20")
+        self._add_text_row(form, "hold_listening_fallback", "听力题兜底停留(秒)", "取不到音频时长时用，默认 120")
+        self._add_text_row(form, "audio_probe_timeout", "ffprobe 超时(秒)", "默认 15")
         self._add_text_row(
             form,
             "token_full",
@@ -194,6 +275,26 @@ class ConfigEditor(QWidget):
         self.debug_check.setChecked(bool(self.cfg.get("debug_mode", False)))
         self.entries["debug_mode"] = self.debug_check
         form.addRow(self._field_label("调试模式"), self.debug_check)
+
+        self.hold_check = CheckBox("提交前停留（模拟真人答题耗时）")
+        self.hold_check.setChecked(bool(self.cfg.get("hold_enabled", True)))
+        self.entries["hold_enabled"] = self.hold_check
+        form.addRow(self._field_label("停留开关"), self.hold_check)
+
+        self.theme_combo = ComboBox()
+        theme_choices = [("深色", "dark"), ("浅色", "light"), ("跟随系统", "system")]
+        for label, _value in theme_choices:
+            self.theme_combo.addItem(label)
+        current_theme = resolve_theme(self.cfg.get("default_theme"))
+        for index, (_label, value) in enumerate(theme_choices):
+            if value == current_theme:
+                self.theme_combo.setCurrentIndex(index)
+                break
+        self.theme_combo.setToolTip(
+            "软件启动时使用的界面主题。主界面顶栏的深色/浅色开关仍可临时切换，"
+            "但每次启动都以这里的配置为准。")
+        self.entries["default_theme"] = self.theme_combo
+        form.addRow(self._field_label("默认主题"), self.theme_combo)
         content_layout.addWidget(form_card)
 
         action_row = QHBoxLayout()
@@ -320,8 +421,10 @@ class ConfigEditor(QWidget):
     def _on_save(self):
         data = {}
         for key, entry in self.entries.items():
-            if key == "debug_mode":
+            if key in ("debug_mode", "hold_enabled"):
                 data[key] = entry.isChecked()
+            elif isinstance(entry, ComboBox):
+                data[key] = _THEME_VALUES[max(0, entry.currentIndex())]
             elif isinstance(entry, PlainTextEdit):
                 data[key] = entry.toPlainText().strip()
             else:
@@ -336,6 +439,23 @@ class ConfigEditor(QWidget):
             data["temperature"] = float(data["temperature"])
         except Exception:
             data["temperature"] = 0.3
+
+        for key, default in (
+            ("hold_normal_seconds", 90.0),
+            ("hold_normal_jitter", 30.0),
+            ("hold_listening_pad_min", 10.0),
+            ("hold_listening_pad_max", 20.0),
+            ("hold_listening_fallback", 120.0),
+            ("audio_probe_timeout", 15.0),
+        ):
+            try:
+                data[key] = float(data[key])
+            except Exception:
+                data[key] = default
+
+        if data["hold_listening_pad_max"] < data["hold_listening_pad_min"]:
+            data["hold_listening_pad_min"], data["hold_listening_pad_max"] = (
+                data["hold_listening_pad_max"], data["hold_listening_pad_min"])
 
         try:
             save_config(data)
