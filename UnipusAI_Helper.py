@@ -975,6 +975,7 @@ class QuestionParser:
         self.driver = driver
         self.strategies: List[QuestionParserStrategy] = [
             ParagraphMatchingStrategy(),  # 段落信息匹配：条件最独特，放最前避免被通用策略抢走
+            VocabularyReadAloudStrategy(),  # 词汇跟读卡片：优先于 RecordStrategy
             VideoStrategy(),
             AudioStrategy(),
             DiscussionBoardStrategy(),
@@ -1165,6 +1166,17 @@ class QuestionParser:
         if self._is_discussion_board_page():
             print("     检测到讨论板页面，跳过")
             return []
+
+        # New words / Phrases and expressions 词汇跟读卡片：结构独特，必须优先于
+        # _find_record_containers()，否则会被 .button-record 兜底选择器收成录音题。
+        try:
+            vocab_containers = [c for c in self.driver.find_elements(
+                By.CSS_SELECTOR, VOCAB_READ_ALOUD_SELECTOR) if c.is_displayed()]
+        except Exception:
+            vocab_containers = []
+        if vocab_containers:
+            print(f"     找到 {len(vocab_containers)} 个词汇跟读页")
+            return vocab_containers
 
         # 跟读/朗读录音题：每句右侧是麦克风按钮，先按行收容器，避免落到通用判定里
         record_containers = self._find_record_containers()
@@ -1860,6 +1872,87 @@ class MyVoiceTextStrategy(QuestionParserStrategy):
         return ""
 
 
+# New words / Phrases and expressions：词汇跟读卡片（course 播放器 swiper）。
+# 页面上已经给出要读的单词/短语和 1.2 秒原声，不需要 AI 生成任何内容。
+VOCAB_READ_ALOUD_SELECTOR = '.vocabulary-wrapper'
+
+# 从当前 active 卡片读词、原声、进度。swiper 只渲染 active slide，
+# 其余是 "vocabulary card" 占位，所以每翻一张都要重新抓一次。
+VOCAB_CARD_JS = r"""
+return (function (root) {
+  const scope = root || document;
+  const wrapper = (scope.matches && scope.matches('.vocabulary-wrapper'))
+      ? scope
+      : (scope.querySelector('.vocabulary-wrapper') ||
+         document.querySelector('.vocabulary-wrapper'));
+  if (!wrapper) { return {}; }
+  const slide = wrapper.querySelector('.swiper-slide-active') ||
+                wrapper.querySelector('.swiper-vocabulary-slide');
+  if (!slide) { return {}; }
+  const txt = function (sel) {
+    const n = slide.querySelector(sel);
+    return n ? (n.innerText || n.textContent || '').trim() : '';
+  };
+  const audioNode = slide.querySelector('.soundWrap .question-audio audio, .soundWrap audio');
+  const raw = audioNode
+      ? (audioNode.getAttribute('src') || audioNode.getAttribute('title') || '')
+      : '';
+  let duration = 0;
+  const dm = raw.match(/duration=([0-9.]+)/);
+  if (dm) { duration = parseFloat(dm[1]); }
+  let name = '';
+  const nm = raw.match(/name=([^&]*)/);
+  if (nm) { try { name = decodeURIComponent(nm[1]); } catch (e) { name = nm[1]; } }
+  let index = 0, total = 0;
+  const spans = wrapper.querySelectorAll('.progressBar .ratio span');
+  if (spans.length >= 2) {
+    index = parseInt((spans[0].innerText || spans[0].textContent || '').trim(), 10) || 0;
+    total = parseInt((spans[1].innerText || spans[1].textContent || '')
+        .replace(/[^0-9]/g, ''), 10) || 0;
+  }
+  return {
+    word: txt('.vocWord .component-htmlview'),
+    definition: txt('.explanations'),
+    audio: raw,
+    duration: duration,
+    name: name,
+    index: index,
+    total: total,
+    hasButton: !!slide.querySelector('.ucomp-recorder .button-record, .button-record')
+  };
+})(arguments[0]);
+"""
+
+# 翻到下一张：优先用 Swiper 实例 API（页面带 swiper-no-swiping，手势不可用），
+# 再退到 next 按钮 / 挂在 window 上的实例。
+VOCAB_NEXT_JS = r"""
+return (function (root) {
+  const scope = root || document;
+  const wrapper = (scope.matches && scope.matches('.vocabulary-wrapper'))
+      ? scope
+      : (scope.querySelector('.vocabulary-wrapper') ||
+         document.querySelector('.vocabulary-wrapper'));
+  if (!wrapper) { return ''; }
+  const sw = wrapper.querySelector('.swiper-container') ||
+             wrapper.querySelector('[class*="swiper-container"]');
+  if (sw && sw.swiper && typeof sw.swiper.slideNext === 'function') {
+    sw.swiper.slideNext();
+    return 'swiper';
+  }
+  const btn = wrapper.querySelector(
+      '.swiper-button-next, [class*="vocNext"], [class*="next-btn"], [class*="nextBtn"]');
+  if (btn) { btn.click(); return 'button'; }
+  for (const key of ['vocSwiper', 'swiper', 'mySwiper']) {
+    const inst = window[key];
+    if (inst && typeof inst.slideNext === 'function') {
+      inst.slideNext();
+      return 'window.' + key;
+    }
+  }
+  return '';
+})(arguments[0]);
+"""
+
 RECORD_BUTTON_SELECTOR = '.record-icon.button-record'
 
 # 兜底选择器：Exercise 2 那种「限时自由作答」的录音按钮不一定带 button-record，
@@ -2401,6 +2494,67 @@ $synth.SetOutputToWaveFile($env:UNIPUS_TTS_OUT)
 $synth.Speak($text)
 $synth.Dispose()
 """
+
+
+class VocabularyReadAloudStrategy(QuestionParserStrategy):
+    """New words / Phrases and expressions 词汇跟读卡片。
+
+    DOM：.vocabulary-wrapper > .vocContainer .swiper-container > .swiper-slide-active，
+    词在 .vocWord .component-htmlview，原声在 .soundWrap .question-audio audio，
+    按钮是 .ucomp-recorder .button-record，进度在 .progressBar .ratio。
+
+    这页的答案就是卡片上印着的单词/短语，且自带 1.2 秒原声，因此
+    record_items 同时带 url 与 text，让 needs_speech_script 恒为 False，
+    完全不触发「AI 写口语稿 + TTS 录 90 秒」那条链路。
+    """
+
+    def can_parse(self, container, driver) -> bool:
+        try:
+            if container.find_elements(By.CSS_SELECTOR, VOCAB_READ_ALOUD_SELECTOR):
+                return True
+            return bool(container.find_elements(By.CSS_SELECTOR, '.vocContainer .vocWord'))
+        except Exception:
+            return False
+
+    def parse(self, container, driver, question_number: int,
+              directions: str = "") -> Optional[Question]:
+        try:
+            info = driver.execute_script(VOCAB_CARD_JS, container) or {}
+        except Exception:
+            info = {}
+        word = (info.get('word') or '').strip()
+        raw = info.get('audio') or ''
+        url = raw.split('#')[0].strip()
+        item = {
+            'index': 0,
+            'url': url,
+            'name': word or (info.get('name') or ''),
+            'duration': float(info.get('duration') or 0),
+            'text': word,
+            'lines': [],
+            'element': None,
+            'needs_tts': not url,
+            'vocab': True,
+            'vocab_total': int(info.get('total') or 0),
+            'vocab_index': int(info.get('index') or 0),
+        }
+        text = word or '词汇跟读'
+        definition = (info.get('definition') or '').strip()
+        if definition:
+            text += '\n' + definition[:200]
+        if directions:
+            text = directions.strip() + '\n' + text
+        print(f"    词汇跟读卡片: {word or '(未读到)'} | "
+              f"原声 {'有' if url else '无'} | "
+              f"进度 {item['vocab_index']}/{item['vocab_total']}")
+        return Question(
+            number=question_number,
+            text=text[:1200],
+            q_type=QuestionType.RECORD,
+            element=container,
+            directions=directions,
+            record_items=[item],
+        )
 
 
 class RecordStrategy(QuestionParserStrategy):
@@ -4731,6 +4885,8 @@ class AnswerExecutor:
         if not items:
             print("\t没有找到录音条目")
             return False
+        if items[0].get('vocab'):
+            return self._answer_vocabulary_read_aloud(q)
 
         self._dismiss_record_popup()
         probe = self.driver.execute_async_script(RECORD_MIC_JS, "", self.RECORD_LEAD_PAD, 0)
@@ -4765,6 +4921,123 @@ class AnswerExecutor:
         done = sum(1 for i in range(len(items)) if self._row_done(q, i))
         print(f"\t录音题完成 {done}/{len(items)} 条")
         return done == len(items)
+
+    def _answer_vocabulary_read_aloud(self, q: Question) -> bool:
+        """词汇跟读页：逐张卡片用页面原声冒充麦克风，不调用 AI。
+
+        swiper 只渲染 active slide，所以每轮重新抓一次卡片信息，录完调
+        slideNext()，以 progressBar 的序号变化确认翻页成功。
+        """
+        first = (q.record_items or [{}])[0]
+        total = int(first.get('vocab_total') or 0) or 0
+        if total <= 0:
+            total = 21
+        print(f"\t词汇跟读：共 {total} 张卡片，使用页面原声逐张跟读（不调用 AI）")
+
+        probe = self.driver.execute_async_script(
+            RECORD_MIC_JS, "", self.RECORD_LEAD_PAD, 0)
+        if not probe or not probe.get("ok"):
+            print(f"\t录音注入初始化失败: {probe}")
+            return False
+
+        stop = getattr(self, 'stop_requested', None)
+        done = 0
+        seen = set()
+        for step in range(total + 2):
+            if stop is not None and hasattr(stop, 'is_set') and stop.is_set():
+                break
+            try:
+                info = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+            except Exception as exc:
+                print(f"\t读取卡片失败: {str(exc)[:60]}")
+                break
+            word = (info.get('word') or '').strip()
+            if not word:
+                break
+            index = int(info.get('index') or 0) or (step + 1)
+            if index in seen and step > 0:
+                break  # 卡片没有翻动，避免在同一张上重复录音
+            seen.add(index)
+
+            ok = self._record_vocab_card(q, info)
+            if ok:
+                done += 1
+            print(f"\t词汇跟读 [{index}/{total}] {word} -> {'OK' if ok else '失败'}")
+            if index >= total:
+                break
+
+            try:
+                moved = self.driver.execute_script(VOCAB_NEXT_JS, q.element)
+            except Exception:
+                moved = ''
+            if not moved:
+                print("\t找不到下一张卡片的切换方式，停止")
+                break
+            changed = False
+            for _ in range(24):
+                time.sleep(0.25)
+                try:
+                    nxt = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+                except Exception:
+                    continue
+                if (int(nxt.get('index') or 0) != index
+                        or (nxt.get('word') or '').strip() != word):
+                    changed = True
+                    break
+            if not changed:
+                print("\t卡片没有切换，停止")
+                break
+
+        print(f"\t词汇跟读完成 {done}/{total} 张")
+        return done > 0
+
+    def _record_vocab_card(self, q: Question, info: Dict) -> bool:
+        """单张卡片：下载页面原声（无原声时 TTS 读该词）→ 注入 → 点录音/停止。
+
+        这里刻意不走 _record_one_item 的分数轮询：本页分数节点是
+        .practice-score .score 且可能带历史成绩，历史 <audio> 也会被
+        RECORD_ROW_STATE_JS 误判成「已录制」。改为按音频时长时间驱动。
+        """
+        word = (info.get('word') or '').strip()
+        raw = info.get('audio') or ''
+        url = raw.split('#')[0].strip()
+        duration = float(info.get('duration') or 0) or 1.2
+        data = (self._download_record_audio(url) if url
+                else self._speech_audio(word, 0))
+        if not data:
+            print(f"\t{word}: {'原声下载失败' if url else 'TTS 生成失败'}")
+            return False
+
+        payload = base64.b64encode(data).decode()
+        state = self.driver.execute_async_script(
+            RECORD_MIC_JS, payload, self.RECORD_LEAD_PAD, 0)
+        if not state or not state.get('ok'):
+            print(f"\t{word}: 音频注入失败 {state}")
+            return False
+        clip = float(state.get('dur') or 0) or (duration + self.RECORD_LEAD_PAD)
+
+        try:
+            slide = self.driver.find_element(By.CSS_SELECTOR, '.swiper-slide-active')
+        except Exception:
+            slide = q.element
+        buttons = find_record_buttons(self.driver, slide)
+        if not buttons:
+            print(f"\t{word}: 没找到录音按钮")
+            return False
+        button = buttons[0]
+        try:
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", button)
+        except Exception:
+            pass
+        time.sleep(0.2)
+        if not WebDriverHelper.safe_click(self.driver, button):
+            print(f"\t{word}: 点击录音失败")
+            return False
+        time.sleep(clip + 0.8)
+        WebDriverHelper.safe_click(self.driver, button)  # 再点一次 = 停止
+        time.sleep(1.5)  # 等平台上传
+        return True
 
     def _row_state(self, q: Question, idx: int) -> Optional[dict]:
         try:
