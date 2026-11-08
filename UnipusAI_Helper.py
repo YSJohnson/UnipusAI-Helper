@@ -1910,6 +1910,9 @@ return (function (root) {
     total = parseInt((spans[1].innerText || spans[1].textContent || '')
         .replace(/[^0-9]/g, ''), 10) || 0;
   }
+  const button = slide.querySelector('.ucomp-recorder .button-record, .button-record');
+  const recordings = Array.from(slide.querySelectorAll('.practice-recorder audio'))
+      .map(a => a.getAttribute('src') || '').filter(Boolean);
   return {
     word: txt('.vocWord .component-htmlview'),
     definition: txt('.explanations'),
@@ -1918,7 +1921,9 @@ return (function (root) {
     name: name,
     index: index,
     total: total,
-    hasButton: !!slide.querySelector('.ucomp-recorder .button-record, .button-record')
+    hasButton: !!button,
+    recording: !!(button && button.querySelector('svg rect[fill="currentColor"]')),
+    recordings: recordings
   };
 })(arguments[0]);
 """
@@ -1926,7 +1931,7 @@ return (function (root) {
 # 翻到下一张：优先用 Swiper 实例 API（页面带 swiper-no-swiping，手势不可用），
 # 再退到 next 按钮 / 挂在 window 上的实例。
 VOCAB_NEXT_JS = r"""
-return (function (root) {
+return (function (root, reset) {
   const scope = root || document;
   const wrapper = (scope.matches && scope.matches('.vocabulary-wrapper'))
       ? scope
@@ -1935,22 +1940,26 @@ return (function (root) {
   if (!wrapper) { return ''; }
   const sw = wrapper.querySelector('.swiper-container') ||
              wrapper.querySelector('[class*="swiper-container"]');
-  if (sw && sw.swiper && typeof sw.swiper.slideNext === 'function') {
-    sw.swiper.slideNext();
+  const move = function (inst) {
+    const method = reset ? 'slideTo' : 'slideNext';
+    if (!inst || typeof inst[method] !== 'function') { return false; }
+    if (reset) { inst.slideTo(0); } else { inst.slideNext(); }
+    return true;
+  };
+  if (sw && move(sw.swiper)) {
     return 'swiper';
   }
-  const btn = wrapper.querySelector(
+  const btn = !reset && wrapper.querySelector(
       '.swiper-button-next, [class*="vocNext"], [class*="next-btn"], [class*="nextBtn"]');
   if (btn) { btn.click(); return 'button'; }
   for (const key of ['vocSwiper', 'swiper', 'mySwiper']) {
     const inst = window[key];
-    if (inst && typeof inst.slideNext === 'function') {
-      inst.slideNext();
+    if (move(inst)) {
       return 'window.' + key;
     }
   }
   return '';
-})(arguments[0]);
+})(arguments[0], arguments[1]);
 """
 
 RECORD_BUTTON_SELECTOR = '.record-icon.button-record'
@@ -4462,9 +4471,10 @@ class AnswerExecutor:
     ANSWER_LABEL_PATTERN = r'(?:My voice文字作答|简答题|选词/选择填空|填空题|答案|选词填空|翻译|Answer)'
     NUMBER_PREFIX_PATTERN = r'(?:空\s*)?\d+\s*[.、:：\)\]]|Blank\s*\d+\s*[.、:：\)\]]'
 
-    def __init__(self, driver, tts: Optional["TTSEngine"] = None):
+    def __init__(self, driver, tts: Optional["TTSEngine"] = None, stop_requested=None):
         self.driver = driver
         self.tts = tts
+        self.stop_requested = stop_requested if stop_requested is not None else threading.Event()
 
     def execute(self, question: Question, answer: str) -> bool:
         executors = {
@@ -4926,44 +4936,47 @@ class AnswerExecutor:
         """词汇跟读页：逐张卡片用页面原声冒充麦克风，不调用 AI。
 
         swiper 只渲染 active slide，所以每轮重新抓一次卡片信息，录完调
-        slideNext()，以 progressBar 的序号变化确认翻页成功。
+        slideNext()，等待下一张真实内容挂载；整组上传完成后才返回成功。
         """
+        if self.stop_requested.is_set():
+            return False
         first = (q.record_items or [{}])[0]
         total = int(first.get('vocab_total') or 0) or 0
         if total <= 0:
-            total = 21
+            print("\t未读到词汇卡片总数，停止以免遗漏卡片")
+            return False
         print(f"\t词汇跟读：共 {total} 张卡片，使用页面原声逐张跟读（不调用 AI）")
 
+        self._dismiss_record_popup()
         probe = self.driver.execute_async_script(
             RECORD_MIC_JS, "", self.RECORD_LEAD_PAD, 0)
         if not probe or not probe.get("ok"):
             print(f"\t录音注入初始化失败: {probe}")
             return False
 
-        stop = getattr(self, 'stop_requested', None)
+        # 快速处理可能从中间卡片开始；先回第一张，确保前面的卡片也会处理。
+        try:
+            current = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+            if int(current.get('index') or 0) != 1:
+                if not self.driver.execute_script(VOCAB_NEXT_JS, q.element, True):
+                    print("\t无法返回第一张词汇卡片，停止")
+                    return False
+        except Exception:
+            return False
+
         done = 0
-        seen = set()
-        for step in range(total + 2):
-            if stop is not None and hasattr(stop, 'is_set') and stop.is_set():
-                break
-            try:
-                info = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
-            except Exception as exc:
-                print(f"\t读取卡片失败: {str(exc)[:60]}")
+        for index in range(1, total + 1):
+            info = self._wait_vocab_card(q, index)
+            if not info:
+                print(f"\t第 {index} 张卡片尚未就绪，停止")
                 break
             word = (info.get('word') or '').strip()
-            if not word:
-                break
-            index = int(info.get('index') or 0) or (step + 1)
-            if index in seen and step > 0:
-                break  # 卡片没有翻动，避免在同一张上重复录音
-            seen.add(index)
-
             ok = self._record_vocab_card(q, info)
-            if ok:
-                done += 1
             print(f"\t词汇跟读 [{index}/{total}] {word} -> {'OK' if ok else '失败'}")
-            if index >= total:
+            if not ok or self.stop_requested.is_set():
+                break
+            done += 1
+            if index == total:
                 break
 
             try:
@@ -4973,31 +4986,62 @@ class AnswerExecutor:
             if not moved:
                 print("\t找不到下一张卡片的切换方式，停止")
                 break
-            changed = False
-            for _ in range(24):
-                time.sleep(0.25)
-                try:
-                    nxt = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
-                except Exception:
-                    continue
-                if (int(nxt.get('index') or 0) != index
-                        or (nxt.get('word') or '').strip() != word):
-                    changed = True
-                    break
-            if not changed:
-                print("\t卡片没有切换，停止")
-                break
 
         print(f"\t词汇跟读完成 {done}/{total} 张")
-        return done > 0
+        return done == total and not self.stop_requested.is_set()
+
+    def _wait_vocab_card(self, q: Question, index: int) -> Optional[Dict]:
+        """进度和卡片内容都就绪后才开始录音，避免对懒加载占位作答。"""
+        for _ in range(24):
+            if self.stop_requested.is_set():
+                return None
+            try:
+                info = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+                if (int(info.get('index') or 0) == index
+                        and (info.get('word') or '').strip() and info.get('hasButton')):
+                    return info
+            except Exception:
+                pass
+            if self.stop_requested.wait(0.25):
+                return None
+        return None
+
+    def _vocab_record_buttons(self, q: Question) -> List[Any]:
+        try:
+            slide = q.element.find_element(By.CSS_SELECTOR, '.swiper-slide-active')
+            return find_record_buttons(self.driver, slide)
+        except Exception:
+            return []
+
+    def _wait_vocab_upload(self, q: Question, baseline: Dict,
+                           timeout: float = 30.0) -> bool:
+        """只接受当前卡片本次上传的新地址，原声、blob 和历史回放均不算完成。"""
+        previous = set(baseline.get('recordings') or [])
+        for _ in range(max(1, int(timeout * 4))):
+            if self.stop_requested.is_set():
+                return False
+            try:
+                info = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+                if info and (info.get('index') != baseline.get('index')
+                             or info.get('word') != baseline.get('word')):
+                    return False
+                uploaded = any(src.startswith(('http://', 'https://')) and src not in previous
+                               for src in info.get('recordings') or [])
+                if uploaded and not info.get('recording'):
+                    return True
+            except Exception:
+                pass
+            if self.stop_requested.wait(0.25):
+                return False
+        return False
 
     def _record_vocab_card(self, q: Question, info: Dict) -> bool:
         """单张卡片：下载页面原声（无原声时 TTS 读该词）→ 注入 → 点录音/停止。
 
-        这里刻意不走 _record_one_item 的分数轮询：本页分数节点是
-        .practice-score .score 且可能带历史成绩，历史 <audio> 也会被
-        RECORD_ROW_STATE_JS 误判成「已录制」。改为按音频时长时间驱动。
+        录制前保存历史回放地址，停止后等本次上传产生新地址再翻卡。
         """
+        if self.stop_requested.is_set():
+            return False
         word = (info.get('word') or '').strip()
         raw = info.get('audio') or ''
         url = raw.split('#')[0].strip()
@@ -5017,10 +5061,12 @@ class AnswerExecutor:
         clip = float(state.get('dur') or 0) or (duration + self.RECORD_LEAD_PAD)
 
         try:
-            slide = self.driver.find_element(By.CSS_SELECTOR, '.swiper-slide-active')
+            baseline = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
         except Exception:
-            slide = q.element
-        buttons = find_record_buttons(self.driver, slide)
+            return False
+        if baseline.get('index') != info.get('index') or baseline.get('word') != word:
+            return False
+        buttons = self._vocab_record_buttons(q)
         if not buttons:
             print(f"\t{word}: 没找到录音按钮")
             return False
@@ -5030,13 +5076,22 @@ class AnswerExecutor:
                 "arguments[0].scrollIntoView({block: 'center'});", button)
         except Exception:
             pass
-        time.sleep(0.2)
+        if self.stop_requested.wait(0.2):
+            return False
         if not WebDriverHelper.safe_click(self.driver, button):
             print(f"\t{word}: 点击录音失败")
             return False
-        time.sleep(clip + 0.8)
-        WebDriverHelper.safe_click(self.driver, button)  # 再点一次 = 停止
-        time.sleep(1.5)  # 等平台上传
+        interrupted = self.stop_requested.wait(clip + 0.8)
+        # React 可能替换按钮；停止时重新定位。取消任务也须结束正在进行的录音。
+        buttons = self._vocab_record_buttons(q)
+        if not buttons or not WebDriverHelper.safe_click(self.driver, buttons[0]):
+            print(f"\t{word}: 点击停止失败")
+            return False
+        if interrupted or self.stop_requested.is_set():
+            return False
+        if not self._wait_vocab_upload(q, baseline):
+            print(f"\t{word}: 未确认本次录音上传完成")
+            return False
         return True
 
     def _row_state(self, q: Question, idx: int) -> Optional[dict]:
@@ -6901,8 +6956,7 @@ class PublishAnswerExecutor(AnswerExecutor):
     last_rejection = ''  # 最近一次提交被平台拒绝时的提示文案
 
     def __init__(self, driver, tts=None, stop_requested=None):
-        super().__init__(driver, tts=tts)
-        self.stop_requested = stop_requested or threading.Event()
+        super().__init__(driver, tts=tts, stop_requested=stop_requested)
 
     def play_material(self, media, timeout: float = 20.0) -> bool:
         """实际播放材料至少三秒；短音频须播放到结束。"""
@@ -8752,7 +8806,8 @@ class AISolver:
             getattr(config, 'tts_proxy', '') or '',
         )
         self.prompt_builder = PromptBuilder(self.ai_client, vocab_store=self.vocab_store)
-        self.executor = AnswerExecutor(driver, tts=self.tts_engine)
+        self.executor = AnswerExecutor(driver, tts=self.tts_engine,
+                                       stop_requested=self.stop_requested)
         self.publish_parser = PublishQuestionParser(driver)
         self.publish_executor = PublishAnswerExecutor(driver, tts=self.tts_engine,
                                                       stop_requested=self.stop_requested)

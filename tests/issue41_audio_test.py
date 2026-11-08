@@ -47,6 +47,15 @@ class AudioLogicTests(unittest.TestCase):
                          record_items=[{'url': 'a'}, {'url': 'b'}])
         self.assertFalse(executor._answer_record(q))
 
+    def test_solver_shares_stop_event_with_both_executors(self):
+        config = Mock(tts_engine='off', tts_voice='', tts_proxy='')
+        with patch.object(app, 'OpenAICompatibleClient'), patch.object(app, 'VideoHandler'):
+            solver = app.AISolver(Mock(), config)
+        self.assertIs(solver.executor.stop_requested, solver.stop_requested)
+        self.assertIs(solver.publish_executor.stop_requested, solver.stop_requested)
+        solver.request_stop()
+        self.assertTrue(solver.executor.stop_requested.is_set())
+
     def test_preprocessing_skips_audio_only_page(self):
         solver = object.__new__(app.AISolver)
         solver.driver = Mock()
@@ -210,6 +219,107 @@ class AudioBrowserTests(unittest.TestCase):
         q = app.RecordStrategy().parse(root, self.driver, 1)
         self.assertEqual([item['url'] for item in q.record_items],
                          ['https://example.invalid/0.mp3', 'https://example.invalid/1.mp3'])
+
+    def vocabulary(self, index=1):
+        self.load('''<div class="vocabulary-wrapper">
+          <div class="progressBar"><div class="ratio"><span>1</span><span>/3</span></div></div>
+          <div class="vocContainer"><div class="swiper-container">
+            <div class="swiper-slide swiper-vocabulary-slide swiper-slide-active"></div>
+          </div></div></div>''')
+        self.driver.execute_script(r'''
+            const words = ['cognitive', 'census', 'a thirst for sth.'];
+            const slide = document.querySelector('.swiper-slide-active');
+            const progress = document.querySelector('.ratio span');
+            window.starts = []; window.stops = []; window.uploads = [];
+            window.premature = false; let current = arguments[0] - 1;
+            const button = recording => '<span class="record-fill-icon button-record" ' +
+                'style="display:inline-block;width:24px;height:24px"><svg>' +
+                (recording ? '<rect fill="currentColor"/>' : '<rect opacity="0"/>') +
+                '</svg></span>';
+            const render = () => {
+                slide.innerHTML = '<div class="vocWord"><div class="component-htmlview">' +
+                    words[current] + '</div></div><div class="soundWrap">' +
+                    '<div class="question-audio"><audio preload="none" src="' + arguments[1] +
+                    '"></audio></div></div><span class="practice-score"><span class="score">100</span></span>' +
+                    '<span class="practice-recorder"><div class="ucomp-recorder">' + button(false) +
+                    '</div><audio preload="none" src="https://example.invalid/old-' + current + '.mp3">' +
+                    '</audio></span>';
+            };
+            const show = (n, lazy) => {
+                current = n; progress.textContent = current + 1;
+                if (lazy) { slide.innerHTML = 'vocabulary card'; setTimeout(render, 50); }
+                else { render(); }
+            };
+            slide.addEventListener('click', event => {
+                const btn = event.target.closest('.button-record');
+                if (!btn) { return; }
+                const recording = !!btn.querySelector('rect[fill="currentColor"]');
+                slide.querySelector('.ucomp-recorder').innerHTML = button(!recording);
+                if (!recording) { window.starts.push(current + 1); return; }
+                window.stops.push(current + 1);
+                const card = current + 1;
+                const audio = slide.querySelector('.practice-recorder audio');
+                audio.src = 'blob:pending';
+                setTimeout(() => {
+                    audio.src = 'https://example.invalid/new-' + card + '.mp3';
+                    window.uploads.push(card);
+                }, 350);
+            });
+            document.querySelector('.swiper-container').swiper = {
+                slideTo: n => show(n, true),
+                slideNext: () => {
+                    if (!window.uploads.includes(current + 1)) { window.premature = true; }
+                    show(Math.min(current + 1, 2), true);
+                }
+            };
+            show(current, false);
+        ''', index, self.sample)
+        questions, _ = app.QuestionParser(self.driver).parse_all()
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0].q_type, app.QuestionType.RECORD)
+        self.assertFalse(questions[0].needs_speech_script)
+        return questions[0]
+
+    def test_vocabulary_distinguishes_original_from_historical_replay(self):
+        q = self.vocabulary()
+        info = self.driver.execute_script(app.VOCAB_CARD_JS, q.element)
+        self.assertEqual(info['audio'], self.sample)
+        self.assertEqual(info['recordings'], ['https://example.invalid/old-0.mp3'])
+        self.assertFalse(info['recording'])
+        baseline = dict(info)
+        executor = app.AnswerExecutor(self.driver)
+        self.assertFalse(executor._wait_vocab_upload(q, baseline, timeout=0.25))
+
+    def test_vocabulary_rewinds_and_waits_for_each_upload_before_flipping(self):
+        q = self.vocabulary(index=3)
+        executor = app.AnswerExecutor(self.driver)
+        with patch.object(executor, '_download_record_audio', return_value=b'audio'), patch.object(
+                self.driver, 'execute_async_script', return_value={'ok': True, 'dur': 0.01}):
+            self.assertTrue(executor._answer_record(q))
+        state = self.driver.execute_script('''return {
+            starts: window.starts, stops: window.stops,
+            uploads: window.uploads, premature: window.premature
+        };''')
+        self.assertEqual(state, {'starts': [1, 2, 3], 'stops': [1, 2, 3],
+                                 'uploads': [1, 2, 3], 'premature': False})
+
+    def test_vocabulary_cancellation_stops_the_current_recording(self):
+        q = self.vocabulary()
+        stop = threading.Event()
+        executor = app.AnswerExecutor(self.driver, stop_requested=stop)
+        click = app.WebDriverHelper.safe_click
+        def click_then_cancel(driver, button):
+            result = click(driver, button)
+            stop.set()
+            return result
+        with patch.object(executor, '_download_record_audio', return_value=b'audio'), patch.object(
+                self.driver, 'execute_async_script', return_value={'ok': True, 'dur': 0.01}), patch.object(
+                app.WebDriverHelper, 'safe_click', side_effect=click_then_cancel):
+            self.assertFalse(executor._answer_record(q))
+        info = self.driver.execute_script(app.VOCAB_CARD_JS, q.element)
+        self.assertFalse(info['recording'])
+        self.assertEqual(self.driver.execute_script('return [window.starts, window.stops]'),
+                         [[1], [1]])
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@
 """
 import ast
 import copy
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,8 +18,9 @@ TREE = ast.parse(SRC)
 CLASS_METHODS = {
     'VocabularyReadAloudStrategy': {'can_parse', 'parse'},
     'QuestionParser': {'_find_containers'},
-    'AnswerExecutor': {'_answer_record', '_answer_vocabulary_read_aloud',
-                       '_record_vocab_card'},
+    'AnswerExecutor': {'__init__', '_answer_record', '_answer_vocabulary_read_aloud',
+                       '_record_vocab_card', '_wait_vocab_card', '_vocab_record_buttons',
+                       '_wait_vocab_upload'},
 }
 
 
@@ -91,6 +93,7 @@ def load_components():
     import time as _time
     ns = {
         'ast': ast, 'base64': base64, 'time': SimpleNamespace(sleep=Mock()),
+        'threading': threading,
         'List': List, 'Dict': Dict, 'Optional': Optional, 'Any': Any,
         'By': FakeBy,
         'Question': FakeQuestion,
@@ -219,23 +222,30 @@ class TestCardLoop(unittest.TestCase):
     def _executor(self, total=3):
         cls = NS['AnswerExecutor']
         obj = cls.__new__(cls)
+        obj.stop_requested = Mock()
+        obj.stop_requested.is_set.return_value = False
+        obj.stop_requested.wait.return_value = False
+        obj._dismiss_record_popup = Mock()
         obj._record_vocab_card = Mock(return_value=True)
         obj._download_record_audio = Mock(return_value=b'audio')
         obj._speech_audio = Mock(return_value=b'tts')
         state = {'i': 1}
         cards = {
             1: {'word': 'cognitive', 'index': 1, 'total': total,
-                'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3'},
+                'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3', 'hasButton': True},
             2: {'word': 'census', 'index': 2, 'total': total,
-                'audio': 'https://x/b.mp3#duration=1.2&name=b.mp3'},
+                'audio': 'https://x/b.mp3#duration=1.2&name=b.mp3', 'hasButton': True},
             3: {'word': 'a thirst for sth.', 'index': 3, 'total': total,
-                'audio': 'https://x/c.mp3#duration=1.2&name=c.mp3'},
+                'audio': 'https://x/c.mp3#duration=1.2&name=c.mp3', 'hasButton': True},
         }
 
         def execute_script(js, *args):
             if js == CARD_JS:
                 return cards[min(state['i'], total)]
             if js == NEXT_JS:
+                if len(args) > 1 and args[1]:
+                    state['i'] = 1
+                    return 'swiper'
                 if state['i'] < total:
                     state['i'] += 1
                     return 'swiper'
@@ -264,12 +274,66 @@ class TestCardLoop(unittest.TestCase):
         obj, _ = self._executor(total=3)
         obj.driver.execute_script = Mock(side_effect=lambda js, *a: (
             {'word': 'cognitive', 'index': 1, 'total': 3,
-             'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3'}
+             'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3', 'hasButton': True}
             if js == CARD_JS else ''))
         q = FakeQuestion(record_items=[{'vocab': True, 'vocab_total': 3}],
                          element=Mock())
-        self.assertTrue(obj._answer_vocabulary_read_aloud(q))
+        self.assertFalse(obj._answer_vocabulary_read_aloud(q))
         self.assertEqual(obj._record_vocab_card.call_count, 1)
+
+    def test_failed_card_stops_without_marking_page_complete(self):
+        obj, state = self._executor(total=3)
+        obj._record_vocab_card.side_effect = [True, False, True]
+        q = FakeQuestion(record_items=[{'vocab': True, 'vocab_total': 3}], element=Mock())
+        self.assertFalse(obj._answer_vocabulary_read_aloud(q))
+        self.assertEqual(obj._record_vocab_card.call_count, 2)
+        self.assertEqual(state['i'], 2)
+
+    def test_starting_at_last_card_returns_to_first(self):
+        obj, state = self._executor(total=3)
+        state['i'] = 3
+        q = FakeQuestion(record_items=[{'vocab': True, 'vocab_total': 3}], element=Mock())
+        self.assertTrue(obj._answer_vocabulary_read_aloud(q))
+        self.assertEqual([c.args[1]['index'] for c in obj._record_vocab_card.call_args_list],
+                         [1, 2, 3])
+
+    def test_missing_total_cannot_report_success(self):
+        obj, _ = self._executor(total=3)
+        q = FakeQuestion(record_items=[{'vocab': True, 'vocab_total': 0}], element=Mock())
+        self.assertFalse(obj._answer_vocabulary_read_aloud(q))
+        obj._record_vocab_card.assert_not_called()
+
+    def test_stop_after_first_card_prevents_navigation(self):
+        obj, state = self._executor(total=3)
+        def stop_after_record(*args):
+            obj.stop_requested.is_set.return_value = True
+            return True
+        obj._record_vocab_card.side_effect = stop_after_record
+        q = FakeQuestion(record_items=[{'vocab': True, 'vocab_total': 3}], element=Mock())
+        self.assertFalse(obj._answer_vocabulary_read_aloud(q))
+        self.assertEqual(obj._record_vocab_card.call_count, 1)
+        self.assertEqual(state['i'], 1)
+
+    def test_waits_for_lazy_card_content(self):
+        obj, _ = self._executor()
+        obj.driver.execute_script.side_effect = [
+            {'index': 2, 'word': '', 'hasButton': False},
+            {'index': 2, 'word': 'census', 'hasButton': True},
+        ]
+        self.assertEqual(obj._wait_vocab_card(FakeQuestion(element=Mock()), 2)['word'],
+                         'census')
+        obj.stop_requested.wait.assert_called_once_with(0.25)
+
+    def test_stuck_card_never_reports_ready(self):
+        obj, _ = self._executor()
+        self.assertIsNone(obj._wait_vocab_card(FakeQuestion(element=Mock()), 2))
+
+    def test_executor_uses_supplied_stop_event(self):
+        stop = threading.Event()
+        obj = NS['AnswerExecutor'](Mock(), stop_requested=stop)
+        self.assertIs(obj.stop_requested, stop)
+        stop.set()
+        self.assertFalse(obj._answer_vocabulary_read_aloud(FakeQuestion()))
 
     def test_probe_failure_returns_false(self):
         obj, _ = self._executor(total=3)
@@ -282,8 +346,9 @@ class TestCardLoop(unittest.TestCase):
     def test_record_card_uses_original_audio_not_tts(self):
         obj, _ = self._executor(total=1)
         obj._record_vocab_card = NS['AnswerExecutor']._record_vocab_card.__get__(obj)
+        obj._wait_vocab_upload = Mock(return_value=True)
         NS['find_record_buttons'] = Mock(return_value=[Mock()])
-        info = {'word': 'cognitive', 'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3',
+        info = {'index': 1, 'word': 'cognitive', 'audio': 'https://x/a.mp3#duration=1.2&name=a.mp3',
                 'duration': 1.2}
         self.assertTrue(obj._record_vocab_card(
             FakeQuestion(element=Mock()), info))
@@ -293,12 +358,76 @@ class TestCardLoop(unittest.TestCase):
     def test_record_card_falls_back_to_tts_without_audio(self):
         obj, _ = self._executor(total=1)
         obj._record_vocab_card = NS['AnswerExecutor']._record_vocab_card.__get__(obj)
+        obj._wait_vocab_upload = Mock(return_value=True)
         NS['find_record_buttons'] = Mock(return_value=[Mock()])
-        info = {'word': 'cognitive', 'audio': '', 'duration': 0}
+        info = {'index': 1, 'word': 'cognitive', 'audio': '', 'duration': 0}
         self.assertTrue(obj._record_vocab_card(
             FakeQuestion(element=Mock()), info))
         obj._speech_audio.assert_called_once()
         obj._download_record_audio.assert_not_called()
+
+
+class TestRecordingCompletion(unittest.TestCase):
+    _executor = TestCardLoop._executor
+    def setUp(self):
+        # 每个用例独立设置点击 mock，避免失败路径污染其它录音用例。
+        NS['WebDriverHelper'].safe_click = Mock(return_value=True)
+        self.addCleanup(setattr, NS['WebDriverHelper'], 'safe_click', Mock(return_value=True))
+
+    def _recording(self):
+        obj, _ = self._executor(total=1)
+        obj._record_vocab_card = NS['AnswerExecutor']._record_vocab_card.__get__(obj)
+        obj._vocab_record_buttons = Mock(side_effect=[[Mock()], [Mock()]])
+        obj._wait_vocab_upload = Mock(return_value=True)
+        info = {'index': 1, 'word': 'cognitive', 'audio': 'https://x/a.mp3', 'duration': 1.2}
+        return obj, FakeQuestion(element=Mock()), info
+
+    def test_failed_stop_is_failure(self):
+        obj, q, info = self._recording()
+        NS['WebDriverHelper'].safe_click.side_effect = [True, False]
+        self.assertFalse(obj._record_vocab_card(q, info))
+        obj._wait_vocab_upload.assert_not_called()
+
+    def test_upload_failure_is_failure(self):
+        obj, q, info = self._recording()
+        obj._wait_vocab_upload.return_value = False
+        self.assertFalse(obj._record_vocab_card(q, info))
+
+    def test_stop_during_recording_clicks_stop_without_waiting_for_upload(self):
+        obj, q, info = self._recording()
+        obj.stop_requested.wait.side_effect = [False, True]
+        self.assertFalse(obj._record_vocab_card(q, info))
+        self.assertEqual(NS['WebDriverHelper'].safe_click.call_count, 2)
+        obj._wait_vocab_upload.assert_not_called()
+
+    def test_relocates_button_before_stopping(self):
+        obj, q, info = self._recording()
+        self.assertTrue(obj._record_vocab_card(q, info))
+        clicks = NS['WebDriverHelper'].safe_click.call_args_list
+        self.assertIsNot(clicks[0].args[1], clicks[1].args[1])
+
+    def test_old_score_and_old_replay_do_not_count_as_uploaded(self):
+        obj, _ = self._executor(total=1)
+        old = {'index': 1, 'word': 'cognitive', 'recordings': ['https://x/old.mp3'],
+               'score': 100, 'recording': False}
+        obj.driver.execute_script = Mock(return_value=old)
+        self.assertFalse(obj._wait_vocab_upload(FakeQuestion(element=Mock()), old, timeout=1))
+
+    def test_blob_waits_until_http_upload_is_available(self):
+        obj, _ = self._executor(total=1)
+        baseline = {'index': 1, 'word': 'cognitive', 'recordings': ['https://x/old.mp3']}
+        states = [dict(baseline, recordings=['blob:pending']),
+                  dict(baseline, recordings=['https://x/new.mp3'])]
+        obj.driver.execute_script = Mock(side_effect=states)
+        self.assertTrue(obj._wait_vocab_upload(FakeQuestion(element=Mock()), baseline, timeout=1))
+        obj.stop_requested.wait.assert_called_once_with(0.25)
+
+    def test_upload_on_a_different_card_is_not_accepted(self):
+        obj, _ = self._executor(total=1)
+        baseline = {'index': 1, 'word': 'cognitive', 'recordings': []}
+        obj.driver.execute_script = Mock(return_value={
+            'index': 2, 'word': 'census', 'recordings': ['https://x/new.mp3']})
+        self.assertFalse(obj._wait_vocab_upload(FakeQuestion(element=Mock()), baseline))
 
 
 if __name__ == '__main__':
