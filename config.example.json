@@ -11,5 +11,13 @@
   "debug_mode": false,
   "tts_engine": "auto",
   "tts_voice": "",
-  "tts_proxy": ""
+  "tts_proxy": "",
+  "hold_enabled": true,
+  "hold_normal_seconds": 90,
+  "hold_normal_jitter": 30,
+  "hold_listening_pad_min": 10,
+  "hold_listening_pad_max": 20,
+  "hold_listening_fallback": 120,
+  "audio_probe_timeout": 15,
+  "default_theme": "dark"
 }

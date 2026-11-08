@@ -197,6 +197,16 @@ class Config:
     tts_engine: str = "auto"  # auto / edge / sapi / off
     tts_voice: str = ""       # 留空按引擎给默认英语音色
     tts_proxy: str = ""       # edge-tts 走代理时填，如 http://127.0.0.1:7890
+    # 提交前停留（模拟真人答题耗时）
+    hold_enabled: bool = True
+    hold_normal_seconds: float = 90.0       # 非听力题基线：1 分半
+    hold_normal_jitter: float = 30.0        # 非听力题抖动：±30 秒
+    hold_listening_pad_min: float = 10.0    # 听力题：音频时长 + 10~20 秒
+    hold_listening_pad_max: float = 20.0
+    hold_listening_fallback: float = 120.0  # 听力题取不到音频时长时的兜底
+    audio_probe_timeout: float = 15.0       # ffprobe 探测超时
+    # 界面默认主题：dark / light / system（system = 跟随系统深浅色）
+    default_theme: str = "dark"
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -204,6 +214,31 @@ class Config:
             data = json.load(f)
         global DEBUG_MODE
         DEBUG_MODE = data.get("debug_mode", False)
+
+        def _num(key: str, default: float) -> float:
+            """配置里的数字容错：空串/非法值回落到默认，不抛异常。"""
+            raw = data.get(key, default)
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                return float(default)
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return float(default)
+
+        pad_min = _num("hold_listening_pad_min", 10.0)
+        pad_max = _num("hold_listening_pad_max", 20.0)
+        if pad_max < pad_min:
+            pad_min, pad_max = pad_max, pad_min
+
+        def _theme(raw) -> str:
+            """界面默认主题容错：只认 dark/light/system，其余回落到 dark。"""
+            value = str(raw or "").strip().lower()
+            if value in ("light", "白", "浅色", "bright", "day"):
+                return "light"
+            if value in ("system", "auto", "跟随系统"):
+                return "system"
+            return "dark"
+
         return cls(
             url=data.get("url") or DEFAULT_LOGIN_URL,
             username=data.get("username"),
@@ -217,6 +252,14 @@ class Config:
             tts_engine=(data.get("tts_engine") or "auto").strip(),
             tts_voice=(data.get("tts_voice") or "").strip(),
             tts_proxy=(data.get("tts_proxy") or "").strip(),
+            hold_enabled=bool(data.get("hold_enabled", True)),
+            hold_normal_seconds=_num("hold_normal_seconds", 90.0),
+            hold_normal_jitter=_num("hold_normal_jitter", 30.0),
+            hold_listening_pad_min=pad_min,
+            hold_listening_pad_max=pad_max,
+            hold_listening_fallback=_num("hold_listening_fallback", 120.0),
+            audio_probe_timeout=_num("audio_probe_timeout", 15.0),
+            default_theme=_theme(data.get("default_theme")),
         )
 
 
@@ -8337,6 +8380,10 @@ class AISolver:
         self._publish_processed_groups: set = set()
         self._publish_scope: Optional[PublishTaskScope] = None
         self._publish_scope_url: str = ''
+        # 音频时长缓存：url → 秒（None 表示探测过但失败，避免反复下载）
+        self._audio_duration_cache: Dict[str, Optional[float]] = {}
+        self._ffprobe_path: Optional[str] = None
+        self._ffprobe_resolved = False
 
     def request_stop(self):
         self.stop_requested.set()
@@ -8346,6 +8393,252 @@ class AISolver:
 
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
+
+    # ---- 提交前停留（模拟真人答题耗时）-----------------------------------
+    LISTENING_Q_TYPES = (
+        QuestionType.LISTENING_CHOICE,
+        QuestionType.LISTENING_FILL_IN,
+    )
+
+    # 页面方向文本里出现这些词，说明这一页带音/视频材料
+    MEDIA_DIRECTION_HINTS = (
+        'listen', 'listening', 'audio', 'hear', 'heard', 'conversation',
+        'passage', 'news', 'dictation', 'watch', 'video', 'clip', 'view',
+    )
+
+    # 从页面读全部音频元素：优先 duration，其次 currentSrc 供 ffprobe 兜底
+    PAGE_AUDIO_JS = """
+        const out = [];
+        const push = (src, dur) => {
+            const url = (src || '').split('#')[0];
+            if (!url) return;
+            const d = Number(dur);
+            out.push({src: url, duration: (isFinite(d) && d > 0) ? d : null});
+        };
+        for (const a of document.querySelectorAll('audio')) {
+            push(a.currentSrc || a.getAttribute('src')
+                 || (a.querySelector('source') && a.querySelector('source').getAttribute('src')),
+                 a.duration);
+        }
+        for (const s of document.querySelectorAll('audio source')) {
+            push(s.getAttribute('src'), null);
+        }
+        return out;
+    """
+
+    def _resolve_ffprobe(self) -> Optional[str]:
+        """定位 ffprobe：优先 PATH，其次 ffmpeg 同目录，最后常见安装路径。"""
+        if self._ffprobe_resolved:
+            return self._ffprobe_path
+        self._ffprobe_resolved = True
+
+        candidates = []
+        found = shutil.which('ffprobe')
+        if found:
+            candidates.append(found)
+        ffmpeg = shutil.which('ffmpeg')
+        if ffmpeg:
+            base = os.path.dirname(ffmpeg)
+            candidates.append(os.path.join(base, 'ffprobe.exe'))
+            candidates.append(os.path.join(base, 'ffprobe'))
+        candidates.extend([
+            r'C:\ffmpeg\bin\ffprobe.exe',
+            r'C:\Program Files\ffmpeg\bin\ffprobe.exe',
+            os.path.expandvars(r'%LOCALAPPDATA%\ffmpeg\bin\ffprobe.exe'),
+        ])
+        for path in candidates:
+            if path and os.path.exists(path):
+                self._ffprobe_path = path
+                return path
+        print("    未找到 ffprobe，听力题将退化为读取页面 <audio>.duration")
+        return None
+
+    def _probe_mp3_duration(self, url: str) -> Optional[float]:
+        """下载音频并用 ffprobe 读出精确时长（秒）。失败返回 None。"""
+        if url in self._audio_duration_cache:
+            return self._audio_duration_cache[url]
+
+        result: Optional[float] = None
+        temp_path = None
+        ffprobe = self._resolve_ffprobe()
+        if not ffprobe:
+            self._audio_duration_cache[url] = None
+            return None
+
+        try:
+            print(f"    【探测】下载音频测时长: {url.split('/')[-1][:60]}")
+            request = urllib.request.Request(url, headers={
+                'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                               'AppleWebKit/537.36 (KHTML, like Gecko) '
+                               'Chrome/120.0 Safari/537.36'),
+                'Referer': 'https://ucontent.unipus.cn/',
+            })
+            suffix = '.mp3'
+            for ext in ('.m4a', '.wav', '.aac', '.ogg'):
+                if ext in url.lower():
+                    suffix = ext
+                    break
+            with urllib.request.urlopen(request, timeout=30) as response, \
+                    tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(response.read())
+                temp_path = handle.name
+
+            completed = subprocess.run(
+                [ffprobe, '-v', 'error', '-show_entries', 'format=duration',
+                 '-of', 'default=nw=1:nk=1', temp_path],
+                capture_output=True, text=True,
+                timeout=max(5.0, float(getattr(self.config, 'audio_probe_timeout', 15.0))),
+            )
+            raw = (completed.stdout or '').strip().splitlines()
+            if raw:
+                value = float(raw[0])
+                if value > 0:
+                    result = value
+        except Exception as exc:
+            print(f"    ffprobe 探测失败: {str(exc)[:80]}")
+            result = None
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+        self._audio_duration_cache[url] = result
+        if result:
+            print(f"    音频时长 {result:.2f}s")
+        return result
+
+    def _page_audio_durations(self) -> List[float]:
+        """读取当前文档（含已切入的内容 iframe）里所有音频的时长。
+
+        先走页面自带的 <audio>.duration（不用下载）；拿不到再对 URL 跑 ffprobe。
+        """
+        entries: List[Dict[str, Any]] = []
+        try:
+            entries = self.driver.execute_script(self.PAGE_AUDIO_JS) or []
+        except Exception as exc:
+            print(f"    读取页面音频元素失败: {str(exc)[:60]}")
+            entries = []
+
+        durations: List[float] = []
+        pending: List[str] = []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            duration = item.get('duration')
+            url = (item.get('src') or '').strip()
+            if duration:
+                try:
+                    value = float(duration)
+                except (TypeError, ValueError):
+                    value = 0.0
+                if value > 0:
+                    durations.append(value)
+                    continue
+            if url and url not in pending:
+                pending.append(url)
+
+        for url in pending:
+            if self._should_stop():
+                break
+            probed = self._probe_mp3_duration(url)
+            if probed:
+                durations.append(probed)
+
+        return durations
+
+    def _collect_media_durations(self) -> List[float]:
+        """收集本页全部音/视频时长：顶层文档 + ipublish 内容 iframe。"""
+        durations = self._page_audio_durations()
+        if not durations and PublishPlayer.has_content_frame(self.driver):
+            with PublishFrameContext(self.driver) as context:
+                if context.entered:
+                    durations = self._page_audio_durations()
+        return durations
+
+    def _page_direction_text(self) -> str:
+        """当前页的方向/题干文本，用于判断是否含媒体材料。"""
+        texts = []
+        for selector in ('.layout-direction-container', '.abs-direction'):
+            try:
+                element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                value = (element.text or '').strip()
+                if value:
+                    texts.append(value)
+            except Exception:
+                continue
+        return ' '.join(texts).lower()
+
+    def _is_listening_page(self, questions: Optional[List[Question]] = None) -> bool:
+        """判断当前页（或题目组）是不是听力/视听题。
+
+        两个信号取或：题目类型已经是 LISTENING_*，或方向文本里出现媒体关键词。
+        """
+        for q in questions or []:
+            if getattr(q, 'q_type', None) in self.LISTENING_Q_TYPES:
+                return True
+        direction = self._page_direction_text()
+        if direction and any(hint in direction for hint in self.MEDIA_DIRECTION_HINTS):
+            return True
+        return False
+
+    def _listening_hold_seconds(self) -> float:
+        """听力题停留时长：取本页最长音频时长 + 随机 10~20 秒。
+
+        取不到时长时回落到 hold_listening_fallback（默认 120 秒）。
+        """
+        config = self.config
+        pad_min = float(getattr(config, 'hold_listening_pad_min', 10.0))
+        pad_max = float(getattr(config, 'hold_listening_pad_max', 20.0))
+        fallback = float(getattr(config, 'hold_listening_fallback', 120.0))
+
+        durations = self._collect_media_durations()
+        if not durations:
+            print(f"    未取到听力音频时长，按兜底 {fallback:.0f} 秒停留")
+            return fallback
+
+        longest = max(durations)
+        pad = random.uniform(pad_min, pad_max)
+        print(f"    听力音频最长 {longest:.2f}s，额外停留 {pad:.1f}s")
+        return longest + pad
+
+    def _normal_hold_seconds(self) -> float:
+        """非听力题停留时长：1 分半 ± 30 秒。"""
+        base = float(getattr(self.config, 'hold_normal_seconds', 90.0))
+        jitter = abs(float(getattr(self.config, 'hold_normal_jitter', 30.0)))
+        low, high = base - jitter, base + jitter
+        return max(5.0, random.uniform(low, high))
+
+    def _hold_before_submit(self, questions: Optional[List[Question]] = None,
+                            label: str = '本页') -> bool:
+        """提交前停留。返回 False 表示期间收到了停止请求。
+
+        用 stop_requested.wait() 而不是 time.sleep()：精度一样，但点「停止」
+        能立刻响应，不必等满整段停留时间。
+        """
+        if not getattr(self.config, 'hold_enabled', True):
+            return not self._should_stop()
+        if self._should_stop():
+            return False
+
+        if self._is_listening_page(questions):
+            seconds = self._listening_hold_seconds()
+            kind = '听力题'
+        else:
+            seconds = self._normal_hold_seconds()
+            kind = '普通题'
+
+        seconds = max(0.0, float(seconds))
+        print(f"    【停留】{label}提交前等待 {seconds:.1f} 秒（{kind}）...")
+        started = time.time()
+        stopped = self.stop_requested.wait(seconds)
+        elapsed = time.time() - started
+        if stopped:
+            print(f"    已请求停止，停留中断（{elapsed:.1f}s / {seconds:.1f}s）")
+            return False
+        print(f"    【停留】结束，实际等待 {elapsed:.1f} 秒")
+        return True
 
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = "",
                               on_task_done: Optional[Callable[[Dict], None]] = None):
@@ -8438,7 +8731,8 @@ class AISolver:
                     )
                     unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
                     if tab['_unit_idx'] >= len(unit_tabs):
-                        print("    目标Unit不存在，跳过")
+                        print(f"    目标Unit索引越界（请求 {tab['_unit_idx']}，"
+                              f"实际 {len(unit_tabs)} 个），跳过")
                         return 'skipped'
                     if self._should_stop():
                         return 'stopped'
@@ -8446,7 +8740,10 @@ class AISolver:
                     if self.stop_requested.wait(1.2):
                         return 'stopped'
                 except Exception as e:
-                    print(f"    切换Unit失败: {str(e)[:50]}")
+                    # 完整打印：type + 完整 message（换成单行），并写进日志文件
+                    detail = ' '.join(str(e).split())
+                    print(f"    切换Unit失败 [{type(e).__name__}]: {detail[:400]}")
+                    logger.warning(f"切换Unit失败 [{type(e).__name__}] 完整信息: {detail}")
                     return 'skipped'
 
             chapter_clicked = False
@@ -9298,6 +9595,9 @@ class AISolver:
 
             if self._should_stop():
                 return False
+            if self_check_handled and not normal_questions:
+                if not self._hold_before_submit(questions, '自评页'):
+                    return False
             if self_check_handled and not normal_questions and self.executor.submit():
                 self._wait_for_submit_complete()
                 if self._should_stop():
@@ -9331,6 +9631,9 @@ class AISolver:
                 return False
             # 注意：分批作答时 normal_questions 会被清空，是否提交要看 total_questions，
             # 否则「做完不交卷」，用户还得手动点提交。
+            if total_questions:
+                if not self._hold_before_submit(questions, f'第 {page_num} 页'):
+                    return False
             if total_questions and self.executor.submit():
                 self._wait_for_submit_complete()
                 if self._should_stop():
@@ -9627,6 +9930,11 @@ class AISolver:
             return False
 
         if self._should_stop():
+            return False
+
+        # 提交前停留：模拟真人答题耗时。这里在顶层文档执行，
+        # 放在 PublishFrameContext 之外，避免停留期间内容 iframe 被重载。
+        if not self._hold_before_submit(questions, f'题目组 {group_type}'):
             return False
 
         # 提交前退出内容层：切单元后「本单元学习规则」弹窗可能再次出现，
@@ -10925,6 +11233,10 @@ class PopupWatcher:
 
 if __name__ == '__main__':
     print('*' * 25 + "Unipus-Helper" + '*' * 25)
+
+    # 必须在创建 QApplication 之前开启高 DPI，否则 4K 屏 200% 缩放下界面会特别小
+    from dpi_helper import enable_high_dpi
+    enable_high_dpi()
 
     # 先把临时目录换成可写的：受限环境下 Edge 启动会因为系统 TEMP 不可写而失败
     ensure_writable_temp_dir()

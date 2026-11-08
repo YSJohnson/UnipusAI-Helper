@@ -48,6 +48,38 @@ TITLE_BAR_LIGHTS_LEFT = 10
 TITLE_BAR_LIGHTS_WIDTH = 75
 TITLE_BAR_LIGHTS_HEIGHT = 28
 
+# 配置里 default_theme 的取值：dark / light / system
+DEFAULT_THEME_FALLBACK = "dark"
+
+
+def _config_theme_is_dark(bot) -> bool:
+    """按配置里的 default_theme 决定界面初始主题。
+
+    兼容老配置里可能出现的布尔 default_dark；取值无法识别时回落到 dark，
+    保持与历史行为一致。界面上的主题开关之后仍可随时切换。
+    """
+    config = getattr(bot, "config", None)
+    raw = getattr(config, "default_theme", None)
+    if raw is None:
+        legacy = getattr(config, "default_dark", None)
+        if isinstance(legacy, bool):
+            return legacy
+        raw = DEFAULT_THEME_FALLBACK
+    value = str(raw).strip().lower()
+    if value in ("light", "白", "浅色", "bright", "day"):
+        return False
+    if value in ("system", "auto", "跟随系统"):
+        try:
+            from PyQt5.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app is not None:
+                hint = app.palette().color(app.palette().Window).lightness()
+                return hint < 128
+        except Exception:
+            pass
+        return True
+    return True
+
 
 class _MainThreadBridge(QObject):
     invoke = pyqtSignal(object)
@@ -68,8 +100,13 @@ class FluentModernGUI(MSFluentWindow):
     """Modern Fluent workbench for the existing UnipusAI automation workflow."""
 
     def __init__(self, driver, solver, bot, app_globals: Dict):
+        # 高 DPI 必须在 QApplication 创建前设置（4K 屏 200% 缩放）
+        from dpi_helper import enable_high_dpi
+        enable_high_dpi()
         self._qt_app = QApplication.instance() or QApplication(sys.argv)
-        setTheme(Theme.DARK)
+        # 初始主题由配置里的 default_theme 决定，界面上的开关仍可随时切换
+        self.is_dark = _config_theme_is_dark(bot)
+        setTheme(Theme.DARK if self.is_dark else Theme.LIGHT)
         super().__init__()
 
         self.driver = driver
@@ -124,7 +161,21 @@ class FluentModernGUI(MSFluentWindow):
 
     def _init_window(self):
         self.setWindowTitle("UnipusAI Helper" if sys.platform == "darwin" else "")
-        self.resize(1330, 860)
+        # 窗口尺寸按屏幕可用区域比例自适应：4K/2K/1080p 下都不会过大或过小。
+        # 高 DPI 开启后 Qt 的几何值已经是逻辑像素，这里直接算比例即可。
+        screen = self.screen() or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else None
+        if avail is not None and avail.width() > 0:
+            width = max(1080, int(avail.width() * 0.72))
+            height = max(680, int(avail.height() * 0.78))
+            self.resize(width, height)
+            # 居中显示，避免开在屏幕边缘之外
+            self.move(
+                avail.x() + (avail.width() - width) // 2,
+                avail.y() + (avail.height() - height) // 2,
+            )
+        else:
+            self.resize(1330, 860)
         self.setMinimumSize(1080, 680)
         self.setMicaEffectEnabled(False)
         if sys.platform == "darwin":
@@ -180,6 +231,17 @@ class FluentModernGUI(MSFluentWindow):
 
         self.status_pill = self._status_pill("初始化", "#30d9ef")
         top_layout.addWidget(self.status_pill)
+        top_layout.addSpacing(16)
+
+        top_layout.addWidget(self._label("界面主题", 14, "#a7b0bb", 600))
+        self.theme_switch = SwitchButton()
+        self.theme_switch.setText("深色" if self.is_dark else "浅色")
+        self.theme_switch.setChecked(self.is_dark)
+        self.theme_switch.setToolTip(
+            "切换深色/浅色界面。默认值由配置里的 default_theme 决定，"
+            "这里的改动只在本次运行生效。")
+        self.theme_switch.checkedChanged.connect(self._on_theme_toggle)
+        top_layout.addWidget(self.theme_switch)
         top_layout.addSpacing(16)
 
         top_layout.addWidget(self._label("调试模式", 14, "#a7b0bb", 600))
@@ -332,7 +394,10 @@ class FluentModernGUI(MSFluentWindow):
         tone = label.property("tone") or "primary"
         size = (label.property("fontSize") or 14) * self.font_scale
         weight = label.property("fontWeight") or 400
-        color = "#f5f7fb" if tone == "primary" else "#a7b0bb"
+        if tone == "primary":
+            color = "#f5f7fb" if self.is_dark else "#1f2933"
+        else:
+            color = "#a7b0bb" if self.is_dark else "#667085"
         label.setStyleSheet(
             f"background: transparent; color: {color}; font-size: {size:.1f}px; "
             f"font-weight: {weight}; font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei';"
@@ -407,13 +472,22 @@ class FluentModernGUI(MSFluentWindow):
         return empty
 
     def _apply_theme(self):
-        palette = {
-            "bg": "#17191d", "panel": "#202328", "panel_border": "#2c3138",
-            "top": "#202328", "pill_bg": "#1c3238", "pill_border": "#24515b",
-            "metric": "#242830", "log": "#14171b", "log_border": "#303640",
-            "text": "#f4f7fb",
-        }
-        setTheme(Theme.DARK)
+        if self.is_dark:
+            palette = {
+                "bg": "#17191d", "panel": "#202328", "panel_border": "#2c3138",
+                "top": "#202328", "pill_bg": "#1c3238", "pill_border": "#24515b",
+                "metric": "#242830", "log": "#14171b", "log_border": "#303640",
+                "text": "#f4f7fb",
+            }
+            setTheme(Theme.DARK)
+        else:
+            palette = {
+                "bg": "#f3f6fa", "panel": "#ffffff", "panel_border": "#dfe5ec",
+                "top": "#ffffff", "pill_bg": "#e8f7fb", "pill_border": "#bcebf4",
+                "metric": "#f1f5f9", "log": "#ffffff", "log_border": "#d7dee8",
+                "text": "#1f2933",
+            }
+            setTheme(Theme.LIGHT)
 
         self.setBackgroundColor(QColor(palette["bg"]))
         self.setCustomBackgroundColor(QColor(palette["bg"]), QColor(palette["bg"]))
@@ -1080,11 +1154,14 @@ class FluentModernGUI(MSFluentWindow):
 
     def _style_task_badge(self, badge):
         compulsory = badge.property("taskKind") == "compulsory"
-        fg, bg, border = (
-            ("#ffcf6b", "rgba(255,176,46,0.16)", "rgba(255,176,46,0.45)")
-            if compulsory else
-            ("#93a1b1", "rgba(255,255,255,0.05)", "rgba(255,255,255,0.12)")
-        )
+        if compulsory:
+            fg, bg, border = ("#ffcf6b", "rgba(255,176,46,0.16)", "rgba(255,176,46,0.45)") \
+                if self.is_dark else \
+                ("#8a5a00", "rgba(255,176,46,0.18)", "rgba(201,124,0,0.45)")
+        else:
+            fg, bg, border = ("#93a1b1", "rgba(255,255,255,0.05)", "rgba(255,255,255,0.12)") \
+                if self.is_dark else \
+                ("#62707e", "rgba(15,23,42,0.05)", "rgba(15,23,42,0.12)")
         size = max(11, round(11.5 * self.font_scale))
         badge.setStyleSheet(
             "QLabel {"
@@ -1107,11 +1184,15 @@ class FluentModernGUI(MSFluentWindow):
         return label
 
     def _style_task_status(self, label):
-        """状态胶囊：底色/文字色固定深色主题配色。"""
+        """状态胶囊：文字色按状态区分，底色跟随当前主题。"""
         status = label.property("taskStatus") or "unknown"
-        palette = {"done": "#37d987", "doing": "#ffb25f", "todo": "#8fb2ff", "unknown": "#9fa8b4"}
+        if self.is_dark:
+            palette = {"done": "#37d987", "doing": "#ffb25f", "todo": "#8fb2ff", "unknown": "#9fa8b4"}
+            bg = "rgba(255,255,255,0.06)"
+        else:
+            palette = {"done": "#0f9d58", "doing": "#c2761a", "todo": "#3b6fd4", "unknown": "#6b7785"}
+            bg = "rgba(15,23,42,0.05)"
         color = palette.get(status, palette["unknown"])
-        bg = "rgba(255,255,255,0.06)"
         size = (label.property("fontSize") or 12) * self.font_scale
         label.setStyleSheet(
             f"background: {bg}; color: {color}; font-size: {size:.1f}px; font-weight: 600;"
@@ -1121,8 +1202,8 @@ class FluentModernGUI(MSFluentWindow):
 
     def _style_group_header(self, label):
         """分组标题：字号更大、加粗，底部一条分隔线。"""
-        color = "#c3ccd8"
-        border = "rgba(255,255,255,0.08)"
+        color = "#c3ccd8" if self.is_dark else "#3d4a5a"
+        border = "rgba(255,255,255,0.08)" if self.is_dark else "rgba(15,23,42,0.10)"
         size = (label.property("fontSize") or 19) * self.font_scale
         label.setStyleSheet(
             f"background: transparent; color: {color}; font-size: {size:.1f}px; font-weight: 700;"
@@ -1134,13 +1215,19 @@ class FluentModernGUI(MSFluentWindow):
     def _style_section_header(self, label):
         """目录层级标题：越深越淡、字号逐级收小，靠缩进表达结构。"""
         depth = label.property("sectionDepth") or 0
-        if depth <= 0:
-            size, color, weight = 19, "#c3ccd8", 700
-        elif depth == 1:
-            size, color, weight = 16, "#dce4ee", 600
+        if self.is_dark:
+            level0, level1, level2 = "#c3ccd8", "#dce4ee", "#aeb9c6"
+            rule = "rgba(255,255,255,0.08)"
         else:
-            size, color, weight = 14.5, "#aeb9c6", 600
-        border = " border-bottom: 1px solid rgba(255,255,255,0.08);" if depth <= 0 else ""
+            level0, level1, level2 = "#3d4a5a", "#4d5b6b", "#6b7785"
+            rule = "rgba(15,23,42,0.10)"
+        if depth <= 0:
+            size, color, weight = 19, level0, 700
+        elif depth == 1:
+            size, color, weight = 16, level1, 600
+        else:
+            size, color, weight = 14.5, level2, 600
+        border = f" border-bottom: 1px solid {rule};" if depth <= 0 else ""
         label.setStyleSheet(
             f"background: transparent; color: {color}; font-size: {size * self.font_scale:.1f}px;"
             f" font-weight: {weight};"
@@ -1408,6 +1495,12 @@ class FluentModernGUI(MSFluentWindow):
         self.btn_scan_unit.setText("扫描当前单元")
         self._set_status("扫描失败", "请确认已进入课程页面后重试。", "#ff6b6b")
         InfoBar.error("扫描失败", "请确认已进入课程页面后重试。", duration=2200, position=InfoBarPosition.TOP_RIGHT, parent=self)
+
+    def _on_theme_toggle(self, checked=None):
+        """界面上的深色/浅色开关：只影响本次运行，不改配置文件。"""
+        self.is_dark = self.theme_switch.isChecked() if checked is None else bool(checked)
+        self.theme_switch.setText("深色" if self.is_dark else "浅色")
+        self._apply_theme()
 
     def _on_debug_toggle(self, checked=None):
         checked = self.debug_switch.isChecked() if checked is None else bool(checked)
