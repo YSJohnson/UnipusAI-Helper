@@ -22,10 +22,9 @@ from glob import glob
 from typing import List, Optional, Dict, Any, Tuple, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from unipus_helper.paths import PROJECT_ROOT
+
+BASE_DIR = str(PROJECT_ROOT)
 
 
 def ensure_writable_temp_dir() -> str:
@@ -80,8 +79,8 @@ def ensure_writable_temp_dir() -> str:
 # 系统 temp 不可写时 torch 的 DLL 初始化会直接抛出 WinError 1114。
 ensure_writable_temp_dir()
 
-from AudioRecognizer import AudioTranscriber
-from EnvironmentChecker import EnvironmentChecker
+from unipus_helper.audio_recognizer import AudioTranscriber
+from unipus_helper.environment_checker import EnvironmentChecker
 from openai import OpenAI
 from selenium import webdriver
 from selenium.common.exceptions import (NoSuchElementException, TimeoutException,
@@ -90,15 +89,15 @@ from selenium.common.exceptions import (NoSuchElementException, TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from fluent_ui import FluentModernGUI
 
 gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.4"
+APP_VERSION = "3.9.6"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -10956,6 +10955,8 @@ class UCampusBot:
 
     def __init__(self, config_path: str = 'config.json', skip_check: bool = False):
         self.config = Config.from_json(config_path)
+        self._shutdown_event = threading.Event()
+        self._background_threads = []
         self.driver = None
 
         if not skip_check:
@@ -11060,10 +11061,24 @@ class UCampusBot:
             options.add_argument(f'--disk-cache-dir={os.path.join(temp_dir, "edge_cache")}')
             options.add_argument(f'--crash-dumps-dir={temp_dir}')
 
-        driver = webdriver.Edge(options=options)
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
-        })
+        service_options = {}
+        if sys.platform == 'win32':
+            # Let Python handle Ctrl+C and close the driver in order; the driver
+            # must not receive the console interrupt before cleanup starts.
+            service_options['popen_kw'] = {'creation_flags': subprocess.CREATE_NEW_PROCESS_GROUP}
+        driver = webdriver.Edge(options=options, service=EdgeService(**service_options))
+        try:
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
+            })
+        except BaseException:
+            # A failed tab can still leave a live browser behind. Close this
+            # attempt before the caller retries with compatibility options.
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            raise
         # 把麦克风轨道换成「页面自带原声」的载体，供跟读录音题使用
         try:
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -11101,19 +11116,36 @@ class UCampusBot:
     def start(self):
         solver = AISolver(self.driver, self.config)
 
-        self.gui = FluentModernGUI(self.driver, solver, self, globals())
+        from unipus_helper.native_ui import NativeModernGUI
+        self.gui = NativeModernGUI(self.driver, solver, self, globals())
 
-        threading.Thread(target=self.popup_watcher.run, daemon=True).start()
-        threading.Thread(target=self._background_login_flow, daemon=True).start()
+        self._background_threads = [
+            threading.Thread(target=self.popup_watcher.run, daemon=True, name="popup-watcher"),
+            threading.Thread(target=self._background_login_flow, daemon=True, name="ucampus-login"),
+        ]
+        for worker in self._background_threads:
+            worker.start()
 
-        self.gui.mainloop()
+        try:
+            self.gui.mainloop()
+        finally:
+            self.request_shutdown()
 
         return True
 
+    def request_shutdown(self):
+        self._shutdown_event.set()
+        self.popup_watcher.stop()
+
     def _background_login_flow(self):
         gui_log_queue.put(" 正在与 U校园 建立连接，请稍候...")
-        success = self._login()
-        if success:
+        try:
+            success = self._login()
+        except Exception as exc:
+            if not self._shutdown_event.is_set():
+                logger.error(f"登录线程异常: {exc}", exc_info=True)
+            return
+        if success and not self._shutdown_event.is_set():
             self.gui.after(0, self.gui.enable_scan_button)
 
     def _login(self) -> bool:
@@ -11204,6 +11236,8 @@ class UCampusBot:
             return True
 
         except Exception as e:
+            if self._shutdown_event.is_set():
+                return False
             error_msg = str(e)
             gui_log_queue.put(f" 登录执行流阻断: {error_msg[:50]}")
             logger.error(f"详细错误: {error_msg}", exc_info=True)
@@ -11368,16 +11402,26 @@ class PopupWatcher:
 
     def __init__(self, driver):
         self.driver = driver
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        self._stop_event.set()
 
     def run(self):
-        while True:
+        while not self._stop_event.is_set():
             try:
                 self._click_known_buttons()
-                time.sleep(0.5)
+            except WebDriverException as e:
+                if not self._stop_event.is_set():
+                    logger.warning(f"弹窗监控已停止，浏览器会话不可用: {str(e)[:120]}")
+                break
             except Exception as e:
+                if self._stop_event.is_set():
+                    break
                 error_msg = str(e)
                 print(f"操作失败: {error_msg[:50]}")
-                logger.error(f"详细错误: {error_msg}", exc_info=True)
+                logger.warning(f"弹窗监控操作失败: {error_msg[:120]}")
+            self._stop_event.wait(0.5)
 
     def _click_known_buttons(self):
         js = """
@@ -11427,14 +11471,30 @@ if __name__ == '__main__':
 
     logger = setup_logging()
 
+    bot = None
+    exit_code = 0
     try:
         bot = UCampusBot(os.path.join(BASE_DIR, 'config.json'), skip_check=skip_check)
         bot.start()
+    except KeyboardInterrupt:
+        print("\n 正在关闭工作台与课程浏览器...")
     except Exception as e:
         error_msg = str(e)
         print(f"\n 程序运行失败: {error_msg[:100]}")
         logger.error(f"程序异常: {error_msg}", exc_info=True)
-        input("\n按任意键退出...")
+        exit_code = 1
+    finally:
+        if bot:
+            bot.request_shutdown()
+            gui = getattr(bot, 'gui', None)
+            if gui and hasattr(gui, 'close'):
+                gui.close()
+            elif bot.driver:
+                try:
+                    bot.driver.quit()
+                except Exception:
+                    pass
+    sys.exit(exit_code)
 
 
 

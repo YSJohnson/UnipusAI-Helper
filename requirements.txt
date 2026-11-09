@@ -1,8 +1,11 @@
 selenium>=4.10.0
 openai>=1.10.0
 openai-whisper>=20231117
-# 5.15.11 起才有 macOS(arm64) 预编译轮子，更低版本会在 Apple Silicon 上掉进源码编译
+# 独立配置编辑器仍使用 PyQt5 / Fluent Widgets；工作台只使用 PySide6
+# 5.15.11 起才有 macOS(arm64) 预编译轮子
 PyQt5>=5.15.11
 PyQt-Fluent-Widgets>=1.0.0
 # 录音题（Exercise 2 主观题）TTS 主后端；没装会回退到 Windows 自带 System.Speech
 edge-tts>=7.3.1
+# Native Qt Quick interface. Essentials includes QML/Quick/Controls without WebEngine.
+PySide6-Essentials>=6.8,<7

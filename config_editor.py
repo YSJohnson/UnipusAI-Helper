@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+from unipus_helper.paths import PROJECT_ROOT
+
 from PyQt5.QtCore import QEvent, QPoint, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
@@ -32,10 +34,7 @@ from qfluentwidgets import (
 )
 
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = str(PROJECT_ROOT)
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 

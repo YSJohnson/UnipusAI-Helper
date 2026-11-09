@@ -13,8 +13,15 @@ release/
 config.json
 config.real.json
 config.test.json
+config-backups/
 .vscode/
 # 测试脚本只在本地跑，不进版本库
 test_*.py
+tests/
+.pytest_cache/
 # 本地排查产物（截图、真机扫描快照、探针脚本）
 output/
+# 主程序在系统临时目录不可写时使用的备用目录
+/.tmp/
+pip-*/
+unipus-workbench-*/
