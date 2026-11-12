@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.6-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.7-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -165,6 +165,16 @@ brew install --cask microsoft-edge      # 程序驱动的是 Edge
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.7（2026-11-13）</b>：新版视听说课程适配 / 录音与学习进度修复</summary>
+
+- **录音与自评**：修复新版播放器窄窗口下的录音问题，支持自评量表题及已有选项的识别。
+- **独立单元测试**：支持包含单选题的诊断测试，答题卡完整后统一提交；保留已有成绩和部分作答进度。
+- **学习进度**：浏览任务正文并完整播放独立音视频及已提交题组内的音视频，以记录对应学习进度。
+- **特殊任务提示**：AI 口语对话和作品上传提示在平台内处理；处理后请以课程目录的实际进度为准。
+
+</details>
 
 <details>
 <summary><b>v3.9.6（2026-11-09）</b>：原生工作台重做 / 交互优化 / 项目目录整理</summary>

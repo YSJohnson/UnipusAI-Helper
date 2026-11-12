@@ -110,7 +110,7 @@ class WorkbenchController(CourseCatalogMixin):
             username = str(getattr(config, "username", ""))
             account = f"{username[:3]}••••{username[-4:]}" if len(username) > 7 else "已连接账号" if username else "未连接账号"
             return copy.deepcopy({
-                "version": self._globals.get("APP_VERSION", "3.9.6"),
+                "version": self._globals.get("APP_VERSION", "3.9.7"),
                 "ready": self._ready, "busy": self._operation is not None, "operation": self._operation,
                 "status": self._status, "error": self._error,
                 "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),

@@ -97,7 +97,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.6"
+APP_VERSION = "3.9.7"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -6331,6 +6331,7 @@ class PublishQuestionParser:
         'single_choice_group': 'choice',
         'multiple_choice_group': 'choice',
         'multi_choice_group': 'choice',
+        'evaluation_group': 'choice',
         'true_false_group': 'true_false',
         'fill_blanks_group': 'fill',
         'fill_blanks_choice_group': 'fill',
@@ -6339,6 +6340,7 @@ class PublishQuestionParser:
         'translation_group': 'text',
         'writing_group': 'text',
         'multi_media_upload_group': 'upload',
+        'ai_oral_practice_group': 'ai_oral',
         'rich_text_read_group': 'skip',
         'discussion_group': 'skip',
         'text_match_group': 'link_match',
@@ -6349,6 +6351,7 @@ class PublishQuestionParser:
     QUESTION_TYPE_KINDS = {
         'single_choice': 'choice',
         'multiple_choice': 'choice',
+        'evaluation': 'choice',
         'true_false': 'true_false',
         'fill_blanks': 'fill',
         'fill_blanks_choice': 'fill',
@@ -6701,6 +6704,18 @@ class PublishQuestionParser:
 
     def _choice_options(self, node) -> List[Option]:
         options = []
+        if self._question_type(node) == 'evaluation':
+            radios = node.find_elements(By.CSS_SELECTOR, '[role="radio"][aria-posinset]')
+            labels = node.find_elements(By.CSS_SELECTOR, '[class*="q-rates_title__"]')
+            for index, radio in enumerate(radios):
+                value = radio.get_attribute('aria-posinset')
+                if len(labels) == 2 and index in (0, len(radios) - 1):
+                    value += f' ({self.element_text(labels[0 if index == 0 else 1])})'
+                options.append(Option(
+                    letter=chr(65 + index), text=value, element=radio,
+                    is_selected=radio.get_attribute('aria-checked') == 'true',
+                ))
+            return options
         try:
             rows = node.find_elements(By.CSS_SELECTOR, '[class*="strongListView"]')
         except Exception:
@@ -6956,6 +6971,21 @@ class PublishAnswerExecutor(AnswerExecutor):
 
     def __init__(self, driver, tts=None, stop_requested=None):
         super().__init__(driver, tts=tts, stop_requested=stop_requested)
+
+    def _fill_single_choice(self, q: Question, answer: str) -> bool:
+        if q.options and q.element.find_elements(By.CSS_SELECTOR, '[data-ipublish-question-type="evaluation"]'):
+            letters = self._parse_choice_letters(answer, [opt.letter for opt in q.options])
+            if len(letters) != 1:
+                return False
+            index = next(i for i, opt in enumerate(q.options) if opt.letter == letters[0])
+            selected = [opt.element.get_attribute('aria-checked') == 'true' for opt in q.options]
+            if selected[index] and (index == len(selected) - 1 or not selected[index + 1]):
+                return True
+            if not WebDriverHelper.safe_click(self.driver, q.options[index].element):
+                return False
+            selected = [opt.element.get_attribute('aria-checked') == 'true' for opt in q.options]
+            return selected[index] and (index == len(selected) - 1 or not selected[index + 1])
+        return super()._fill_single_choice(q, answer)
 
     def play_material(self, media, timeout: float = 20.0) -> bool:
         """实际播放材料至少三秒；短音频须播放到结束。"""
@@ -9849,6 +9879,16 @@ class AISolver:
         if not self._publish_prepare_scope(task_name):
             return False
 
+        quiz_result = self._publish_process_quiz()
+        if quiz_result is not None:
+            return quiz_result
+        videos = self._publish_play_task_media()
+        if videos is None:
+            return False
+        reading = self._publish_read_task()
+        if reading is None:
+            return False
+
         handled = 0
         skipped = 0
         rejected = 0
@@ -9887,8 +9927,157 @@ class AISolver:
         if skipped:
             print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
         if not handled and not skipped and not rejected:
-            print("    当前任务没有待自动作答的题目组（已完成或需人工处理），不进入其他任务")
+            if not videos and not reading:
+                print("    当前任务没有可处理的题目或视频，请检查课程目录中的实际进度")
+                return False
+            print("    本任务正文已浏览，请以课程目录显示的进度为准")
         return not self._should_stop() and not skipped and not rejected
+
+    def _publish_read_task(self):
+        """浏览任务正文中的阅读内容，以触发平台记录阅读进度。"""
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return None
+            nodes = self.driver.find_elements(
+                By.CSS_SELECTOR, '.editor-content > [data-lexical-node-type="base-paragraph"], '
+                                 '.editor-content > [data-lexical-node-type="highlight-block"]')
+            scoped = self._publish_scoped_groups([{'element': node} for node in nodes])
+            count = 0
+            for state in scoped:
+                node = state['element']
+                if not (node.get_attribute('textContent') or '').strip():
+                    continue
+                if self.driver.execute_script('return !!arguments[0].closest("[data-ipublish-question-group-type]")', node):
+                    continue
+                self.driver.execute_script('arguments[0].scrollIntoView({block:"center"});', node)
+                if self.stop_requested.wait(3):
+                    return None
+                count += 1
+            return count
+
+    def _publish_play_task_media(self):
+        """播放独立音视频和已提交题组中的材料。"""
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return None
+            wrappers = self.driver.find_elements(By.CSS_SELECTOR,
+                '[data-lexical-node-type="insert-video"], [data-lexical-node-type="insert-audio"]')
+            scoped = self._publish_scoped_groups([{'element': wrapper} for wrapper in wrappers])
+            played = 0
+            for state in scoped:
+                wrapper = state['element']
+                if self.driver.execute_script('return !!arguments[0].closest("[data-ipublish-question-group-type]")', wrapper):
+                    group = self.driver.execute_script('return arguments[0].closest("[data-ipublish-question-group-type]")', wrapper)
+                    if not self.publish_parser.group_submitted(group):
+                        continue
+                video = None
+                try:
+                    self.driver.execute_script('arguments[0].scrollIntoView({block:"center"});', wrapper)
+                    tag = 'audio' if wrapper.get_attribute('data-lexical-node-type') == 'insert-audio' else 'video'
+                    video = WebDriverWait(self.driver, 15).until(
+                        lambda d: wrapper.find_elements(By.TAG_NAME, tag) or False)[0]
+                    duration = WebDriverWait(self.driver, 15).until(
+                        lambda d: d.execute_script('return Number.isFinite(arguments[0].duration) && arguments[0].duration || 0', video))
+                    self.driver.execute_script('arguments[0].muted=true; arguments[0].playbackRate=2; arguments[0].play();', video)
+                    print(f'    播放当前任务音视频（{int(duration)} 秒）')
+                    deadline = time.monotonic() + duration + 60
+                    while not self._should_stop() and time.monotonic() < deadline:
+                        progress = self.driver.execute_script(
+                            'return {ended:arguments[0].ended, error:!!arguments[0].error}', video)
+                        if progress['ended']:
+                            break
+                        if progress['error'] or self.stop_requested.wait(0.5):
+                            return None
+                    else:
+                        print('    视频未播放完成')
+                        return None
+                    played += 1
+                except Exception as exc:
+                    print(f'    视频播放失败: {str(exc)[:100]}')
+                    return None
+                finally:
+                    try:
+                        if video is not None:
+                            self.driver.execute_script('arguments[0].pause()', video)
+                    except Exception:
+                        pass
+        return None if self._should_stop() else played
+
+    def _publish_process_quiz(self):
+        """处理当前任务中的独立诊断测试，已有成绩和未完成答卷不重做。"""
+        with PublishFrameContext(self.driver) as context:
+            if not context.entered:
+                return False
+            links = self.driver.find_elements(By.CSS_SELECTOR, '[data-lexical-node-type="quiz-paper-link"]')
+            scoped = self._publish_scoped_groups([{'element': link} for link in links])
+            if not scoped:
+                return None
+            if len(scoped) != 1:
+                print('    当前任务包含多个测试，请手动处理')
+                return False
+            covers = scoped[0]['element'].find_elements(By.CSS_SELECTOR, '[class*="coverContainer"]')
+            if not covers or not WebDriverHelper.safe_click(self.driver, covers[0]):
+                print('    无法打开单元测试')
+                return False
+            try:
+                WebDriverWait(self.driver, 15).until(lambda d: d.find_elements(By.CSS_SELECTOR, '[class*="acknowledge_btn__"]') or d.find_elements(By.CSS_SELECTOR, 'iframe[src*="/learner/testing/"]'))
+                start = self.driver.find_elements(By.CSS_SELECTOR, '[class*="acknowledge_btn__"]')
+                if start and not WebDriverHelper.safe_click(self.driver, start[0]):
+                    return False
+                frame = WebDriverWait(self.driver, 15).until(EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, 'iframe[src*="/learner/testing/"]')))
+                self.driver.switch_to.frame(frame)
+                WebDriverWait(self.driver, 20).until(lambda d: d.find_elements(By.CSS_SELECTOR, '[data-ipublish-question-group-type]'))
+                text = self.driver.find_element(By.TAG_NAME, 'body').text
+                if '最终得分' in text or '再次作答' in text:
+                    print('    单元测试已有成绩，保留现有结果')
+                    return True
+                groups = self.publish_parser.collect_groups()
+                parsed = []
+                for state in groups:
+                    if state['kind'] != 'choice':
+                        print(f"    单元测试暂不支持题型: {state['type']}")
+                        return False
+                    questions = self.publish_parser.parse_group(state['element'], state['type'], 1)
+                    if not questions or any(opt.is_selected for q in questions for opt in q.options):
+                        print('    测试已有作答或题目解析失败，保留当前进度')
+                        return False
+                    parsed.append((state, questions))
+                if not parsed:
+                    return False
+                for state, questions in parsed:
+                    self.ai_client.force_reset('单元测试题组')
+                    if not self._publish_prepare_media(state['element']):
+                        return False
+                    prompt = self.prompt_builder.build(questions, self.publish_parser.group_direction(state['element']))
+                    response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+                    if not response or self._should_stop():
+                        return False
+                    for question in questions:
+                        answer = self._publish_answer_text(question, response, 0)
+                        if not answer or not self.publish_executor.execute(question, answer):
+                            print('    测试未完整填写，保留当前进度')
+                            return False
+                text = self.driver.find_element(By.TAG_NAME, 'body').text
+                progress = re.search(r'答题卡共计\s*(\d+)\s*题\s*(\d+)\s*/\s*(\d+)', text)
+                if not progress or int(progress.group(1)) == 0 or len(set(progress.groups())) != 1:
+                    print('    无法确认测试全部答完，不提交')
+                    return False
+                submit = self.driver.find_elements(By.XPATH, "//span[normalize-space(.)='提交']")
+                if not submit or not WebDriverHelper.safe_click(self.driver, submit[-1]):
+                    return False
+                self.driver.switch_to.parent_frame()
+                confirm = WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable(
+                    (By.XPATH, "//button[normalize-space(.)='确 定' or normalize-space(.)='确定']")))
+                if not WebDriverHelper.safe_click(self.driver, confirm):
+                    return False
+                self.driver.switch_to.frame(frame)
+                WebDriverWait(self.driver, 30).until(lambda d: '最终得分' in d.find_element(By.TAG_NAME, 'body').text)
+                print('    单元测试已提交并生成成绩')
+                return True
+            except Exception as exc:
+                print(f'    单元测试处理失败: {str(exc)[:100]}')
+                return False
 
     def _publish_prepare_scope(self, task_name: str = '', timeout: float = 30.0) -> bool:
         self._publish_scope = None
@@ -10002,6 +10191,10 @@ class AISolver:
                     continue
                 if state['kind'] == 'upload':
                     print(f"    需要手动上传附件的题目组: {state['type']}")
+                    self._publish_processed_groups.add(key)
+                    return 'skipped'
+                if state['kind'] == 'ai_oral':
+                    print('    AI 口语对话需要在平台内完成')
                     self._publish_processed_groups.add(key)
                     return 'skipped'
                 pending = (state, key)
@@ -11046,6 +11239,8 @@ class UCampusBot:
         """按指定临时目录启动 Edge，并注入反检测脚本。"""
         options = webdriver.EdgeOptions()
         options.add_argument('--disable-blink-features=AutomationControlled')
+        # 新版播放器在窄窗口下会使用需要原生插件的平板录音器。
+        options.add_argument('--window-size=1600,1000')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         for argument in self.MIC_EDGE_ARGS:
             options.add_argument(argument)
