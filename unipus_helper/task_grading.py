@@ -63,7 +63,7 @@ def _path(section):
     return tuple(_clean(part) for part in section.split('/') if _clean(part))
 
 
-def build_grading_index(units):
+def build_record_index(units):
     """Index unique full task paths; repeated names alone cannot identify a task."""
     candidates = defaultdict(list)
 
@@ -78,9 +78,16 @@ def build_grading_index(units):
         elif node.get('role') not in ('unit', 'section', 'node') and name:
             flag = node.get('scoreTaskFlag')
             # A missing flag (or a changed API type) must never mean "ungraded".
-            scored = flag if type(flag) is bool else None
+            score = node.get('score')
+            progress = node.get('finishProgress')
             key = (unit_id, tuple(_clean(p) for p in parents), _clean(name))
-            candidates[key].append(scored)
+            candidates[key].append({
+                'scored': flag if type(flag) is bool else None,
+                # 还没做过的任务接口里没有 score，这时保持 None，不要当成 0 分
+                'score': round(float(score), 1)
+                if type(score) in (int, float) and 0 <= score <= 100 else None,
+                'progress': int(progress) if type(progress) in (int, float) else None,
+            })
 
     for unit in units:
         unit_id = unit.get('unit_id')
@@ -91,19 +98,42 @@ def build_grading_index(units):
             if isinstance(root, dict) and root.get('nodeId') == unit_id and root.get('role') == 'unit':
                 for child in root.get('children', []):
                     visit(child, unit_id, [])
-    return {key: flags[0] if len(flags) == 1 else None for key, flags in candidates.items()}
+    return {key: records[0] if len(records) == 1 else None
+            for key, records in candidates.items()}
+
+
+def build_grading_index(units):
+    return {key: record['scored'] for key, record in build_record_index(units).items()}
+
+
+def score_text(score):
+    return f"{score:g}" if isinstance(score, (int, float)) else ""
 
 
 def task_scoring(index, unit_id, section, name):
     return index.get((unit_id, _path(section), _clean(name)))
 
 
-def assign_task_scoring(tasks, index):
+def _task_keys(tasks):
     keys = [(t.get('_unit_id'), _path(t.get('section') or ''), _clean(t.get('l1_title')))
             for t in tasks]
-    counts = Counter(keys)
+    return keys, Counter(keys)
+
+
+def assign_task_scoring(tasks, index):
+    keys, counts = _task_keys(tasks)
     for task, key in zip(tasks, keys):
         task['is_scored'] = index.get(key) if key[0] and counts[key] == 1 else None
+
+
+def assign_task_records(tasks, index):
+    """把学习记录里的计分标记、已有分数、完成度写回任务。"""
+    keys, counts = _task_keys(tasks)
+    for task, key in zip(tasks, keys):
+        record = index.get(key) if key[0] and counts[key] == 1 else None
+        task['is_scored'] = record['scored'] if record else None
+        task['score'] = record['score'] if record else None
+        task['progress'] = record['progress'] if record else None
 
 
 def grading_text(scored):

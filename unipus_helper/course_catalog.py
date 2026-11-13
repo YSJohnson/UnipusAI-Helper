@@ -3,7 +3,8 @@ import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
-from .task_grading import READ_GRADING_JS, assign_task_scoring, build_grading_index, grading_text
+from .task_grading import (READ_GRADING_JS, assign_task_records, build_record_index,
+                           grading_text, score_text)
 
 
 class CourseCatalogMixin:
@@ -230,18 +231,23 @@ class CourseCatalogMixin:
             if route.hostname == 'ucloud.unipus.cn' and resource and unit_ids:
                 self.gui_log_queue.put('正在读取学习记录中的计分标记...')
                 result = self.driver.execute_async_script(READ_GRADING_JS, resource.group(1), unit_ids) or {}
-                index = build_grading_index(result.get('units') or [])
+                index = build_record_index(result.get('units') or [])
         except Exception:
             # 不让记录接口失败阻断目录扫描，且不在日志中暴露响应或登录凭据。
             self.gui_log_queue.put('学习记录计分标记读取失败，保留任务并标记为计分未知')
-        assign_task_scoring(tabs, index)
+        assign_task_records(tabs, index)
         for tab in tabs:
             tab['display'] += f" · {grading_text(tab['is_scored'])}"
+            if tab.get('score') is not None:
+                tab['display'] += f" · 已有 {score_text(tab['score'])} 分"
         ungraded = sum(t['is_scored'] is False for t in tabs)
         unknown = sum(t['is_scored'] is None for t in tabs)
+        graded = sum(t.get('score') is not None for t in tabs)
         self.gui_log_queue.put(
             f'计分标记：计分 {len(tabs) - ungraded - unknown}，不计分 {ungraded}，未知 {unknown}'
             + ('；未知任务不会被排除，请按需检查学习记录' if unknown else ''))
+        if graded:
+            self.gui_log_queue.put(f'学习记录里已有 {graded} 个任务带分数')
 
     @staticmethod
     def _format_task_display(compulsory, unit_name, section, name, status_text):
