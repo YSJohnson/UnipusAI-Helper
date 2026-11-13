@@ -53,6 +53,7 @@ DEFAULT_CONFIG = {
     "tts_engine": "auto",
     "tts_voice": "",
     "tts_proxy": "",
+    "browser": "edge",
 }
 
 PALETTE = {
@@ -181,6 +182,7 @@ class ConfigEditor(QWidget):
         self._add_text_row(form, "tts_engine", "录音题 TTS 引擎", "auto / edge / sapi / off")
         self._add_text_row(form, "tts_voice", "TTS 音色（可选）", "留空用默认英语音色，如 en-US-AriaNeural")
         self._add_text_row(form, "tts_proxy", "TTS 代理（可选）", "走代理时填，如 http://127.0.0.1:7890")
+        self._add_text_row(form, "browser", "浏览器", "edge（默认）/ chrome，后装请自行安装")
         self._add_text_row(
             form,
             "token_full",

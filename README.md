@@ -43,6 +43,7 @@ UnipusAI-Helper/
 ├── LICENSE
 ├── unipus_helper/             # 业务模块与原生界面
 │   ├── audio_recognizer.py    # 音频转写
+│   ├── browser.py            # 浏览器后端规格（检测与启动共用）
 │   ├── environment_checker.py # 环境检查
 │   ├── course_catalog.py     # 课程目录扫描
 │   ├── task_grading.py       # 计分状态识别与筛选
@@ -79,7 +80,7 @@ py -m venv .venv
 
 ```bash
 brew install ffmpeg                     # 语音转写需要
-brew install --cask microsoft-edge      # 程序驱动的是 Edge
+brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成 google-chrome
 
 ./scripts/config.sh                     # 打开配置编辑器，生成 config.json
 .venv/bin/python UnipusAI_Helper.py      # 启动主程序
@@ -126,6 +127,7 @@ brew install --cask microsoft-edge      # 程序驱动的是 Edge
 | `tts_engine` | 否 | 录音题语音合成后端：`auto`（默认，先 edge 后 sapi）/ `edge` / `sapi` / `off` |
 | `tts_voice` | 否 | TTS 音色；留空用默认英语音色（`en-US-AriaNeural` / 系统英语语音） |
 | `tts_proxy` | 否 | `edge-tts` 需要走代理时填，例如 `http://127.0.0.1:7890`；离线 `sapi` 不需要 |
+| `browser` | 否 | 浏览器后端：`edge`（默认）/ `chrome`。环境检查、driver 启动与缓存目录都跟随这个值；Chrome 只做检测与提示，需自行安装 |
 
 
 
