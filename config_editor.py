@@ -53,6 +53,7 @@ DEFAULT_CONFIG = {
     "tts_engine": "auto",
     "tts_voice": "",
     "tts_proxy": "",
+    "screenshot": False,
 }
 
 PALETTE = {
@@ -189,6 +190,18 @@ class ConfigEditor(QWidget):
             multiline=True,
         )
 
+        self.screenshot_check = CheckBox("题目截图发给模型（需支持识图）")
+        self.screenshot_check.setToolTip("题目文本和语音转写照常发送，只是额外附一张截图")
+        self.screenshot_check.setChecked(bool(self.cfg.get("screenshot", False)))
+        self.entries["screenshot"] = self.screenshot_check
+        form.addRow(self._field_label("识图模式"), self.screenshot_check)
+
+        hint = QLabel("开启后额外发送练习截图，消耗较多 token；接口拒绝图片时会自动改用纯文本。"
+                      "不支持识图的模型请保持关闭。")
+        hint.setObjectName("fieldHint")
+        hint.setWordWrap(True)
+        form.addRow(QLabel(""), hint)
+
         self.debug_check = CheckBox("开启调试输出")
         self.debug_check.setChecked(bool(self.cfg.get("debug_mode", False)))
         self.entries["debug_mode"] = self.debug_check
@@ -277,6 +290,12 @@ class ConfigEditor(QWidget):
                 font-weight: 700;
                 padding-top: 8px;
             }}
+            QLabel#fieldHint {{
+                background: transparent;
+                color: {PALETTE['muted']};
+                font-size: 12px;
+                padding: 0 0 8px 0;
+            }}
             ScrollArea, QScrollArea {{
                 background: transparent;
                 border: none;
@@ -319,7 +338,7 @@ class ConfigEditor(QWidget):
     def _on_save(self):
         data = {}
         for key, entry in self.entries.items():
-            if key == "debug_mode":
+            if isinstance(entry, CheckBox):
                 data[key] = entry.isChecked()
             elif isinstance(entry, PlainTextEdit):
                 data[key] = entry.toPlainText().strip()

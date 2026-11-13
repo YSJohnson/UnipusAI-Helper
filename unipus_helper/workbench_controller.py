@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import copy
+import json
 import queue
 import re
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -52,8 +56,48 @@ class WorkbenchController(CourseCatalogMixin):
         self._exclude_ungraded = False
         self._completed = 0
         self._total = 0
+        self._api_status, self._api_ok, self._api_fail = "正在检测接口", False, False
         self._log_worker = threading.Thread(target=self._collect_logs, daemon=True, name="workbench-logs")
         self._log_worker.start()
+        threading.Thread(target=self._probe_api, daemon=True, name="workbench-api").start()
+
+    def _api_request(self, config):
+        """发一个最小的对话请求，返回耗时；异常原样抛出。"""
+        base = str(getattr(config, "base_url", "") or "").rstrip("/")
+        payload = json.dumps({
+            "model": getattr(config, "model", "") or "",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            base + "/chat/completions", data=payload, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + str(getattr(config, "api_key", "") or "")})
+        started = time.monotonic()
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response.read(64)
+        return (time.monotonic() - started) * 1000
+
+    def _probe_api(self):
+        config = getattr(self.bot, "config", None)
+        base = str(getattr(config, "base_url", "") or "").strip()
+        key = str(getattr(config, "api_key", "") or "").strip()
+        if not base or not key:
+            status, ok, fail = "未配置 API", False, False
+        else:
+            probe = getattr(self, "_api_request", None)
+            try:
+                elapsed = probe(config) if probe else 0
+                status, ok, fail = "接口正常 · %.1f s" % (elapsed / 1000), True, False
+            except urllib.error.HTTPError as exc:
+                hidden = exc.code in (401, 403)
+                status, ok, fail = ("API Key 无效 · %d" % exc.code if hidden
+                                    else "接口异常 · %d" % exc.code), False, True
+            except Exception as exc:  # noqa: BLE001
+                status, ok, fail = "接口连不上 · %s" % type(exc).__name__, False, True
+        with self._lock:
+            self._api_status, self._api_ok, self._api_fail = status, ok, fail
+            self._add_log("模型接口检测：%s" % status, "success" if ok else "warning" if fail else "info")
 
     @staticmethod
     def after(ms, callback):
@@ -104,7 +148,9 @@ class WorkbenchController(CourseCatalogMixin):
                       "unit": t.get("unit_label") or "当前单元", "unitName": t.get("unit_name", ""),
                       "section": t.get("section") or t.get("l2_title") or "课程任务",
                       "required": bool(t.get("is_compulsory")),
-                      "scored": t.get("is_scored"), "status": t.get("status", "unknown"),
+                      "scored": t.get("is_scored"), "score": t.get("score"),
+                      "score_abnormal": bool(t.get("score_abnormal")),
+                      "progress": t.get("progress"), "status": t.get("status", "unknown"),
                       "selected": t["id"] in self._selected} for t in self._tasks]
             config = getattr(self.bot, "config", SimpleNamespace(username="", model=""))
             username = str(getattr(config, "username", ""))
@@ -116,6 +162,7 @@ class WorkbenchController(CourseCatalogMixin):
                 "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),
                 "tasks": tasks, "logs": self._logs, "account": account,
                 "model": getattr(config, "model", "") or "未配置",
+                "apiStatus": self._api_status, "apiOk": self._api_ok, "apiFail": self._api_fail,
                 "progress": {"completed": self._completed, "total": self._total},
             })
 
@@ -219,7 +266,9 @@ class WorkbenchController(CourseCatalogMixin):
             task["status"] = "done"
             self._selected.discard(task["id"])
             self._completed += 1
-        self._add_log(f"已完成：{task.get('l1_title', '')}", "success")
+        score = task.get("session_score")
+        suffix = f"，得分 {score:g}" if isinstance(score, (int, float)) else "，本次未读到成绩"
+        self._add_log(f"已完成：{task.get('l1_title', '')}{suffix}", "success")
 
     def stop(self):
         self._stop_requested.set()
@@ -229,6 +278,58 @@ class WorkbenchController(CourseCatalogMixin):
             if self._operation:
                 self._status = "正在停止"
         return {"ok": True}
+
+    def restart_browser(self):
+        with self._lock:
+            if self._closed.is_set() or self._operation:
+                return {"ok": False, "error": "请等待当前操作完成。"}
+            self._ready = False
+            self._error = ""
+            self._status = "正在重启浏览器"
+            self._operation = "restart"
+            self._worker = threading.Thread(target=self._restart_browser, daemon=True,
+                                            name="browser-restart")
+            self._worker.start()
+        self._add_log("正在重启课程浏览器…")
+        return {"ok": True}
+
+    def _restart_browser(self):
+        succeeded = False
+        try:
+            if not self.bot or not hasattr(self.bot, "restart_browser"):
+                raise RuntimeError("当前环境不支持重启浏览器。")
+            driver = self.bot.restart_browser()
+            config = getattr(self.bot, "config", None) or getattr(self.solver, "config", None)
+            solver = type(self.solver)(driver, config) if self.solver else None
+            with self._lock:
+                self.driver = driver
+                self.solver = solver
+                self._tasks = []
+                self._selected = set()
+            self._add_log("课程浏览器已重新启动，正在重新登录…")
+            if solver is not None and not self.bot._login():
+                raise RuntimeError("浏览器已重启，但重新登录没有完成。")
+            if self.logger:
+                self.logger.info("Browser restarted")
+            with self._lock:
+                self._status = "就绪"
+                self._error = ""
+            succeeded = True
+            self._add_log("课程浏览器重启完成。", "success")
+        except Exception as exc:
+            if self._closed.is_set():
+                return
+            self._add_log(str(exc), "error")
+            with self._lock:
+                self._status = "需要检查"
+                self._error = self._redact(exc)[:250]
+            if self.logger:
+                self.logger.error("Restart browser failed", exc_info=True)
+        finally:
+            with self._lock:
+                self._operation = None
+                # 重建并登录成功后才恢复可操作。
+                self._ready = succeeded and not self._closed.is_set()
 
     def close(self):
         with self._lock:
