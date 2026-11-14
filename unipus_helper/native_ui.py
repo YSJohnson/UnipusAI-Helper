@@ -15,6 +15,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from shiboken6 import delete as delete_qt_object
 
 from .paths import PROJECT_ROOT, QML_DIR
+from .task_grading import score_text
 from .workbench_controller import WorkbenchController
 
 
@@ -34,7 +35,8 @@ def configure_ui_font(app):
 
 class TaskListModel(QAbstractListModel):
     """Keep delegates and scroll position when only selection/status changes."""
-    fields = ("taskId", "title", "isRequired", "status", "chosen", "scored", "statusName", "sectionHeader", "selectable")
+    fields = ("taskId", "title", "isRequired", "status", "chosen", "scored", "statusName",
+              "sectionHeader", "selectable", "scoreText", "scoreAbnormal")
     roles = {Qt.UserRole + i + 1: name.encode() for i, name in enumerate(fields)}
 
     def __init__(self, parent=None):
@@ -202,6 +204,10 @@ class NativeBridge(QObject):
         self._result(self.controller.stop())
 
     @Slot()
+    def restartBrowser(self):
+        self._result(self.controller.restart_browser())
+
+    @Slot()
     def copyLogs(self):
         QGuiApplication.clipboard().setText("\n".join(
             f'{row["time"]}  {row["message"]}' for row in self._state["logs"]))
@@ -229,7 +235,7 @@ class NativeBridge(QObject):
                   "done": sum(t["status"] == "done" for t in scoped),
                   "required": sum(t["required"] for t in scoped)}
         visible = [t for t in scoped if (
-            self._query in (f'{t["title"]} {t["section"]} {t["unit"]} ' + (
+            self._query in (f'{t["title"]} {t["section"]} {t["unit"]} {score_text(t.get("score"))} ' + (
                 "不计分" if t["scored"] is False else "计分未知" if t["scored"] is None else "计分")).casefold()) and (
             self._filter == "all" or self._filter == "pending" and t["status"] != "done"
             or self._filter == "done" and t["status"] == "done"
@@ -237,6 +243,8 @@ class NativeBridge(QObject):
         statuses = {"done": "已完成", "doing": "进行中", "todo": "未开始", "unknown": "待确认"}
         rows = [dict(t, taskId=t["id"], chosen=t["selected"], isRequired=t["required"],
                      statusName=statuses.get(t["status"], "待确认"),
+                     scoreText=f'{score_text(t.get("score"))} 分' if t.get("score") is not None else "",
+                     scoreAbnormal=bool(t.get("score_abnormal")),
                      selectable=not (state["excludeUngraded"] and t["scored"] is False))
                 for t in visible]
         previous_group = None
