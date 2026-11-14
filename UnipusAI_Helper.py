@@ -180,6 +180,22 @@ def setup_logging():
     return logger
 
 
+def _config_bool(value: Any, default: bool = False) -> bool:
+    """解析 config.json 里的布尔开关，兼容 true / "true" / 1 等写法。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ('1', 'true', 'yes', 'on'):
+            return True
+        if text in ('0', 'false', 'no', 'off', ''):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 @dataclass(frozen=True)
 class Config:
     """不可变配置类"""
@@ -196,6 +212,8 @@ class Config:
     tts_engine: str = "auto"  # auto / edge / sapi / off
     tts_voice: str = ""       # 留空按引擎给默认英语音色
     tts_proxy: str = ""       # edge-tts 走代理时填，如 http://127.0.0.1:7890
+    # true：遇到录音题不录音，直接进入下一题（录音题留到平台内手动完成）
+    skip_record: bool = False
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -216,6 +234,7 @@ class Config:
             tts_engine=(data.get("tts_engine") or "auto").strip(),
             tts_voice=(data.get("tts_voice") or "").strip(),
             tts_proxy=(data.get("tts_proxy") or "").strip(),
+            skip_record=_config_bool(data.get("skip_record", False)),
         )
 
 
@@ -8864,6 +8883,10 @@ class AISolver:
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
 
+    def _skip_record_questions(self) -> bool:
+        """配置要求跳过录音题：不占用麦克风和上传流程，直接处理下一题。"""
+        return bool(getattr(self.config, 'skip_record', False))
+
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = "",
                               on_task_done: Optional[Callable[[Dict], None]] = None):
         """
@@ -9716,9 +9739,15 @@ class AISolver:
             # 录音题：Vocabulary / Exercise 1 页面自带参考音频，直接把原声喂进麦克风；
             # Exercise 2 这类主观题没有原声，先让模型写口语稿再用 TTS 合成。
             # total_questions 保持原值（含录音题），否则「只有录音题」的页面不会触发提交。
+            # 配置 skip_record 打开时不录音，也不把录音题算进本页完成度，直接进入下一题。
             record_questions = [q for q in normal_questions if q.q_type == QuestionType.RECORD]
             record_answered = 0
-            if record_questions:
+            if record_questions and self._skip_record_questions():
+                print(f"    本页 {len(record_questions)} 道录音题，已按配置跳过")
+                normal_questions = [q for q in normal_questions
+                                    if q.q_type != QuestionType.RECORD]
+                total_questions = len(normal_questions)
+            elif record_questions:
                 print(f"    本页 {len(record_questions)} 道录音题，开始逐条录音...")
                 for q in record_questions:
                     if self._should_stop():
@@ -9892,6 +9921,7 @@ class AISolver:
         handled = 0
         skipped = 0
         rejected = 0
+        record_skipped = 0
         idle_reveals = 0
         while not self._should_stop():
             result = self._publish_process_next_group()
@@ -9906,6 +9936,10 @@ class AISolver:
                 continue
             if result == 'skipped':
                 skipped += 1
+                idle_reveals = 0
+                continue
+            if result == 'record_skipped':
+                record_skipped += 1
                 idle_reveals = 0
                 continue
             if result == 'rejected':
@@ -9926,7 +9960,11 @@ class AISolver:
             print(f"    另有 {rejected} 个题目组因正确率不足 60% 被平台拒绝提交")
         if skipped:
             print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
+        if record_skipped:
+            print(f"    另有 {record_skipped} 个录音题组已按配置跳过，需要时请在平台内手动完成")
         if not handled and not skipped and not rejected:
+            if record_skipped:
+                return not self._should_stop()
             if not videos and not reading:
                 print("    当前任务没有可处理的题目或视频，请检查课程目录中的实际进度")
                 return False
@@ -10157,7 +10195,11 @@ class AISolver:
             return False
 
     def _publish_process_next_group(self) -> str:
-        """在当前页处理下一个待作答题目组，返回 answered / done / error。"""
+        """在当前页处理下一个待作答题目组。
+
+        返回 answered / skipped / record_skipped / rejected / done / error。
+        record_skipped 表示该题目组是录音题且配置要求跳过。
+        """
         # 切单元后可能再次弹出「本单元学习规则」，每组开始前先顺手关掉
         self.publish_executor.dismiss_rules_popup()
         with PublishFrameContext(self.driver) as context:
@@ -10189,6 +10231,10 @@ class AISolver:
                 key = parser.group_key(state['element'])
                 if key in self._publish_processed_groups:
                     continue
+                if state['kind'] == 'record' and self._skip_record_questions():
+                    print("    录音题组已按配置跳过")
+                    self._publish_processed_groups.add(key)
+                    return 'record_skipped'
                 if state['kind'] == 'upload':
                     print(f"    需要手动上传附件的题目组: {state['type']}")
                     self._publish_processed_groups.add(key)

@@ -11,5 +11,6 @@
   "debug_mode": false,
   "tts_engine": "auto",
   "tts_voice": "",
-  "tts_proxy": ""
+  "tts_proxy": "",
+  "skip_record": false
 }
