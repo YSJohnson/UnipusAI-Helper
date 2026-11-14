@@ -53,6 +53,8 @@ DEFAULT_CONFIG = {
     "tts_engine": "auto",
     "tts_voice": "",
     "tts_proxy": "",
+    # true：遇到录音题不录音，直接进入下一题
+    "skip_record": False,
 }
 
 PALETTE = {
@@ -193,6 +195,11 @@ class ConfigEditor(QWidget):
         self.debug_check.setChecked(bool(self.cfg.get("debug_mode", False)))
         self.entries["debug_mode"] = self.debug_check
         form.addRow(self._field_label("调试模式"), self.debug_check)
+
+        self.skip_record_check = CheckBox("遇到录音题自动跳过")
+        self.skip_record_check.setChecked(bool(self.cfg.get("skip_record", False)))
+        self.entries["skip_record"] = self.skip_record_check
+        form.addRow(self._field_label("跳过录音题"), self.skip_record_check)
         content_layout.addWidget(form_card)
 
         action_row = QHBoxLayout()
@@ -319,7 +326,7 @@ class ConfigEditor(QWidget):
     def _on_save(self):
         data = {}
         for key, entry in self.entries.items():
-            if key == "debug_mode":
+            if isinstance(entry, CheckBox):
                 data[key] = entry.isChecked()
             elif isinstance(entry, PlainTextEdit):
                 data[key] = entry.toPlainText().strip()

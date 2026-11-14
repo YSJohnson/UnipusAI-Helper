@@ -21,6 +21,7 @@
 ## 特性
 
 - **多题型处理**：支持选择、填空、阅读、翻译、写作及音视频、录音等等题型，支持自动提交。
+- **录音题跳过**：`skip_record` 打开后不录音，遇到录音题直接进入下一题，适合麦克风不可用或想自己完成口语题的场景。
 - **批量与单页处理**：可扫描全部单元或当前单元批量处理，也可直接处理当前页面。
 - **任务筛选**：默认选择未完成必修，支持搜索、状态筛选和排除不计分任务。
 - **断点续跑**：完成一项自动取消勾选，停止后保留剩余选择，方便继续处理。
@@ -107,7 +108,8 @@ brew install --cask microsoft-edge      # 程序驱动的是 Edge
   "max_tokens": 32768,
   "temperature": 0.3,
   "token_full": "",
-  "debug_mode": false
+  "debug_mode": false,
+  "skip_record": false
 }
 ```
 
@@ -126,6 +128,7 @@ brew install --cask microsoft-edge      # 程序驱动的是 Edge
 | `tts_engine` | 否 | 录音题语音合成后端：`auto`（默认，先 edge 后 sapi）/ `edge` / `sapi` / `off` |
 | `tts_voice` | 否 | TTS 音色；留空用默认英语音色（`en-US-AriaNeural` / 系统英语语音） |
 | `tts_proxy` | 否 | `edge-tts` 需要走代理时填，例如 `http://127.0.0.1:7890`；离线 `sapi` 不需要 |
+| `skip_record` | 否 | 遇到录音题时自动跳过，默认 `false`。设为 `true` 后不录音、直接进入下一题，录音题留到平台内手动完成 |
 
 
 
@@ -165,6 +168,14 @@ brew install --cask microsoft-edge      # 程序驱动的是 Edge
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.8（未发布）</b>：新增录音题跳过配置</summary>
+
+- **跳过录音题**：新增 `skip_record` 配置（默认 `false`）。打开后遇到录音题不录音，直接跳到下一题／下一个题目组，录音题留到平台内手动完成；旧版播放器和新版 ipublish 播放器都生效。
+- **配置编辑器**：配置编辑器新增「跳过录音题」开关，保存后写入 `config.json`。
+
+</details>
 
 <details>
 <summary><b>v3.9.7（2026-11-13）</b>：新版视听说课程适配 / 录音与学习进度修复</summary>
