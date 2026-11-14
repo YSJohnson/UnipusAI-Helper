@@ -80,16 +80,15 @@ def ensure_writable_temp_dir() -> str:
 ensure_writable_temp_dir()
 
 from unipus_helper.audio_recognizer import AudioTranscriber
+from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser
 from unipus_helper.environment_checker import EnvironmentChecker
 from openai import OpenAI
-from selenium import webdriver
-from selenium.common.exceptions import (NoSuchElementException, TimeoutException,
-                                        StaleElementReferenceException,
+from selenium.common.exceptions import (NoSuchDriverException, NoSuchElementException,
+                                        TimeoutException, StaleElementReferenceException,
                                         SessionNotCreatedException, WebDriverException)
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -196,6 +195,8 @@ class Config:
     tts_engine: str = "auto"  # auto / edge / sapi / off
     tts_voice: str = ""       # 留空按引擎给默认英语音色
     tts_proxy: str = ""       # edge-tts 走代理时填，如 http://127.0.0.1:7890
+    # 浏览器后端：edge（默认）/ chrome，见 unipus_helper/browser.py
+    browser: str = DEFAULT_BROWSER
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -216,6 +217,7 @@ class Config:
             tts_engine=(data.get("tts_engine") or "auto").strip(),
             tts_voice=(data.get("tts_voice") or "").strip(),
             tts_proxy=(data.get("tts_proxy") or "").strip(),
+            browser=normalize_browser(data.get("browser")),
         )
 
 
@@ -11148,6 +11150,8 @@ class UCampusBot:
 
     def __init__(self, config_path: str = 'config.json', skip_check: bool = False):
         self.config = Config.from_json(config_path)
+        # 门禁与 driver 共用同一份规格，避免两边指向不同浏览器
+        self.browser = get_spec(self.config.browser)
         self._shutdown_event = threading.Event()
         self._background_threads = []
         self.driver = None
@@ -11159,14 +11163,14 @@ class UCampusBot:
         self.popup_watcher = PopupWatcher(self.driver)
 
     def _ensure_environment(self):
-        checker = EnvironmentChecker()
+        checker = EnvironmentChecker(self.browser.key)
 
         if not checker.check_all():
             while True:
                 choice = checker.show_fix_guide()
 
                 if choice == '1':
-                    checker.auto_install_edge()
+                    checker.auto_install_browser()
                     sys.exit(0)
 
                 elif choice == '2':
@@ -11199,12 +11203,20 @@ class UCampusBot:
                     print("无效选项，请重新选择")
 
     def _show_detailed_help(self):
-        print("""
+        name = self.browser.display_name
+        hints = " / ".join(self.browser.manual_install_hint)
+        if self.browser.supports_auto_install:
+            browser_fix = f"       解决：选择 [1] 自动安装，或手动访问 {hints}"
+        else:
+            browser_fix = f"       解决：这个浏览器不提供自动安装，请手动下载：{hints}"
+
+        print(f"""
     【问题诊断】
 
-    1. Edge 浏览器问题
-       原因：Edge 未安装
-       解决：选择 [1] 自动安装，或访问 https://www.microsoft.com/edge
+    1. {name} 浏览器问题
+       原因：{name} 未安装，或安装在非默认位置
+{browser_fix}
+       如需改用另一种浏览器：在 config.json 里修改 "browser"（edge / chrome）后重启
 
     2. FFmpeg 问题（语音识别必需）
        原因：未安装 FFmpeg 或未添加到系统 PATH
@@ -11228,21 +11240,29 @@ class UCampusBot:
     6. 重启终端，输入 ffmpeg -version 验证
     """)
 
-    COMPAT_EDGE_ARGS = ('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-                        '--disable-extensions')
+    COMPAT_BROWSER_ARGS = ('--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+                           '--disable-extensions')
 
     # 录音题需要：不再弹麦克风授权框 + AudioContext 无需用户手势即可启动
-    MIC_EDGE_ARGS = ('--use-fake-ui-for-media-stream',
-                     '--autoplay-policy=no-user-gesture-required')
+    MIC_BROWSER_ARGS = ('--use-fake-ui-for-media-stream',
+                        '--autoplay-policy=no-user-gesture-required')
 
-    def _start_edge(self, temp_dir: str, extra_args=()):
-        """按指定临时目录启动 Edge，并注入反检测脚本。"""
-        options = webdriver.EdgeOptions()
+    def _start_browser(self, temp_dir: str, extra_args=()):
+        """按指定临时目录启动浏览器，并注入反检测脚本。"""
+        options_cls, webdriver_cls, service_cls = driver_api(self.browser)
+        options = options_cls()
+
+        # 环境检查与 driver 读同一条检测结果：找到就用它启动，
+        # 找不到才退到 Selenium Manager 自己解析。
+        install_path = self.browser.detect_install_path()
+        if install_path:
+            options.binary_location = install_path
+
         options.add_argument('--disable-blink-features=AutomationControlled')
         # 新版播放器在窄窗口下会使用需要原生插件的平板录音器。
         options.add_argument('--window-size=1600,1000')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        for argument in self.MIC_EDGE_ARGS:
+        for argument in self.MIC_BROWSER_ARGS:
             options.add_argument(argument)
         for argument in extra_args:
             options.add_argument(argument)
@@ -11253,7 +11273,8 @@ class UCampusBot:
             user_data_dir = tempfile.mkdtemp(prefix='ucampus_')
         options.add_argument(f'--user-data-dir={user_data_dir}')
         if temp_dir:
-            options.add_argument(f'--disk-cache-dir={os.path.join(temp_dir, "edge_cache")}')
+            cache_dir = os.path.join(temp_dir, self.browser.profile_dir_name)
+            options.add_argument(f'--disk-cache-dir={cache_dir}')
             options.add_argument(f'--crash-dumps-dir={temp_dir}')
 
         service_options = {}
@@ -11261,7 +11282,17 @@ class UCampusBot:
             # Let Python handle Ctrl+C and close the driver in order; the driver
             # must not receive the console interrupt before cleanup starts.
             service_options['popen_kw'] = {'creation_flags': subprocess.CREATE_NEW_PROCESS_GROUP}
-        driver = webdriver.Edge(options=options, service=EdgeService(**service_options))
+        try:
+            driver = webdriver_cls(options=options, service=service_cls(**service_options))
+        except NoSuchDriverException:
+            if not install_path:
+                raise
+            # 指定了路径反而拿不到 driver（该路径不是 Selenium Manager 认识的
+            # 发行版，或探测到的那一刻文件正好不可用）时，退回自动解析，
+            # 避免这条分支比「不指定路径」更容易失败。
+            print(f" 按 {install_path} 取不到 driver，改由自动解析重试...")
+            options.binary_location = ""
+            driver = webdriver_cls(options=options, service=service_cls(**service_options))
         try:
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
@@ -11284,7 +11315,7 @@ class UCampusBot:
         return driver
 
     def _create_driver(self):
-        # 系统临时目录不可写时，Edge 会报
+        # 系统临时目录不可写时，浏览器会报
         # "cannot create temp dir for unpacking extensions"，这里统一换成可写目录
         temp_dir = ensure_writable_temp_dir()
 
@@ -11297,16 +11328,23 @@ class UCampusBot:
             pass
 
         try:
-            return self._start_edge(temp_dir)
+            return self._start_browser(temp_dir)
+        except NoSuchDriverException as exc:
+            # 通常意味着浏览器本身没装（或装在非默认路径），重试也没用，直接指路
+            print(f"\n 找不到 {self.browser.display_name} 的 driver：{str(exc)[:120]}")
+            print(f"   请确认已安装 {self.browser.display_name}，或在 config.json 里改 \"browser\"（edge / chrome）")
+            for hint in self.browser.manual_install_hint:
+                print(f"   下载：{hint}")
+            raise
         except (SessionNotCreatedException, WebDriverException) as exc:
             # 受限环境（沙箱/受限用户/显卡驱动异常）下首次启动可能失败，降级重试一次：
             # 换新的临时 profile 并加上兼容参数
-            print(f" 启动 Edge 失败（{str(exc)[:120]}），尝试兼容模式重试...")
-            return self._start_edge(temp_dir, extra_args=self.COMPAT_EDGE_ARGS)
+            print(f" 启动 {self.browser.display_name} 失败（{str(exc)[:120]}），尝试兼容模式重试...")
+            return self._start_browser(temp_dir, extra_args=self.COMPAT_BROWSER_ARGS)
         except Exception as exc:
             # 驱动握手超时（urllib3 ReadTimeoutError）等非 WebDriverException 也要重试
-            print(f" 启动 Edge 超时（{str(exc)[:120]}），尝试兼容模式重试...")
-            return self._start_edge(temp_dir, extra_args=self.COMPAT_EDGE_ARGS)
+            print(f" 启动 {self.browser.display_name} 超时（{str(exc)[:120]}），尝试兼容模式重试...")
+            return self._start_browser(temp_dir, extra_args=self.COMPAT_BROWSER_ARGS)
 
     def start(self):
         solver = AISolver(self.driver, self.config)
@@ -11653,7 +11691,7 @@ class PopupWatcher:
 if __name__ == '__main__':
     print('*' * 25 + "Unipus-Helper" + '*' * 25)
 
-    # 先把临时目录换成可写的：受限环境下 Edge 启动会因为系统 TEMP 不可写而失败
+    # 先把临时目录换成可写的：受限环境下浏览器启动会因为系统 TEMP 不可写而失败
     ensure_writable_temp_dir()
 
     skip_check = '--skip-check' in sys.argv
