@@ -7,6 +7,9 @@ Rectangle {
     property string account: ""
     property string model: ""
     property string status: ""
+    property string apiStatus: ""
+    property bool apiOk: false
+    property bool apiFail: false
     property bool busy: false
     property bool ready: false
     property bool hasError: false
@@ -36,6 +39,15 @@ Rectangle {
                     HoverHandler { id: modelHover }
                     ToolTip.visible: modelHover.hovered && modelText.truncated
                     ToolTip.text: modelText.text
+                    ToolTip.delay: 650
+                }
+                UiText {
+                    id: apiStatusText; objectName: "apiStatus"; text: identity.apiStatus
+                    font.pixelSize: 12; Layout.maximumWidth: 132
+                    color: identity.apiOk ? "#45d579" : identity.apiFail ? Theme.error : Theme.muted
+                    HoverHandler { id: apiHover }
+                    ToolTip.visible: apiHover.hovered && apiStatusText.truncated
+                    ToolTip.text: identity.apiStatus
                     ToolTip.delay: 650
                 }
             }

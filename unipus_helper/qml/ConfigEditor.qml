@@ -20,7 +20,8 @@ ApplicationWindow {
     property bool noticeOk: true
 
     function saveSettings() {
-        let values = {"token_full": tokenInput.text, "debug_mode": debugCheck.checked}
+        let values = {"token_full": tokenInput.text, "debug_mode": debugCheck.checked,
+                      "screenshot": screenshotCheck.checked}
         for (let i = 0; i < fields.count; ++i) {
             let row = fields.itemAt(i)
             values[row.fieldKey] = row.value
@@ -134,6 +135,15 @@ ApplicationWindow {
                             Layout.fillWidth: true; spacing: 16
                             UiText { Layout.preferredWidth: 150; text: "调试模式"; color: Theme.secondary; font.pixelSize: 13 }
                             UiCheck { id: debugCheck; objectName: "field_debug_mode"; text: "开启调试输出"; checked: !!configEditor.values.debug_mode; Layout.fillWidth: true }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 16
+                            UiText { Layout.preferredWidth: 150; text: "识图模式"; color: Theme.secondary; font.pixelSize: 13 }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 4
+                                UiCheck { id: screenshotCheck; objectName: "field_screenshot"; text: "题目截图发给模型（需支持识图）"; checked: !!configEditor.values.screenshot; Layout.fillWidth: true }
+                                UiText { text: "开启后额外发送练习截图，消耗较多 token；接口拒绝图片时会自动改用纯文本。不支持识图的模型请保持关闭。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                            }
                         }
                     }
                 }

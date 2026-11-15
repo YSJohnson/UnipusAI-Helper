@@ -34,6 +34,8 @@ DEFAULT_CONFIG = {
     "tts_voice": "",
     "tts_proxy": "",
     "browser": "edge",
+    # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
+    "screenshot": False,
 }
 
 
@@ -82,8 +84,12 @@ class ConfigEditor(QObject):
         data = dict(self.cfg)
         data.update(values)
         for key in DEFAULT_CONFIG:
-            if key != "debug_mode" and key in data:
+            if key in ("debug_mode", "screenshot"):
+                continue
+            if key in data:
                 data[key] = str(data[key]).strip()
+        data["debug_mode"] = bool(data.get("debug_mode", False))
+        data["screenshot"] = bool(data.get("screenshot", False))
         try:
             data["max_tokens"] = int(data["max_tokens"])
         except (ValueError, TypeError):

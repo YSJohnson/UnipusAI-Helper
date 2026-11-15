@@ -178,6 +178,7 @@ ApplicationWindow {
                     objectName: "accountDetails"; Layout.fillWidth: false; Layout.preferredWidth: window.width < 1100 ? 296 : 352
                     Layout.minimumWidth: 296; Layout.maximumWidth: Layout.preferredWidth
                     account: window.appState.account; model: window.appState.model; status: window.appState.status
+                    apiStatus: window.appState.apiStatus || ""; apiOk: !!window.appState.apiOk; apiFail: !!window.appState.apiFail
                     busy: window.busy; ready: !!window.appState.ready; hasError: !!window.appState.error
                 }
             }
@@ -203,6 +204,11 @@ ApplicationWindow {
                 }
                 UiText { visible: window.currentPage === 1; text: (window.appState.logs || []).length + " 条日志"; font.pixelSize: 13; color: Theme.muted }
                 Item { Layout.fillWidth: true }
+                ActionButton {
+                    objectName: "restartBrowser"; visible: window.currentPage === 0; text: "重启浏览器"; iconName: "refresh"; quiet: true
+                    implicitHeight: window.compactHeight ? 36 : 40
+                    enabled: !window.busy; onClicked: workbench.restartBrowser()
+                }
                 ActionButton { objectName: "copyLogs"; visible: window.currentPage === 1; enabled: (window.appState.logs || []).length > 0; text: "复制日志"; iconName: "copy"; implicitHeight: 40; onClicked: workbench.copyLogs() }
             }
             Rectangle {
@@ -286,6 +292,7 @@ ApplicationWindow {
                             UiText { text: "任务名称"; color: Theme.muted; font.pixelSize: 13; Layout.fillWidth: true }
                             UiText { text: "要求"; color: Theme.muted; font.pixelSize: 13; Layout.preferredWidth: 48; horizontalAlignment: Text.AlignHCenter }
                             UiText { text: "计分"; color: Theme.muted; font.pixelSize: 13; Layout.preferredWidth: 64; horizontalAlignment: Text.AlignHCenter }
+                            UiText { text: "分数"; color: Theme.muted; font.pixelSize: 13; Layout.preferredWidth: 64; horizontalAlignment: Text.AlignHCenter }
                             UiText { text: "状态"; color: Theme.muted; font.pixelSize: 13; Layout.preferredWidth: 72; horizontalAlignment: Text.AlignHCenter }
                         }
                     }
