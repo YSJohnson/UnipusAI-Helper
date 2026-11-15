@@ -822,9 +822,11 @@ class OpenAICompatibleClient:
         导致 content 为空且 finish_reason=length；这里在重试次数内调整预算和问法。
         """
         print(f"当前ai对话历史共{len(self.conversation_history)}条")
-        # 推理型模型会把预算全烧在 reasoning 上，配置值太小时必然拿不到正文；
-        # 这里设一个下限，配置里写得更小也按 32768 走。
-        max_tokens = max(self.config.max_tokens, 32768)
+        # 从配置值起步，遇到「推理把预算吃光」再逐次放大（下限只防非法值）。
+        # 注意：不能直接把预算抬到 32768，否则下面 finish_reason=length 的放宽分支
+        # 永远进不去（max_tokens < 32768 恒为假），重试逻辑会变成死代码，
+        # config.json 里配的 max_tokens 也会被静默忽略。
+        max_tokens = max(int(getattr(self.config, 'max_tokens', 0) or 0), 1024)
         for attempt in range(retry_count):
             if stop_requested is not None and stop_requested.is_set():
                 return None
@@ -9505,6 +9507,12 @@ class AISolver:
         self._processed_video_tabs: set = set()
         self._skipped_video_tabs: set = set()
         self._processed_audio_tabs: set = set()
+        self._loaded_reading_units: set = set()
+        # 本次批量勾选的任务名；同页子任务（如 -1/-2）已在队列里时就不要再自动切过去
+        self._scheduled_task_titles: set = set()
+        # 刷时长模式：只停留不答题，停够时长就自动切下一个任务
+        self.idle_mode = False
+        self.idle_minutes = float(getattr(config, 'idle_minutes', 5) or 5)
         self._publish_processed_groups: set = set()
         self._publish_scope: Optional[PublishTaskScope] = None
         self._publish_scope_url: str = ''
@@ -9516,6 +9524,21 @@ class AISolver:
 
     def clear_stop(self):
         self.stop_requested.clear()
+
+    def _reset_task_context(self, chapter_id: str):
+        """切换任务时重置 AI 上下文，并作废「内容已注入上下文」的相关标记。
+
+        同一个音视频会被同一个 tab view 里的多个任务共用（真机：
+        Viewing and understanding-1 和 -2 播放的是同一个 mp4），课文段落也会
+        在不同任务间复用。如果只清 AI 上下文、不清这些「已处理过」的标记，
+        后一个任务就会认为「视频/课文已经处理过」直接跳过，结果它一道题都没有
+        转写或课文上下文，答案自然全错。
+        """
+        self.ai_client.force_reset(chapter_id)
+        # 用重新赋值而不是 .clear()：__new__ 构造出来的对象可能没有这些属性
+        self._processed_video_tabs = set()
+        self._processed_audio_tabs = set()
+        self._loaded_reading_units = set()
 
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
@@ -9537,6 +9560,17 @@ class AISolver:
         self.ai_client.start_new_chapter(chapter_name)
         self.processed_hashes.clear()
         self._publish_processed_groups = set()
+        # 新一轮批量处理要重新判断音视频/课文是否需要注入，别继承上一轮的去重标记
+        self._processed_video_tabs = set()
+        self._processed_audio_tabs = set()
+        self._loaded_reading_units = set()
+        # 连二级标题一起记：目录扫描有时会把 -1 / -2 拆成两条独立任务排进队列
+        self._scheduled_task_titles = {
+            str(title).strip()
+            for tab in selected_tabs
+            for title in (tab.get('l1_title'), tab.get('l2_title'))
+            if str(title or '').strip()
+        }
 
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
         course_home_url = course_home_url or self.driver.current_url
@@ -9680,25 +9714,30 @@ class AISolver:
         # 每个任务页都可能自带 Learning / Practicing 标签，逐个任务重新判断
         self._inline_learning_tried = False
 
+        # 切任务时先回课程页并重置上下文。这一步必须早于课文加载：Collocation 要用
+        # 的 Reading the text 是刚注入 ai_context 的，先重置会把刚拉进来的课文一起
+        # 清掉，之后又因 _loaded_reading_units 缓存命中补不回来（缺陷：搭配题缺上下文）。
+        if '_element' in tab and tab['_element'] is not None:
+            if task_idx > 0 or self.driver.current_url != course_home_url:
+                self.driver.get(course_home_url)
+                if self.stop_requested.wait(3):
+                    return 'stopped'
+                self._reset_task_context(f"{chapter_name}_{tab_name}")
+
         # Collocation（搭配填空）要求「从课文里找搭配」，先把同单元 Reading the text 当上下文
         section_text = ' '.join([
             str(tab.get('section') or ''),
             str(tab.get('l2_title') or ''),
             str(tab.get('display') or ''),
         ]).lower()
-        if 'collocation' in section_text and tab.get('_unit_idx') is not None:
+        if ('collocation' in section_text and tab.get('_unit_idx') is not None
+                and not getattr(self, 'idle_mode', False)):
             self._load_reading_context(course_home_url, tab.get('_unit_idx'),
                                       section_filter=str(tab.get('section') or tab.get('l2_title') or ''))
             if self._should_stop():
                 return 'stopped'
 
         if '_element' in tab and tab['_element'] is not None:
-            if task_idx > 0 or self.driver.current_url != course_home_url:
-                self.driver.get(course_home_url)
-                if self.stop_requested.wait(3):
-                    return 'stopped'
-                self.ai_client.force_reset(f"{chapter_name}_{tab_name}")
-
             if '_unit_idx' in tab:
                 try:
                     unit_container = WebDriverWait(self.driver, 10).until(
@@ -10339,7 +10378,37 @@ class AISolver:
         return repaired
 
     def _process_tab_with_accumulation(self, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
-        """处理Tab - 累积原文模式，包含视频/音频预处理"""
+        """处理Tab - 累积原文模式；同一页里的并列子任务（-1/-2）会依次做完。"""
+
+        if self._should_stop():
+            return False
+        if getattr(self, 'idle_mode', False):
+            # 刷时长模式：不解析、不作答、不转写，只在页面上停够时长再切下一个
+            return self._idle_hold_subtasks(tab_name)
+        if self._is_publish_page():
+            print("    检测到新版 ipublish 播放器，跳过旧版音视频预处理")
+            return self._process_current_tab_content(
+                self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
+            )
+        result = self._process_one_task_page(tab_name, l1_idx, l2_idx)
+
+        # 同一个 tab view 里的 -1 / -2 是并列子任务，切换它们靠同排的 .pc-task 标签，
+        # 而不是「下一题」按钮。做完 -1 不主动切过去的话，这里会直接把整个任务判定
+        # 完成，-2 永远没人做。所以做完一个子任务后继续往后切。
+        advanced = 0
+        while result and advanced < 10 and self._advance_to_next_task_tab():
+            advanced += 1
+            sibling_title = self._active_task_tab_title() or tab_name
+            print(f"    同页还有下一个任务：{sibling_title}，继续作答")
+            self._reset_task_context(
+                f"{self.ai_client.current_chapter_id or 'unknown'}_{sibling_title}")
+            if self._should_stop():
+                return False
+            result = self._process_one_task_page(sibling_title, l1_idx, l2_idx)
+        return result
+
+    def _process_one_task_page(self, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
+        """预处理音视频 + 课文，然后作答当前这一个子任务。"""
 
         if self._should_stop():
             return False
@@ -10393,6 +10462,130 @@ class AISolver:
             prefetch=prefetch_holder.get('answer'),
             prefetch_signature=prefetch_signature,
         )
+
+    def _idle_hold_subtasks(self, tab_name: str) -> bool:
+        """刷时长模式：不答题，只在页面上停够时长，然后切到同页的下一个任务。
+
+        停留时长读 self.idle_minutes（默认 5 分钟）。切子页面用的还是同排的
+        .pc-task 标签，一个 tab view 里的 -1 / -2 会依次停够时长；切不动了
+        （只有一个标签 / 已是最后一个）就结束，交给批量队列的下一个任务。
+        """
+        held = 0
+        title = tab_name
+        while True:
+            if self._should_stop():
+                return False
+            if not self._idle_wait(title):
+                return False
+            held += 1
+            if held >= 10 or not self._advance_to_next_task_tab():
+                return True
+            title = self._active_task_tab_title() or title
+            print(f"    刷时长：同页还有 {title}，切过去继续停留")
+
+    def _idle_wait(self, title: str = '') -> bool:
+        """在页面上干等 idle_minutes 分钟；返回 False 表示中途被停止。"""
+        try:
+            total = max(0.0, float(getattr(self, 'idle_minutes', 5) or 5)) * 60
+        except (TypeError, ValueError):
+            total = 300.0
+        label = f"：{title}" if title else ""
+        print(f"    刷时长{label}：不答题，停留 {total / 60:g} 分钟")
+        self._idle_ensure_playing()
+        spent = 0.0
+        while spent < total:
+            if self._should_stop():
+                print("    刷时长已停止")
+                return False
+            step = min(30.0, total - spent)
+            if self.stop_requested.wait(step):
+                print("    刷时长已停止")
+                return False
+            spent += step
+            left = total - spent
+            if left >= 60 and int(left) % 60 == 0:
+                print(f"    刷时长还需 {left / 60:g} 分钟")
+        return True
+
+    def _idle_ensure_playing(self):
+        """刷时长模式顺手让页面上的音视频跑起来，否则时长不会涨。不碰题目。"""
+        js = """
+        let started = 0;
+        document.querySelectorAll('video, audio').forEach(node => {
+            try {
+                if (node.paused && node.currentTime < (node.duration || 0) - 0.5) {
+                    const p = node.play();
+                    if (p && p.catch) p.catch(() => {});
+                    started += 1;
+                }
+            } catch (e) {}
+        });
+        return started;
+        """
+        try:
+            self.driver.execute_script(js)
+        except Exception:
+            pass
+
+    def _active_task_tab_title(self) -> Optional[str]:
+        """当前激活的子任务标签标题（.pc-task 里带 task-activity 的那个）。"""
+        try:
+            for tab in self.driver.find_elements(By.CSS_SELECTOR, '.pc-task'):
+                if 'task-activity' in (tab.get_attribute('class') or ''):
+                    return (tab.get_attribute('title') or '').strip()
+        except Exception:
+            pass
+        return None
+
+    def _advance_to_next_task_tab(self) -> bool:
+        """切到同一页里的下一个子任务（-1 -> -2），成功返回 True。
+
+        目录里 -1 / -2 各自是独立任务时，批量队列会自己处理它们，这里就不能
+        再切一次，否则同一页会被重复作答，所以先看是不是已经排进队列。
+        """
+        try:
+            tabs = [e for e in self.driver.find_elements(By.CSS_SELECTOR, '.pc-task')
+                    if e.is_displayed()]
+        except Exception:
+            return False
+        if len(tabs) < 2:
+            return False
+
+        active_index = None
+        for index, tab in enumerate(tabs):
+            try:
+                if 'task-activity' in (tab.get_attribute('class') or ''):
+                    active_index = index
+                    break
+            except Exception:
+                return False
+        if active_index is None or active_index + 1 >= len(tabs):
+            return False
+
+        next_tab = tabs[active_index + 1]
+        try:
+            title = (next_tab.get_attribute('title') or '').strip()
+        except Exception:
+            return False
+        if title and title in self._scheduled_task_titles:
+            print(f"    {title} 已在本次勾选列表里，交给后续那一步处理")
+            return False
+
+        if not WebDriverHelper.safe_click(self.driver, next_tab):
+            return False
+
+        # 等到被点的标签变成激活态，说明内容已经换过去了
+        for _ in range(20):
+            if self._should_stop():
+                return False
+            try:
+                if 'task-activity' in (next_tab.get_attribute('class') or ''):
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                return False
+            time.sleep(0.3)
+        return False
 
     def _prepare_media_prefetch(self, skip_asr: bool = False):
         """视频页先解析题目，等转写完成就在后台问 AI，与播放并行。"""
@@ -11658,7 +11851,15 @@ class AISolver:
         self._reading_ctx_tried = False
 
         quick_tab_name = f"quick_current_page_{int(time.time())}"
-        self.ai_client.force_reset(f"{chapter_name}_{quick_tab_name}")
+        self._reset_task_context(f"{chapter_name}_{quick_tab_name}")
+
+        if getattr(self, 'idle_mode', False):
+            # 刷时长模式：停够时长就结束，不解析也不作答
+            success = self._idle_hold_subtasks(quick_tab_name)
+            print(f"\n{'=' * 60}")
+            print(" 刷时长已停止" if self._should_stop() else " 当前页面已停够时长")
+            print(f"{'=' * 60}")
+            return success
 
         state_key = self._generate_content_hash()
 
@@ -12424,7 +12625,27 @@ class UCampusBot:
             logger.warning(f"录音注入脚本安装失败: {str(exc)[:100]}")
         return driver
 
+    @staticmethod
+    def _ensure_localhost_bypass():
+        """让 Selenium 访问本机 driver 时绕开系统代理。
+
+        Clash / V2Ray 等工具会把 HTTP_PROXY / HTTPS_PROXY 指向本地端口
+        （例如 http://127.0.0.1:7890），而 Selenium 默认按 SYSTEM 代理类型
+        读取这些环境变量，连本机 msedgedriver / chromedriver 的请求也会被丢给
+        代理，于是所有命令都返回 "unhandled request"，程序在启动阶段直接退出。
+        这里只把本机地址加进 NO_PROXY，浏览器自身的代理设置不受影响。
+        """
+        hosts = ('localhost', '127.0.0.1', '::1')
+        for name in ('NO_PROXY', 'no_proxy'):
+            entries = [item.strip() for item in os.environ.get(name, '').split(',') if item.strip()]
+            for host in hosts:
+                if host not in entries:
+                    entries.append(host)
+            os.environ[name] = ','.join(entries)
+
     def _create_driver(self):
+        # 系统代理会让 Selenium→本机驱动的请求变成 "unhandled request"，先兜住
+        self._ensure_localhost_bypass()
         # 系统临时目录不可写时，浏览器会报
         # "cannot create temp dir for unpacking extensions"，这里统一换成可写目录
         temp_dir = ensure_writable_temp_dir()

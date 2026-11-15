@@ -54,6 +54,7 @@ class WorkbenchController(CourseCatalogMixin):
         self._status = "正在登录"
         self._error = ""
         self._exclude_ungraded = False
+        self._idle_mode = False
         self._completed = 0
         self._total = 0
         self._api_status, self._api_ok, self._api_fail = "正在检测接口", False, False
@@ -159,7 +160,9 @@ class WorkbenchController(CourseCatalogMixin):
                 "version": self._globals.get("APP_VERSION", "3.9.8"),
                 "ready": self._ready, "busy": self._operation is not None, "operation": self._operation,
                 "status": self._status, "error": self._error,
-                "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),
+                "excludeUngraded": self._exclude_ungraded, "idleMode": self._idle_mode,
+                "idleMinutes": float(getattr(self.solver, "idle_minutes", 5) or 5),
+                "debug": bool(self._globals.get("DEBUG_MODE")),
                 "tasks": tasks, "logs": self._logs, "account": account,
                 "model": getattr(config, "model", "") or "未配置",
                 "apiStatus": self._api_status, "apiOk": self._api_ok, "apiFail": self._api_fail,
@@ -202,6 +205,20 @@ class WorkbenchController(CourseCatalogMixin):
                 self._selected.difference_update(t["id"] for t in self._tasks if t.get("is_scored") is False)
         return {"ok": True}
 
+    def set_idle_mode(self, enabled):
+        """刷时长模式：不答题，每个页面停够 idle_minutes（默认 5）分钟再切下一个。"""
+        with self._lock:
+            if self._operation:
+                return {"ok": False, "error": "当前操作进行中。"}
+            self._idle_mode = bool(enabled)
+            if self.solver is not None:
+                self.solver.idle_mode = self._idle_mode
+        minutes = float(getattr(self.solver, "idle_minutes", 5) or 5)
+        self._add_log(f"已开启刷时长：只停留不答题，每页 {minutes:g} 分钟后自动切换" if enabled
+                      else "已关闭刷时长，恢复答题模式",
+                      "warning" if enabled else "info")
+        return {"ok": True}
+
     def start_action(self, action):
         if action not in ("scan", "scan_unit", "run", "quick"):
             return {"ok": False, "error": "无法识别此操作。"}
@@ -237,6 +254,9 @@ class WorkbenchController(CourseCatalogMixin):
                                       and t.get("status") != "done" and selectable_task(t, self._exclude_ungraded)}
                 self._add_log(f"扫描完成，共发现 {len(tasks)} 项任务。", "success")
             else:
+                if self.solver is not None:
+                    # 勾选状态可能在本轮之前改过，开跑前再同步一次
+                    self.solver.idle_mode = self._idle_mode
                 if action == "run":
                     with self._lock:
                         selected = [t for t in self._tasks if t["id"] in self._selected]

@@ -363,6 +363,7 @@ ApplicationWindow {
                         }
                     }
                     UiCheck { objectName: "excludeUngraded"; visible: window.currentPage === 0; text: "排除不计分题目"; hint: "开启后取消并禁止选择明确不计分的任务，计分待确认的任务仍可选择"; checked: !!window.appState.excludeUngraded; enabled: !window.busy; onClicked: workbench.excludeUngraded(checked) }
+                    UiCheck { objectName: "idleMode"; visible: window.currentPage === 0; text: "刷时长"; hint: "开启后不作答，每个页面只停留 5 分钟，停够就自动切到下一个任务，只刷学习时长"; checked: !!window.appState.idleMode; enabled: !window.busy; onClicked: workbench.idleMode(checked) }
                     Rectangle { visible: window.currentPage === 0; width: 1; height: 24; color: Theme.line }
                     ActionButton {
                         objectName: "startTasks"; Layout.preferredWidth: window.width < 1100 ? 136 : 164; implicitHeight: window.compactHeight ? 40 : 44

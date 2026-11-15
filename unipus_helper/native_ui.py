@@ -193,6 +193,10 @@ class NativeBridge(QObject):
     def excludeUngraded(self, value):
         self._result(self.controller.set_exclude_ungraded(value))
 
+    @Slot(bool)
+    def idleMode(self, value):
+        self._result(self.controller.set_idle_mode(value))
+
     @Slot(str, result=bool)
     def start(self, action):
         result = self.controller.start_action(action)
