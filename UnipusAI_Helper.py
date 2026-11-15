@@ -6222,7 +6222,7 @@ class AnswerExecutor:
             rf'^{AnswerExecutor.ANSWER_LABEL_PATTERN}\s*[：:]\s*', '', answer.strip(), flags=re.I
         )
         token_re = re.compile(
-            r'(?<![\d.])(?:(?:空|Blank)\s*)?(\d{1,2})\s*[.、:：\)\]]', re.I
+            r'(?<![\d.])(?:(?:空|Blank)\s*)?(\d{1,2})\s*(?:\.(?!\d)|\.(?=\d+\.\d)|[、:：\)\]])', re.I
         )
         tokens = [(int(m.group(1)), m.start(), m.end()) for m in token_re.finditer(text)]
         if not tokens:
@@ -9421,6 +9421,7 @@ class AnswerPrefetch:
     def __init__(self, client, prompt: str, screenshot: Optional[bytes],
                  stop_requested: threading.Event):
         self.client = client
+        self.materials = tuple((m['role'], m['content']) for m in client.material_messages)
         self.prompt = prompt
         self.screenshot = screenshot
         self.stop_requested = stop_requested
@@ -10431,49 +10432,6 @@ class AISolver:
         value = re.sub(r'[^a-z0-9%$.\s-]', ' ', value)
         return re.sub(r'\s+', ' ', value).strip()
 
-    def _ground_fill_phrase(self, phrase: str, corpus_norm: str) -> str:
-        """答案若比原文多带了相邻词，截成原文里真实存在的最长片段。"""
-        original = (phrase or '').strip().strip('.,;:')
-        norm = self._normalize_for_match(original)
-        if not norm or not corpus_norm or norm in corpus_norm:
-            return original
-        words = norm.split()
-        # 英文名词短语的中心词通常在介词前或末尾；优先保留中心词，
-        # 避免 digital record 被截成 digital、record for humanity 被截成 humanity。
-        end = len(words) - 1
-        for idx, word in enumerate(words):
-            if idx > 0 and word in {'for', 'of', 'in', 'to', 'with', 'by', 'on', 'from'}:
-                end = idx - 1
-                break
-        for start in range(end, -1, -1):
-            candidate = ' '.join(words[start:end + 1])
-            if len(candidate) >= 3 and candidate in corpus_norm:
-                return candidate
-        best = ''
-        for i in range(len(words)):
-            for j in range(len(words), i, -1):
-                candidate = ' '.join(words[i:j])
-                if len(candidate) >= 3 and candidate in corpus_norm:
-                    if len(candidate) > len(best):
-                        best = candidate
-        return best or original
-
-    def _ground_fill_response(self, q: Question, answer: str) -> str:
-        count = len(q.inputs)
-        if count <= 0:
-            return answer
-        parts = AnswerExecutor._split_numbered_answers(answer, count)
-        if len(parts) != count:
-            return answer
-        corpus = self._normalize_for_match(self._material_corpus())
-        if not corpus:
-            return answer
-        grounded = [self._ground_fill_phrase(part, corpus) for part in parts]
-        if grounded == parts:
-            return answer
-        print(f"    按原文校正填空: {parts} -> {grounded}")
-        return "\n".join(f"{idx + 1}. {part}" for idx, part in enumerate(grounded))
-
     def _reorder_sorting_by_transcript(self, q: Question, order: List[str]) -> List[str]:
         if not order:
             return order
@@ -10688,7 +10646,10 @@ class AISolver:
 
                 ai_response = None
                 used_prefetch = (prefetch is not None and page_num == 1
-                                 and current_signature == prefetch_signature)
+                                 and current_signature == prefetch_signature
+                                 and not self._retry_hint
+                                 and prefetch.materials == tuple(
+                                     (m['role'], m['content']) for m in self.ai_client.material_messages))
                 if used_prefetch:
                     print(f"    等待播放期间的 AI 预取答案（已运行 {prefetch.elapsed:.1f}s）...")
                     ai_response = prefetch.wait(timeout=180)
@@ -10730,9 +10691,6 @@ class AISolver:
                                 corrected = self._reorder_sorting_by_transcript(q, order)
                                 if corrected and corrected != order:
                                     ans = ' '.join(corrected)
-                            elif q.q_type in (QuestionType.LISTENING_FILL_IN,
-                                              QuestionType.FILL_IN):
-                                ans = self._ground_fill_response(q, ans)
                             if self.executor.execute(q, ans):
                                 success_count += 1
                             else:
