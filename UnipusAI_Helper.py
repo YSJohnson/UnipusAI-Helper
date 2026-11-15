@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.7"
+APP_VERSION = "3.9.8"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -1122,6 +1122,13 @@ class QuestionParser:
 
     def parse_all(self) -> Tuple[List[Question], str]:
         """解析所有可见题目"""
+        try:
+            return self._parse_all_once()
+        except StaleElementReferenceException:
+            print("     页面已更新，重新获取题目")
+            return self._parse_all_once()
+
+    def _parse_all_once(self) -> Tuple[List[Question], str]:
         if self._is_discussion_board_page():
             print("     检测到讨论板页面，交给发帖处理器")
             try:
@@ -1161,6 +1168,8 @@ class QuestionParser:
                 else:
                     print(f"      容器 {idx} 解析为None")
 
+            except StaleElementReferenceException:
+                raise
             except Exception as e:
                 error_msg = str(e)
                 print(f"       解析容器 {idx} 失败:{error_msg[:50]}")
@@ -1426,10 +1435,14 @@ class QuestionParser:
                     )
                     if parent_display == 'none':
                         return False
+                except StaleElementReferenceException:
+                    raise
                 except:
                     break
 
             return True
+        except StaleElementReferenceException:
+            raise
         except:
             return False
 
@@ -1447,6 +1460,8 @@ class QuestionParser:
                         return question
                     else:
                         print(f"      策略返回None")
+            except StaleElementReferenceException:
+                raise
             except Exception as e:
                 error_msg = str(e)
                 print(f"      策略 {strategy.__class__.__name__} 失败: {error_msg[:50]} ")
@@ -3127,7 +3142,7 @@ class TextInputStrategy(QuestionParserStrategy):
                 if is_writing:
                     full_text += f"【写作提纲/材料】\n{material_text[:500]}\n\n"
                 else:
-                    full_text += f"【阅读材料】\n{material_text[:800]}...\n\n（文章较长，根据问题回答即可）\n\n"
+                    full_text += f"【阅读材料】\n{material_text[:6000]}\n\n"
 
             full_text += "【问题列表】\n"
             for item in items:
@@ -5468,7 +5483,8 @@ class AnswerExecutor:
             try:
                 info = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
                 if (int(info.get('index') or 0) == index
-                        and (info.get('word') or '').strip() and info.get('hasButton')):
+                        and (info.get('word') or '').strip() and info.get('hasButton')
+                        and self._vocab_record_buttons(q)):
                     return info
             except Exception:
                 pass
@@ -10210,7 +10226,7 @@ class AISolver:
                 return True
         return False
 
-    def _harvest_from_vocabulary_tab(self) -> int:
+    def _harvest_from_vocabulary_tab(self) -> Optional[bool]:
         """当前在 Exercise 子标签时，先切到同任务的 Vocabulary 抓一遍对照再回来。
 
         子步骤本来就是二级 Tab（`.pc-header-tasks-row > .pc-task`），批量处理时会
@@ -10218,37 +10234,37 @@ class AISolver:
         只能靠模型猜。抓一次 Vocabulary 再切回来，Exercise 1 的填空能逐字对上。
         """
         if self._should_stop():
-            return 0
+            return False
         try:
             tabs = self._get_level2_tabs()
         except Exception:
-            return 0
+            return False
         if len(tabs) < 2:
-            return 0
+            return False
 
         def title_of(tab: Dict) -> str:
             return str(tab.get('title') or '').strip().lower()
 
         vocab_tab = next((tab for tab in tabs if title_of(tab) == 'vocabulary'), None)
         if vocab_tab is None:
-            return 0
+            return False
         current = next((tab for tab in tabs if tab.get('is_active')), None)
-        if current is not None and title_of(current) == 'vocabulary':
-            return 0
+        if current is None or title_of(current) == 'vocabulary':
+            return False
 
         print("    缓存里没有 Vocabulary 对照表，先切过去抓一遍...")
         if not WebDriverHelper.safe_click(self.driver, vocab_tab['element']):
             print("    切换 Vocabulary 失败，继续用模型作答")
-            return 0
+            return False
         if self.stop_requested.wait(2.5):
-            return 0
-        added = self._harvest_vocabulary()
-        if current is not None:
-            if not WebDriverHelper.safe_click(self.driver, current['element']):
-                print("    切回原标签失败，请留意页面是否停在 Vocabulary")
-            else:
-                self.stop_requested.wait(2.0)
-        return added
+            return None
+        self._harvest_vocabulary()
+        if not WebDriverHelper.safe_click(self.driver, current['element']):
+            print("    切回原标签失败，请留意页面是否停在 Vocabulary")
+            return None
+        if self.stop_requested.wait(2.0):
+            return None
+        return True
 
     def _harvest_vocabulary(self) -> int:
         """把当前页 Vocabulary 里的中英对照收进缓存（跨页、跨任务都保留）。"""
@@ -10535,12 +10551,15 @@ class AISolver:
             # 当前 Tab 是 Exercise、缓存还是空的（快速处理当前页时很常见）：
             # 借同任务的 Vocabulary 子标签抓一遍再切回来，答案就能逐字对上
             if page_num == 1 and not len(self._vocab()) and self._needs_vocabulary(questions):
-                if self._harvest_from_vocabulary_tab():
+                switched = self._harvest_from_vocabulary_tab()
+                if switched is None:
+                    return False
+                if switched:
                     questions, directions = self.parser.parse_all()
                     if self._should_stop():
                         return False
                     if prefetch is not None:
-                        print("    词汇表已更新，放弃预取答案")
+                        print("    词汇页切换后，放弃预取答案")
                         prefetch = None
             self._last_question_types = {q.q_type for q in questions}
             print(f"\n    处理第 {page_num} 页题目...")

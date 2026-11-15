@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.7-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.8-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -167,6 +167,15 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.8（2026-11-15）</b>：词汇跟读与阅读问答修复（issue #57）</summary>
+
+- **词汇跟读**：等待卡片的录音按钮可见后再录音，确保卡片切换完成。
+- **阅读问答**：页面重绘后重新获取题目，切换词汇页后重新解析，并提供更完整的阅读材料。
+- **句子跟读**：优先使用页面提供的参考音频，无需生成口语稿。
+
+</details>
 
 <details>
 <summary><b>v3.9.7（2026-11-13）</b>：新版视听说课程适配 / 录音与学习进度修复</summary>
