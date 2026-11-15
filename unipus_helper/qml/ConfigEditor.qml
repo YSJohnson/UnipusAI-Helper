@@ -142,7 +142,7 @@ ApplicationWindow {
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 4
                                 UiCheck { id: screenshotCheck; objectName: "field_screenshot"; text: "题目截图发给模型（需支持识图）"; checked: !!configEditor.values.screenshot; Layout.fillWidth: true }
-                                UiText { text: "开启后额外发送练习截图，消耗较多 token；接口拒绝图片时会自动改用纯文本。不支持识图的模型请保持关闭。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                                UiText { text: "开启后发送练习截图，消耗较多 token。依赖图片的口语题需要使用支持识图的模型。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             }
                         }
                     }

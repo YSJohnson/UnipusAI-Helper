@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.8-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.9-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -127,6 +127,7 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 | `tts_engine` | 否 | 录音题语音合成后端：`auto`（默认，先 edge 后 sapi）/ `edge` / `sapi` / `off` |
 | `tts_voice` | 否 | TTS 音色；留空用默认英语音色（`en-US-AriaNeural` / 系统英语语音） |
 | `tts_proxy` | 否 | `edge-tts` 需要走代理时填，例如 `http://127.0.0.1:7890`；离线 `sapi` 不需要 |
+| `screenshot` | 否 | 将题目截图发送给模型；图片口语题需开启并使用支持识图的模型，默认关闭 |
 | `browser` | 否 | 浏览器后端：`edge`（默认）/ `chrome`。环境检查、driver 启动与缓存目录都跟随这个值；Chrome 只做检测与提示，需自行安装 |
 
 
@@ -167,6 +168,14 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.9（2026-11-15）</b>：《新探索研究生英语（提高级）视听说教程》口语录音适配</summary>
+
+- **分页录音**：支持 Unit 1 → Speaking skill → Oral practice → Task 3 的幻灯片口语题，根据页面进度区分文字提示相同的录音小题。
+- **图片口语稿**：开启截图后，将幻灯片发送给支持识图的模型生成口语稿；无法识别图片时停止作答。
+
+</details>
 
 <details>
 <summary><b>v3.9.8（2026-11-15）</b>：词汇跟读与阅读问答修复（issue #57）</summary>

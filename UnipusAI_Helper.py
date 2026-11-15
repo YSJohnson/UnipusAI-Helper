@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.8"
+APP_VERSION = "3.9.9"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -815,7 +815,8 @@ class OpenAICompatibleClient:
         return status is None or status in (400, 404, 413, 415, 422)
 
     def ask(self, prompt: str, retry_count: int = 3, stop_requested: Optional[threading.Event] = None,
-            screenshot: Optional[bytes] = None, remember: bool = True) -> Optional[str]:
+            screenshot: Optional[bytes] = None, remember: bool = True,
+            require_image: bool = False) -> Optional[str]:
         """发送问题并获取回答
 
         推理型模型（如 deepseek-flash）可能把 max_tokens 全部消耗在 reasoning 上，
@@ -931,6 +932,9 @@ class OpenAICompatibleClient:
 
             except Exception as e:
                 if screenshot is not None and self._is_image_unsupported_error(e):
+                    if require_image:
+                        print("   接口无法识别题目图片，停止作答")
+                        return None
                     screenshot = None
                     print("   接口拒绝图片，改用纯文本重试")
                 if DEBUG_MODE:
@@ -10286,9 +10290,27 @@ class AISolver:
         """主观录音题：让模型写一段可直接朗读的英文口语稿。"""
         if self._should_stop():
             return ""
+        images = q.element.find_elements(
+            By.XPATH,
+            "ancestor::div[contains(@class,'p-oral-personal-state')][1]"
+            "//div[contains(@class,'oral-personal-state-sentence-container')]//img")
+        screenshot = None
+        if images:
+            if not self.config.screenshot:
+                print("    口语题需要识别图片，请在配置中启用截图并使用支持图片的模型")
+                return ""
+            try:
+                screenshot = images[0].screenshot_as_png
+            except Exception:
+                print("    口语题图片截图失败，停止作答")
+                return ""
+            if not screenshot:
+                print("    口语题图片截图为空，停止作答")
+                return ""
         prompt = self.prompt_builder.build_speaking_script(
             q, directions, target_seconds=self.executor.RECORD_MAX_SECONDS * 0.85)
-        response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+        response = self.ai_client.ask(prompt, stop_requested=self.stop_requested,
+                                      screenshot=screenshot, require_image=bool(images))
         if not response or self._should_stop():
             print(f"    题目 {q.number}: 没有拿到口语稿")
             return ""
@@ -10631,6 +10653,8 @@ class AISolver:
                     if q.q_type == QuestionType.RECORD and q.needs_speech_script:
                         # 页面既没有样音也没有原文（自由口语题），只能让模型写一段
                         script = self._speaking_script_for(q, directions)
+                        if not script:
+                            continue
                     if self.executor.execute(q, script):
                         record_answered += 1
                 print(f"    录音题完成 {record_answered}/{len(record_questions)}")
@@ -11643,7 +11667,16 @@ class AISolver:
             q_type = q.q_type.name if q.q_type else "UNKNOWN"
             text_preview = q.text[:30] if q.text else ""
             option_preview = "|".join(opt.text[:30] for opt in q.options[:4])
-            parts.append(f"{q.number}:{q_type}:{text_preview}:{option_preview}")
+            page_progress = ""
+            if q.q_type == QuestionType.RECORD:
+                try:
+                    page_progress = self.driver.execute_script("""
+                        const progress = document.querySelector('.comp-question-progress .percent');
+                        return progress ? progress.style.width : '';
+                    """) or ""
+                except Exception:
+                    pass
+            parts.append(f"{q.number}:{q_type}:{text_preview}:{option_preview}:{page_progress}")
 
         return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
 
