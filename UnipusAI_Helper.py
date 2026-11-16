@@ -2277,6 +2277,9 @@ return Array.from(arguments[1]).map(function (button) {
   const wrap = button.closest('.record-button-wrap');
   const paragraph = button.closest('.oral-paragraph-container');
   const group = button.closest('.record-button-group');
+  // 口语回答这类题（oral-personal-state）：题干在 oral-container 里，
+  // 录音区里只有倒计时和「点击按钮，结束录音」提示，不能拿来当题名。
+  const oralBox = button.closest('.oral-personal-state-wrapper');
   const row = button.closest('.oral-study-sentence') || paragraph || root;
   let audio = null;
   for (const scope of [paragraph, group, row]) {
@@ -2298,16 +2301,24 @@ return Array.from(arguments[1]).map(function (button) {
     if (passage) { break; }
   }
   const text = passage ? oneLine(passage.innerText || passage.textContent || '') : '';
+  // 口语题的问题题干只能当题名/签名。写进 text 会优先于 AI 稿件被当成“朗读原文”。
+  const promptBox = oralBox ? oralBox.querySelector('.oral-personal-state-oral-container') : null;
+  const promptText = promptBox
+    ? oneLine(promptBox.innerText || promptBox.textContent || '') : '';
   let lines = [];
   if (row) {
     lines = (row.innerText || '').split(String.fromCharCode(10))
       .map(function (part) { return tidy(part); })
-      .filter(function (part) { return part.length > 0; });
+      // 倒计时与录音提示不是题名，拾到会把“03:00”当成题干。
+      .filter(function (part) {
+        return part.length > 0 && !/^\d{1,2}:\d{2}$/.test(part) &&
+          part.indexOf('点击按钮') === -1 && part.indexOf('结束录音') === -1;
+      });
   }
   const rows = Array.from(document.querySelectorAll('.oral-study-sentence'));
   return {
     raw: raw,
-    name: text || (lines.length ? lines[0] : ''),
+    name: text || promptText || (lines.length ? lines[0] : ''),
     text: text,
     lines: lines.slice(0, 4),
     src: song ? (song.getAttribute('title') || '') : '',
@@ -10780,7 +10791,9 @@ class AISolver:
                     print(f"    点击下一题失败")
                     break
 
-                if not self._wait_for_content_change(pre_click_signature, timeout=5):
+                # 翻页后等 30 秒：录音刚结束时平台还在上传/评分，页面不会立刻切，
+                # 5 秒窗口太短（parse_all 一次约 0.7s，只够 7 次）。
+                if not self._wait_for_content_change(pre_click_signature, timeout=30):
                     if self._should_stop():
                         return False
                     print(f"    内容未变化，可能已到最后一页")
@@ -11676,6 +11689,11 @@ class AISolver:
                     """) or ""
                 except Exception:
                     pass
+                if not page_progress:
+                    # 没有进度条的页面退到每条录音自己的题名：q.text 的前 30 字是全任务
+                    # 固定的 directions，靠它区分不了步骤。
+                    page_progress = "|".join((item.get('name') or '')[:30]
+                                             for item in (q.record_items or [])[:4])
             parts.append(f"{q.number}:{q_type}:{text_preview}:{option_preview}:{page_progress}")
 
         return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
