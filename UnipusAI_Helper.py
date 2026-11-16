@@ -1009,6 +1009,7 @@ class QuestionParser:
     def __init__(self, driver):
         self.driver = driver
         self.strategies: List[QuestionParserStrategy] = [
+            RolePlayStrategy(),
             ParagraphMatchingStrategy(),  # 段落信息匹配：条件最独特，放最前避免被通用策略抢走
             VocabularyReadAloudStrategy(),  # 词汇跟读卡片：优先于 RecordStrategy
             OralAloudStrategy(),  # 整段朗读题：靠 .p-oral-aloud 判定
@@ -1212,6 +1213,12 @@ class QuestionParser:
         if self._is_discussion_board_page():
             print("     检测到讨论板页面，跳过")
             return []
+
+        role_play = [c for c in self.driver.find_elements(
+            By.CSS_SELECTOR, '.layoutBody-container')
+                     if c.is_displayed() and c.find_elements(By.CSS_SELECTOR, '.role-play-wrapper')]
+        if role_play:
+            return role_play
 
         # New words / Phrases and expressions 词汇跟读卡片：结构独特，必须优先于
         # _find_record_containers()，否则会被 .button-record 兜底选择器收成录音题。
@@ -1473,6 +1480,16 @@ class QuestionParser:
                 continue
         print(f"      没有匹配的策略")
         return None
+
+
+class RolePlayStrategy(QuestionParserStrategy):
+    def can_parse(self, container, driver) -> bool:
+        return bool(container.find_elements(By.CSS_SELECTOR, '.role-play-wrapper'))
+
+    def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
+        return Question(number=question_number, text=directions or '角色扮演录音',
+                        q_type=QuestionType.RECORD, element=container, directions=directions,
+                        record_items=[{'role_play': True, 'text': '角色扮演'}])
 
 
 class DiscussionBoardStrategy(QuestionParserStrategy):
@@ -4745,7 +4762,7 @@ class PromptBuilder:
             lines.append("My voice文字作答: 1.英文介绍内容（500字符以内）")
 
         if QuestionType.SORTING in type_counts:
-            lines.append("排序题: 直接返回排序后的字母，如：B E A D C F")
+            lines.append("排序题: 按题号返回排序后的字母，如：1.B E A D C F")
 
         if QuestionType.MATCHING in type_counts:
             lines.append("匹配题: 每空一个字母，格式：1.B 2.A 3.F（不要写单词）")
@@ -4904,6 +4921,9 @@ class AnswerExecutor:
         if not valid:
             return []
 
+        single_answer = re.fullmatch(r'\s*\d+\s*[.、:：)\]]\s*([A-Z][A-Z\s,，、;；>→-]*)\s*', answer.upper())
+        if single_answer:
+            answer = single_answer.group(1)
         numbered = re.findall(r'\d+\s*[.、)\]]\s*([A-Z])\b', answer.upper())
         candidates = numbered if numbered else re.findall(r'\b([A-Z])\b', answer.upper())
 
@@ -5282,6 +5302,8 @@ class AnswerExecutor:
         if not items:
             print("\t没有找到录音条目")
             return False
+        if items[0].get('role_play'):
+            return self._answer_role_play(q)
         if items[0].get('vocab'):
             return self._answer_vocabulary_read_aloud(q)
 
@@ -5797,6 +5819,105 @@ class AnswerExecutor:
                 continue
             time.sleep(0.5)
         return None
+
+    def _answer_role_play(self, q: Question) -> bool:
+        self._dismiss_record_popup()
+        roles = [e for e in q.element.find_elements(By.CSS_SELECTOR, '.role-list label.label')
+                 if e.is_displayed()]
+        if roles and not WebDriverHelper.safe_click(self.driver, roles[0]):
+            return False
+        try:
+            WebDriverWait(self.driver, 10).until(
+                lambda d: any(e.is_displayed() for e in q.element.find_elements(
+                    By.CSS_SELECTOR, '.role-reply .record-seat')))
+            info = self.driver.execute_script("""
+                const row = arguments[0].querySelector('.role-reply .list-item-review');
+                if (!row) return null;
+                let fiber = row[Object.keys(row).find(k => k.startsWith('__reactFiber'))];
+                while (fiber && !(fiber.memoizedProps || {}).question) fiber = fiber.return;
+                const question = fiber && fiber.memoizedProps.question;
+                const selected = arguments[0].querySelector('.role-reply .score:not(.hide)');
+                const role = selected && selected.closest('.list-item-review').querySelector('.role');
+                if (!question || !role) return null;
+                const children = question.children || [];
+                return {lines: children.filter(x => x.role && x.role.name === role.textContent.trim())
+                    .map(x => ({url: (x.contents || []).find(c => c.type === 1 && c.path)?.path || ''})),
+                    seconds: children.reduce((s, x) => s + ((x.config || {}).recordTime || 0) / 1000, 0)};
+            """, q.element)
+            if not info or not info.get('lines'):
+                print('\t无法读取角色台词')
+                return False
+            clips = []
+            for line in info['lines']:
+                data = self._download_record_audio((line.get('url') or '').split('#')[0])
+                if not data:
+                    print('\t角色台词缺少参考音频')
+                    return False
+                clips.append(base64.b64encode(data).decode())
+            prepared = self.driver.execute_async_script("""
+                const done = arguments[arguments.length - 1], api = window.__ucRec;
+                if (!api) { done(false); return; }
+                (async () => {
+                    const queue = [];
+                    for (const b64 of arguments[0]) {
+                        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+                        queue.push(await api.ctxOf().decodeAudioData(bytes.buffer));
+                    }
+                    api.rolePlayStream = api.stream;
+                    api.rolePlayQueue = queue;
+                    api.stream = function () {
+                        api.buf = api.rolePlayQueue.shift() || null;
+                        return api.rolePlayStream();
+                    };
+                    done(true);
+                })().catch(() => done(false));
+            """, clips)
+            if not prepared:
+                print('\t角色台词音频初始化失败')
+                return False
+            started = False
+            try:
+                seat = q.element.find_element(By.CSS_SELECTOR, '.role-reply .record-seat')
+                if not WebDriverHelper.safe_click(self.driver, seat):
+                    return False
+                started = True
+                deadline = time.time() + max(90, min(600, info.get('seconds', 0) * 2 + 60))
+                while time.time() < deadline and not self.stop_requested.is_set():
+                    state = self.driver.execute_script("""
+                        const root = arguments[0], api = window.__ucRec;
+                        const rows = [...root.querySelectorAll('.role-play-quiz .list-item-review')];
+                        const scores = [...root.querySelectorAll('.role-play-quiz .score:not(.hide)')];
+                        const audio = root.querySelector('.role-reply audio');
+                        return {left: api.rolePlayQueue.length,
+                            scores: scores.map(x => x.textContent.trim()),
+                            finished: rows.length && rows[rows.length - 1].classList.contains('active') &&
+                                (!audio || audio.paused || audio.ended)};
+                    """, q.element)
+                    if (state['left'] == 0 and len(state['scores']) == len(clips)
+                            and all(state['scores']) and state['finished']):
+                        print(f"\t角色扮演录音完成，得分: {', '.join(state['scores'])}")
+                        started = False
+                        return True
+                    self.stop_requested.wait(0.5)
+                print('\t角色扮演录音未完成')
+                return False
+            finally:
+                if started:
+                    buttons = q.element.find_elements(By.CSS_SELECTOR, '.role-reply .pre-page-btn')
+                    if buttons:
+                        WebDriverHelper.safe_click(self.driver, buttons[0])
+                self.driver.execute_script("""
+                    const api = window.__ucRec;
+                    if (api && api.rolePlayStream) {
+                        api.stream = api.rolePlayStream;
+                        delete api.rolePlayStream;
+                        delete api.rolePlayQueue;
+                        api.buf = null;
+                    }
+                """)
+        except Exception as exc:
+            print(f'\t角色扮演处理失败: {str(exc)[:100]}')
+            return False
 
     def _download_record_audio(self, url: str) -> Optional[bytes]:
         if not url:
@@ -10351,6 +10472,8 @@ class AISolver:
                 ans = self._extract_single_answer(response, q.number)
                 if not ans:
                     ans = response
+            elif q.q_type == QuestionType.SORTING and len(questions) > 1:
+                ans = self._extract_single_answer(response, q.number)
             else:
                 ans = response
             try:
@@ -10724,6 +10847,8 @@ class AISolver:
                         elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
                                           QuestionType.DROPDOWN_SELECT]:
                             ans = ai_response
+                        elif q.q_type == QuestionType.SORTING and len(normal_questions) > 1:
+                            ans = self._extract_single_answer(ai_response, q.number)
                         else:
                             ans = ai_response
 
