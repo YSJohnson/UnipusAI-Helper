@@ -2320,6 +2320,8 @@ return Array.from(arguments[1]).map(function (button) {
     raw: raw,
     name: text || promptText || (lines.length ? lines[0] : ''),
     text: text,
+    // 单独给出稳定题干，供签名使用：name 末位可能是播放器状态文案。
+    prompt: promptText,
     lines: lines.slice(0, 4),
     src: song ? (song.getAttribute('title') || '') : '',
     rowIndex: rows.indexOf(row)
@@ -2841,6 +2843,7 @@ class RecordStrategy(QuestionParserStrategy):
                 lines = [str(line).strip() for line in (info.get('lines') or []) if str(line).strip()]
                 meta['lines'] = lines
                 meta['text'] = (info.get('text') or '').strip()
+                meta['prompt'] = (info.get('prompt') or '').strip()
                 # 记下行号，按钮被 React 换掉后按行重定位。
                 try:
                     row_index = int(info.get('rowIndex'))
@@ -11678,7 +11681,17 @@ class AISolver:
         parts = []
         for q in questions:
             q_type = q.q_type.name if q.q_type else "UNKNOWN"
-            text_preview = q.text[:30] if q.text else ""
+            # 用完整题干。只取前 30 字时，相邻题目若共用长前缀（录音题的
+            # q.text 开头就是全任务固定的 directions），签名会相同，翻页被判成末页。
+            text_preview = re.sub(r'\s+', ' ', q.text or '').strip()
+            if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD):
+                # 录音题优先用解析出的稳定题干/朗读原文；两者都为空才退回整段题干。
+                # 不能拿 name：它的末位来源是 lines[0]，可能是播放器状态文案。
+                stable = [(item.get('prompt') or item.get('text') or '').strip()
+                          for item in (q.record_items or [])]
+                stable = [value for value in stable if value]
+                if stable:
+                    text_preview = '|'.join(stable)
             option_preview = "|".join(opt.text[:30] for opt in q.options[:4])
             page_progress = ""
             if q.q_type == QuestionType.RECORD:
@@ -11689,11 +11702,6 @@ class AISolver:
                     """) or ""
                 except Exception:
                     pass
-                if not page_progress:
-                    # 没有进度条的页面退到每条录音自己的题名：q.text 的前 30 字是全任务
-                    # 固定的 directions，靠它区分不了步骤。
-                    page_progress = "|".join((item.get('name') or '')[:30]
-                                             for item in (q.record_items or [])[:4])
             parts.append(f"{q.number}:{q_type}:{text_preview}:{option_preview}:{page_progress}")
 
         return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
