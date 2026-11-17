@@ -36,7 +36,6 @@
 UnipusAI-Helper/
 ├── UnipusAI_Helper.py          # 主程序入口
 ├── config.example.json        # 配置示例
-├── config.json                # 本地配置（不提交）
 ├── requirements.txt           # Python 依赖
 ├── README.md
 ├── LICENSE
@@ -51,9 +50,7 @@ UnipusAI-Helper/
 │   ├── paths.py              # 项目与资源路径
 │   └── qml/                  # 原生界面组件、主题与图标
 ├── scripts/                  # macOS / Linux 辅助脚本
-├── docs/                     # 工作台说明与截图
-├── logs/                     # 本地运行日志（不提交）
-└── config-backups/           # 本地配置备份（不提交）
+└── docs/                     # 工作台说明与截图
 ```
 
 ## 使用方法
