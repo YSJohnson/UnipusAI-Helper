@@ -30,7 +30,7 @@ ApplicationWindow {
     }
     Connections {
         target: configEditor
-        function onSaved(message, ok) { window.notice = message; window.noticeOk = ok }
+        function onSaved(message, ok) { window.notice = message; window.noticeOk = ok; if (ok && configEditor.firstRun) window.close() }
     }
     Shortcut { sequence: StandardKey.Save; onActivated: window.saveSettings() }
     Shortcut { sequence: "Escape"; onActivated: window.close() }
@@ -44,7 +44,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             spacing: 5
             UiText { text: "配置"; font.pixelSize: 26; font.weight: Font.DemiBold }
-            UiText { text: "设置账号、模型和浏览器"; color: Theme.muted; font.pixelSize: 13 }
+            UiText { text: configEditor.firstRun ? "请先填写账号和模型必填项" : "设置账号、模型和浏览器，保存后重新启动生效"; color: Theme.muted; font.pixelSize: 13 }
         }
         ScrollView {
             id: scroll
@@ -68,12 +68,12 @@ ApplicationWindow {
                         Repeater {
                             id: fields
                             model: [
-                                { key: "username", label: "账号", hint: "输入 U校园AI版账号" },
-                                { key: "password", label: "密码", hint: "输入 U校园AI版密码" },
+                                { key: "username", label: "账号 *", hint: "输入 U校园AI版账号" },
+                                { key: "password", label: "密码 *", hint: "输入 U校园AI版密码" },
                                 { key: "url", label: "登录地址", hint: "U校园登录地址" },
-                                { key: "api_key", label: "API Key", hint: "输入 API Key" },
-                                { key: "base_url", label: "API 地址", hint: "兼容 OpenAI 的接口地址" },
-                                { key: "model", label: "模型名称", hint: "输入模型名称" },
+                                { key: "api_key", label: "API Key *", hint: "输入 API Key" },
+                                { key: "base_url", label: "API 地址 *", hint: "兼容 OpenAI 的接口地址" },
+                                { key: "model", label: "模型名称 *", hint: "输入模型名称" },
                                 { key: "max_tokens", label: "最大 Token 数", hint: "32768" },
                                 { key: "temperature", label: "温度（0–2）", hint: "0.3" },
                                 { key: "tts_engine", label: "录音题 TTS 引擎", hint: "auto / edge / sapi / off" },
@@ -98,6 +98,7 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     implicitHeight: 38
                                     text: configEditor.values[modelData.key] == null ? "" : String(configEditor.values[modelData.key])
+                                    echoMode: modelData.key === "password" || modelData.key === "api_key" ? TextInput.Password : TextInput.Normal
                                     placeholderText: modelData.hint
                                     placeholderTextColor: Theme.muted
                                     color: Theme.ink; selectionColor: Theme.accentFill

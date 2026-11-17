@@ -24,18 +24,17 @@
 - **批量与单页处理**：可扫描全部单元或当前单元批量处理，也可直接处理当前页面。
 - **任务筛选**：默认选择未完成必修，支持搜索、状态筛选和排除不计分任务。
 - **断点续跑**：完成一项自动取消勾选，停止后保留剩余选择，方便继续处理。
-- **桌面工作台**：集中查看课程进度、任务列表和运行日志，附带独立配置编辑器。
+- **桌面工作台**：集中查看课程进度、任务列表和运行日志，内置配置编辑器。
 
 ---
 
 ## 项目结构
 
-根目录保留主入口、配置编辑器、配置、依赖清单与项目说明，辅助代码和资源按用途归类：
+根目录保留主入口、配置、依赖清单与项目说明，辅助代码和资源按用途归类：
 
 ```text
 UnipusAI-Helper/
 ├── UnipusAI_Helper.py          # 主程序入口
-├── config_editor.py           # 独立配置编辑器
 ├── config.example.json        # 配置示例
 ├── config.json                # 本地配置（不提交）
 ├── requirements.txt           # Python 依赖
@@ -64,7 +63,6 @@ git clone https://github.com/YSJohnson/UnipusAI-Helper.git
 cd UnipusAI-Helper
 py -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe config_editor.py
 .venv\Scripts\python.exe UnipusAI_Helper.py
 ```
 
@@ -82,12 +80,11 @@ py -m venv .venv
 brew install ffmpeg                     # 语音转写需要
 brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成 google-chrome
 
-./scripts/config.sh                     # 打开配置编辑器，生成 config.json
 .venv/bin/python UnipusAI_Helper.py      # 启动主程序
 ```
 
 也可以在访达里双击 `scripts/UnipusAI-Helper.command`。首次双击若提示「无法打开」，右键 →「打开」，
-或在终端补一下执行权限：`chmod +x scripts/config.sh scripts/UnipusAI-Helper.command`。
+或在终端补一下执行权限：`chmod +x scripts/UnipusAI-Helper.command`。
 
 原生工作台保留系统标题栏与窗口操作；Windows 使用系统边框，macOS 使用系统红绿灯。
 
@@ -95,7 +92,9 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 
 ## 配置说明
 
-项目使用 `config.json` 作为本地配置文件，建议使用配置编辑器而不是手动修改。
+项目使用 `config.json` 保存本地配置。首次启动时，如果尚未创建配置文件，程序会打开配置窗口。填写账号、密码、API Key、API 地址和模型名称，保存后程序继续启动；关闭窗口则退出程序。
+
+之后可以在工作台侧栏选择“配置”修改设置，保存后重新启动程序生效。
 
 ```json
 {

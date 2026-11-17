@@ -13030,6 +13030,11 @@ if __name__ == '__main__':
     bot = None
     exit_code = 0
     try:
+        if not os.path.exists(os.path.join(BASE_DIR, 'config.json')):
+            from unipus_helper.native_ui import setup_first_run
+            qt_app, configured = setup_first_run()
+            if not configured:
+                sys.exit(0)
         bot = UCampusBot(os.path.join(BASE_DIR, 'config.json'), skip_check=skip_check)
         bot.start()
     except KeyboardInterrupt:

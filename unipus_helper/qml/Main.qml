@@ -26,6 +26,7 @@ ApplicationWindow {
     readonly property var appState: workbench.state
     readonly property var summary: workbench.summary
     readonly property bool busy: !!appState.busy
+    ConfigEditor { id: settingsWindow; visible: false }
 
     property bool returnToTasksWhenIdle: false
 
@@ -83,6 +84,7 @@ ApplicationWindow {
                 }
                 NavItem { objectName: "tasksPage"; Layout.fillWidth: true; text: "课程任务"; iconName: "list"; selected: window.currentPage === 0; onClicked: window.currentPage = 0 }
                 NavItem { objectName: "logsPage"; Layout.fillWidth: true; text: "运行日志"; iconName: "logs"; selected: window.currentPage === 1; onClicked: window.currentPage = 1 }
+                NavItem { objectName: "settingsPage"; Layout.fillWidth: true; text: "配置"; iconName: "page"; selected: false; onClicked: { settingsWindow.show(); settingsWindow.raise(); settingsWindow.requestActivate() } }
                 Rectangle { Layout.fillWidth: true; height: 1; color: Theme.line; Layout.topMargin: 16; Layout.bottomMargin: 12 }
                 RowLayout {
                     Layout.fillWidth: true; Layout.leftMargin: 8; Layout.rightMargin: 8; Layout.bottomMargin: 8

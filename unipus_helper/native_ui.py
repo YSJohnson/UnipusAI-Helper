@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
 import signal
 import sys
 from logging.handlers import RotatingFileHandler
@@ -17,6 +19,119 @@ from shiboken6 import delete as delete_qt_object
 from .paths import PROJECT_ROOT, QML_DIR
 from .task_grading import score_text
 from .workbench_controller import WorkbenchController
+
+
+DEFAULT_CONFIG = {
+    "username": "",
+    "password": "",
+    "url": "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome",
+    "token_full": "",
+    "api_key": "",
+    "base_url": "",
+    "model": "",
+    "max_tokens": 32768,
+    "temperature": 0.3,
+    "debug_mode": False,
+    # 录音题（Exercise 2 这类主观题）没有原声，需要 TTS 生成语音
+    "tts_engine": "auto",
+    "tts_voice": "",
+    "tts_proxy": "",
+    "browser": "edge",
+    # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
+    "screenshot": False,
+}
+
+
+def load_config(path):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(cfg)
+        return merged
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(path, data: dict):
+    out = dict(data)
+    token = out.get("token_full", "")
+    if token and isinstance(token, str):
+        token = token.strip()
+        if (token.startswith("'") and token.endswith("'")) or (
+            token.startswith('"') and token.endswith('"')
+        ):
+            token = token[1:-1].strip()
+        out["token_full"] = token
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+    return True
+
+
+class ConfigEditor(QObject):
+    saved = Signal(str, bool)
+
+    def __init__(self, path, first_run=False):
+        super().__init__()
+        self.path = path
+        self.first_run = first_run
+        self.completed = False
+        self.cfg = load_config(path)
+
+    @Property("QVariantMap", constant=True)
+    def values(self):
+        return self.cfg
+
+    @Property(bool, constant=True)
+    def firstRun(self):
+        return self.first_run
+
+    @Slot("QVariantMap")
+    def save(self, values):
+        data = dict(self.cfg)
+        data.update(values)
+        for key in DEFAULT_CONFIG:
+            if key in ("debug_mode", "screenshot"):
+                continue
+            if key in data:
+                data[key] = str(data[key]).strip()
+        missing = [label for key, label in (("username", "账号"), ("password", "密码"), ("api_key", "API Key"), ("base_url", "API 地址"), ("model", "模型名称")) if not data.get(key)]
+        if missing:
+            self.saved.emit("请填写必填项：" + "、".join(missing), False)
+            return
+        data["debug_mode"] = bool(data.get("debug_mode", False))
+        data["screenshot"] = bool(data.get("screenshot", False))
+        try:
+            data["max_tokens"] = int(data["max_tokens"])
+        except (ValueError, TypeError):
+            data["max_tokens"] = 32768
+        try:
+            data["temperature"] = float(data["temperature"])
+        except (ValueError, TypeError):
+            data["temperature"] = 0.3
+        try:
+            save_config(self.path, data)
+        except Exception as exc:
+            self.saved.emit(f"保存失败：{exc}", False)
+            return
+        self.cfg = data
+        self.completed = True
+        self.saved.emit("配置已保存" if self.first_run else "配置已保存，重新启动后生效", True)
+
+
+def setup_first_run():
+    QQuickStyle.setStyle("Basic")
+    app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
+    configure_ui_font(app)
+    editor = ConfigEditor(PROJECT_ROOT / "config.json", first_run=True)
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("configEditor", editor)
+    engine.load(QUrl.fromLocalFile(str(QML_DIR / "ConfigEditor.qml")))
+    if not engine.rootObjects():
+        raise RuntimeError("配置界面加载失败")
+    app.exec()
+    delete_qt_object(engine)
+    return app, editor.completed
 
 
 def configure_ui_font(app):
@@ -298,6 +413,8 @@ class NativeModernGUI(WorkbenchController):
         previous_handler = qInstallMessageHandler(qt_message)
         engine = QQmlApplicationEngine()
         bridge = NativeBridge(self)
+        config_editor = ConfigEditor(PROJECT_ROOT / "config.json")
+        engine.rootContext().setContextProperty("configEditor", config_editor)
         engine.rootContext().setContextProperty("workbench", bridge)
         engine.rootContext().setContextProperty("taskModel", bridge.task_model)
         # Python signal handlers run whenever Qt returns to this timer's callback.
