@@ -11810,13 +11810,11 @@ class AISolver:
             # q.text 开头就是全任务固定的 directions），签名会相同，翻页被判成末页。
             text_preview = re.sub(r'\s+', ' ', q.text or '').strip()
             if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD):
-                # 录音题优先用解析出的稳定题干/朗读原文；两者都为空才退回整段题干。
-                # 不能拿 name：它的末位来源是 lines[0]，可能是播放器状态文案。
+                # 只使用稳定题干；q.text 和 name 的回退值可能包含播放器状态。
                 stable = [(item.get('prompt') or item.get('text') or '').strip()
                           for item in (q.record_items or [])]
                 stable = [value for value in stable if value]
-                if stable:
-                    text_preview = '|'.join(stable)
+                text_preview = '|'.join(stable)
             option_preview = "|".join(opt.text[:30] for opt in q.options[:4])
             page_progress = ""
             if q.q_type == QuestionType.RECORD:
