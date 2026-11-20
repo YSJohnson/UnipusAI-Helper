@@ -12090,7 +12090,6 @@ class AISolver:
             if not retry or attempt == 2:
                 break
             time.sleep(retry)
-        self._release_transcriber()
         return True
 
     def _question_screenshot(self, questions) -> Optional[bytes]:
