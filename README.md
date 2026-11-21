@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.10-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.11-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -184,6 +184,15 @@ U校园涉及的教材比较多，不同课程和题型的适配仍在完善中�
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.11（2026-11-21）</b>：听力上下文与选择题作答修复（issue #63）</summary>
+
+- **听力上下文**：切换任务或重做后，重新将缓存的音频转写加入 AI 上下文，使复用同一音频的题目获得听力材料。
+- **选择题作答**：支持解析带有“单选题”或“多选题”标签的选项答案。
+- **致谢**：感谢 [@WisteriaRecollection](https://github.com/WisteriaRecollection) 反馈问题并提供测试账号和密码，帮助复现问题和验证修复。
+
+</details>
 
 <details>
 <summary><b>v3.9.10（2026-11-21）</b>：教材媒体播放修复与排序、跟读作答适配</summary>

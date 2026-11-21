@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.10"
+APP_VERSION = "3.9.11"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -6346,6 +6346,7 @@ class AnswerExecutor:
 
     @classmethod
     def _parse_choice_letters(cls, answer: str, valid_letters: List[str]) -> List[str]:
+        answer = re.sub(r'^\s*(?:单选题|多选题)\s*[：:]\s*', '', answer)
         answer = cls._clean_extracted_answer(answer).rstrip('.。').upper()
         if not re.fullmatch(r'[A-Z][A-Z\s,，、/;&+]*', answer):
             return []
@@ -9713,6 +9714,7 @@ class AISolver:
         self._processed_video_tabs: set = set()
         self._skipped_video_tabs: set = set()
         self._processed_audio_tabs: set = set()
+        self._processed_audio_context = self.ai_client.material_messages
         self._publish_processed_groups: set = set()
         self._publish_scope: Optional[PublishTaskScope] = None
         self._publish_scope_url: str = ''
@@ -12263,6 +12265,9 @@ class AISolver:
                 return
 
             # 逐段转写，避免后面的题缺少上下文。
+            if self._processed_audio_context is not self.ai_client.material_messages:
+                self._processed_audio_tabs.clear()
+                self._processed_audio_context = self.ai_client.material_messages
             pending = [url for url in audio_urls
                        if url.split('#')[0] not in self._processed_audio_tabs]
             if not pending:
