@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.9-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.10-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -184,6 +184,17 @@ U校园涉及的教材比较多，不同课程和题型的适配仍在完善中�
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.10（2026-11-21）</b>：教材媒体播放修复与排序、跟读作答适配</summary>
+
+- **媒体播放**：修复音视频延迟加载时等待时长导致的卡顿，先启动播放再读取媒体时长。
+- **排序作答**：适配《新一代大学英语（第二版）视听说教程3（思政版）》的排序题，使用鼠标拖动并核对实际选项顺序。
+- **词汇跟读**：识别词汇题中的英文单词及参考音频，正确区分参考音频与已提交的录音。
+- **翻译录音**：根据中文题干生成英文译文，用于没有示范音频的句子录音题。
+- **致谢**：感谢 [@Hamburg-Sheep](https://github.com/Hamburg-Sheep) 提供测试账号和密码，帮助完成教材问题排查与实机验证。
+
+</details>
 
 <details>
 <summary><b>v3.9.9（2026-11-15）</b>：《新探索研究生英语（提高级）视听说教程》口语录音适配</summary>

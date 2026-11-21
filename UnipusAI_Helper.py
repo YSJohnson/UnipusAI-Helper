@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.9"
+APP_VERSION = "3.9.10"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -7043,6 +7043,8 @@ class PublishQuestionParser:
         'text_match_group': 'link_match',
         'oral_personal_state_group': 'record',
         'oral_sentence_scoop_group': 'record',
+        'vocabulary_group': 'record',
+        'sequence_group': 'sorting',
     }
 
     QUESTION_TYPE_KINDS = {
@@ -7328,6 +7330,8 @@ class PublishQuestionParser:
             return self._parse_link_match(group, start_number)
         if kind == 'record':
             return self._parse_record(group, start_number, group_type)
+        if kind == 'sorting':
+            return self._parse_sequence(group, start_number)
         if kind != 'skip':
             self.unsupported.append(group_type)
         return []
@@ -7382,21 +7386,36 @@ class PublishQuestionParser:
                 '[class*="i-record_record-wave-wrapper"], [class*="result_re-record-wrapper"], '
                 '[class*="i-oral-reply_oral-base-re-record-wrapper"]')
             text = self._stem_text(node)
+            if group_type == 'vocabulary_group':
+                words = node.find_elements(By.CSS_SELECTOR, '[class*="q-oral-vocabulary-content_word-text"]')
+                text = self.element_text(words[0]) if words else ''
             if not text and len(nodes) == 1:
                 text = self.group_direction(group)
             if not buttons or not text:
                 continue
             samples = node.find_elements(By.CSS_SELECTOR, '[class*="answer_sample-audio-wrapper"] audio')
+            if group_type == 'vocabulary_group':
+                samples = node.find_elements(By.CSS_SELECTOR, '[class*="q-oral-vocabulary-content_media"] audio')
             url = samples[0].get_attribute('src') if samples else ''
-            if (group_type == 'oral_sentence_scoop_group' or
-                    self._question_type(node) == 'oral_sentence_scoop') and not url:
-                continue
             questions.append(Question(
                 number=start_number + len(questions), text=text,
                 q_type=QuestionType.RECORD, element=node, group=group,
-                record_items=[{'url': url or '', 'element': buttons[0], 'text': text,
+                record_items=[{'url': url or '', 'element': buttons[0],
+                               'text': '' if group_type == 'oral_sentence_scoop_group' and not url else text,
                                'sample': samples[0] if samples else None}],
             ))
+        return questions
+
+    def _parse_sequence(self, group, start_number: int) -> List[Question]:
+        questions = []
+        for node in self._question_nodes(group):
+            rows = node.find_elements(By.CSS_SELECTOR, '[data-optionid][data-index]')
+            if not rows:
+                continue
+            questions.append(Question(number=start_number + len(questions),
+                text=self.group_direction(group), q_type=QuestionType.SORTING,
+                element=node, group=group, options=[Option(letter=chr(65 + index),
+                    text=self._stem_text(row), element=row) for index, row in enumerate(rows)]))
         return questions
 
     def _choice_options(self, node) -> List[Option]:
@@ -7727,7 +7746,7 @@ class PublishAnswerExecutor(AnswerExecutor):
         if url:
             data = self._download_record_audio(url)
         else:
-            text = (item.get('text') or '').strip() or self._record_reading_text(q) or answer
+            text = (item.get('text') or '').strip() or answer or self._record_reading_text(q)
             data = self._speech_audio(text, 0)
         if not data or self.stop_requested.is_set():
             return False
@@ -7804,7 +7823,8 @@ class PublishAnswerExecutor(AnswerExecutor):
                 calls: (window.__ucRec && window.__ucRec.calls) || 0,
                 uploaded: Array.from(root.querySelectorAll('audio[src]'))
                     .filter(audio => !audio.closest('[class*="answer_sample-audio-wrapper"], ' +
-                        '[class*="sample-audio"], [data-lexical-node-type="insert-audio"]'))
+                        '[class*="sample-audio"], [class*="q-oral-vocabulary-content_media"], ' +
+                        '[data-lexical-node-type="insert-audio"]'))
                     .map(audio => audio.getAttribute('src') || '')
                     .filter(src => /^https?:/i.test(src))
             };
@@ -7856,6 +7876,55 @@ class PublishAnswerExecutor(AnswerExecutor):
         if question.q_type == QuestionType.LINK_MATCH:
             return self._fill_link_match(question, answer)
         return super().execute(question, answer)
+
+    def _fill_sorting(self, q: Question, answer: str) -> bool:
+        selector = '[data-optionid][data-index]'
+        if not q.element.find_elements(By.CSS_SELECTOR, selector):
+            return super()._fill_sorting(q, answer)
+        order = self._parse_sorting_order(answer, [option.letter for option in q.options])
+        if not order:
+            return False
+        ids = {option.letter: option.element.get_attribute('data-optionid') for option in q.options}
+        expected = [ids[letter] for letter in order]
+        for target, option_id in enumerate(expected):
+            if self.stop_requested.is_set():
+                return False
+            rows = q.element.find_elements(By.CSS_SELECTOR, selector)
+            current = [row.get_attribute('data-optionid') for row in rows]
+            if current == expected:
+                return True
+            if option_id not in current:
+                return False
+            position = current.index(option_id)
+            if position == target:
+                continue
+            row = rows[position]
+            self.driver.execute_script('arguments[0].scrollIntoView({block: "center"});', q.element)
+            self.driver.execute_async_script("""
+                const row = arguments[0], target = arguments[1], done = arguments[2];
+                const handle = row.querySelector('[class*="q-drag_dragBox"]');
+                if (!handle) { done(false); return; }
+                const a = handle.getBoundingClientRect(), b = target.getBoundingClientRect();
+                const x = a.left + a.width / 2, y = a.top + a.height / 2;
+                const end = b.top + b.height / 2;
+                const fire = (node, type, yy, buttons = 1) => node.dispatchEvent(
+                    new MouseEvent(type, {view: window, bubbles: true, cancelable: true,
+                        clientX: x, clientY: yy, button: 0, buttons}));
+                fire(handle, 'mousedown', y);
+                setTimeout(() => {
+                    fire(document, 'mousemove', y - 12);
+                    setTimeout(() => {
+                        fire(document, 'mousemove', end);
+                        setTimeout(() => {
+                            fire(document, 'mouseup', end, 0);
+                            done(true);
+                        }, 250);
+                    }, 150);
+                }, 150);
+            """, row, rows[target])
+            self.stop_requested.wait(0.2)
+        return [row.get_attribute('data-optionid') for row in
+                q.element.find_elements(By.CSS_SELECTOR, selector)] == expected
 
     def _fill_fill_in(self, q: Question, answer: str) -> bool:
         if q.blank_count and q.blank_count != len(q.inputs):
@@ -11066,9 +11135,9 @@ class AISolver:
                     tag = 'audio' if wrapper.get_attribute('data-lexical-node-type') == 'insert-audio' else 'video'
                     video = WebDriverWait(self.driver, 15).until(
                         lambda d: wrapper.find_elements(By.TAG_NAME, tag) or False)[0]
+                    self.driver.execute_script('arguments[0].muted=true; arguments[0].playbackRate=2; arguments[0].play();', video)
                     duration = WebDriverWait(self.driver, 15).until(
                         lambda d: d.execute_script('return Number.isFinite(arguments[0].duration) && arguments[0].duration || 0', video))
-                    self.driver.execute_script('arguments[0].muted=true; arguments[0].playbackRate=2; arguments[0].play();', video)
                     print(f'    播放当前任务音视频（{int(duration)} 秒）')
                     deadline = time.monotonic() + duration + 60
                     while not self._should_stop() and time.monotonic() < deadline:
@@ -11361,7 +11430,11 @@ class AISolver:
                     continue
                 answer = ''
                 if question.needs_speech_script:
-                    prompt = self.prompt_builder.build_speaking_script(question, direction)
+                    if group_type == 'oral_sentence_scoop_group':
+                        prompt = ('将题目中的中文括注翻译成英文，填入相应空位，返回完整英文句子。'
+                                  '去掉题号、空号、括号和中文提示，只返回可朗读的英文：\n' + question.text)
+                    else:
+                        prompt = self.prompt_builder.build_speaking_script(question, direction)
                     answer = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
                     if not answer or self._should_stop():
                         print("    AI 未返回口语稿")
@@ -11645,7 +11718,7 @@ class AISolver:
     def _publish_answer_text(self, question: Question, ai_response: str,
                              blank_offset: int = 0) -> str:
         if question.q_type in (QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
-                               QuestionType.TRUE_FALSE):
+                               QuestionType.TRUE_FALSE, QuestionType.SORTING):
             return self._extract_single_answer(ai_response, question.number)
         if question.q_type == QuestionType.LINK_MATCH:
             # 收紧为 {提示序号}.{选项字母}，解释文字里的残留交给 _parse_link_answer 去重
