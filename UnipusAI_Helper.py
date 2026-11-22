@@ -5453,6 +5453,8 @@ class AnswerExecutor:
         r'^[ \t]*(?:填空题|单选题|多选题|选词填空|段落信息匹配|判断题|简答题|翻译题|排序题)'
         r'\s*[：:]?\s*', re.M)
     # 有的模型不给「第N题：」，而是「填空题1：/Cloze 2：」；同样要能当题块切
+    # 「选词/选择填空:」下面一行一题：「1. 1.quantity 2.concern …」
+    QUESTION_LINE_RE = re.compile(r'^[ \t]*(\d{1,2})\s*[.、:：]\s*(?=\d{1,2}\s*[.、])', re.M)
     Q_HEADER_RE = re.compile(
         r'^[ \t]*Q\s*(\d{1,2})\s*[^\n:：]{0,10}[：:]\s*', re.M)
     NUMBERED_SECTION_RE = re.compile(
@@ -5476,6 +5478,10 @@ class AnswerExecutor:
             headers.append((int(match.group(1)), match.start(), match.end()))
         for match in cls.Q_HEADER_RE.finditer(text):
             headers.append((int(match.group(1)), match.start(), match.end()))
+        for match in cls.QUESTION_LINE_RE.finditer(text):
+            candidate = (int(match.group(1)), match.start(), match.end())
+            if all(candidate[1] != item[1] for item in headers):
+                headers.append(candidate)
 
         numbered = [item for item in headers if item[0] is not None]
         if not numbered:
@@ -6791,6 +6797,16 @@ class AnswerExecutor:
             try:
                 print(f"      空{i + 1}: '{ans}'")
                 select_wrapper = blank['element']
+                # 已经选过且与目标一致的，直接跳过（重跑/二次修正时省时间）
+                try:
+                    shown = re.sub(r'\s+', ' ', (select_wrapper.text or '')).strip()
+                    if shown and shown != CLOZE_DROPDOWN_PLACEHOLDER \
+                            and self._label_matches_answer(shown, ans):
+                        print(f"         已是 '{shown}'，跳过")
+                        success_count += 1
+                        continue
+                except Exception:
+                    pass
 
                 self.driver.execute_script(
                     "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
