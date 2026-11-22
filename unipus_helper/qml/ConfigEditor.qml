@@ -39,6 +39,7 @@ ApplicationWindow {
         { key: "homework_submit", label: "自动提交", kind: "bool" },
         { key: "homework.allow_force_submit", label: "允许强制提交", kind: "bool" },
         { key: "max_tokens", label: "最大 Token 数", kind: "int" },
+        { key: "request_batch_size", label: "每批题数", kind: "int" },
         { key: "temperature", label: "温度", kind: "float" },
         { key: "debug_mode", label: "调试模式", kind: "bool" },
         { key: "screenshot", label: "识图模式", kind: "bool" },

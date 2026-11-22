@@ -44,6 +44,8 @@ DEFAULT_CONFIG = {
     "homework_submit": True,
     # 有空位仍强制提交（默认关闭，避免把没填完的作业交上去）
     "homework": {"allow_force_submit": False},
+    # 每批发给模型的题数；页面上题多时会分批请求
+    "request_batch_size": 20,
     # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
     "screenshot": False,
 }
@@ -116,6 +118,7 @@ def normalize_config(data: dict) -> dict:
             out[key] = "" if out[key] is None else str(out[key]).strip()
     out["max_tokens"] = _as_int(out.get("max_tokens"), 32768, 100, 200000)
     out["target_accuracy"] = _as_int(out.get("target_accuracy"), 100, 0, 100)
+    out["request_batch_size"] = _as_int(out.get("request_batch_size"), 20, 1, 50)
     out["temperature"] = _as_float(out.get("temperature"), 0.3, 0, 2)
     for key in BOOL_FIELDS:
         out[key] = _as_bool(out.get(key), DEFAULT_CONFIG.get(key, False))
@@ -137,6 +140,14 @@ def validate_field(key: str, value):
             return None, "目标正确率需为 0–100 的整数"
         if not 0 <= number <= 100:
             return None, "目标正确率需为 0–100 的整数"
+        return number, None
+    if key == "request_batch_size":
+        try:
+            number = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None, "每批题数需为 1–50 的整数"
+        if not 1 <= number <= 50:
+            return None, "每批题数需为 1–50 的整数"
         return number, None
     if key == "max_tokens":
         try:

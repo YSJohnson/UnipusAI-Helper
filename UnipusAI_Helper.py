@@ -197,6 +197,14 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return text in _TRUE_TOKENS
 
 
+def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        number = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
 def _clamp_accuracy(value: Any) -> int:
     """目标正确率：非数字或越界时回落到 100（全部按 AI 答案作答）。"""
     try:
@@ -233,6 +241,8 @@ class Config:
     homework_submit: bool = True
     # 有空位时是否仍强制提交（homework.allow_force_submit，默认关闭）
     allow_force_submit: bool = False
+    # 每批发给模型的题数（1-50），默认 20；超长页面会分批请求
+    request_batch_size: int = 20
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -257,6 +267,7 @@ class Config:
             browser=normalize_browser(data.get("browser")),
             target_accuracy=_clamp_accuracy(data.get("target_accuracy", 100)),
             homework_submit=_coerce_bool(data.get("homework_submit", True), True),
+            request_batch_size=_clamp_int(data.get("request_batch_size", 20), 20, 1, 50),
             allow_force_submit=_coerce_bool(
                 data["homework"].get("allow_force_submit", False)
                 if isinstance(data.get("homework"), dict) else False, False),
@@ -11447,57 +11458,62 @@ class AISolver:
                     else:
                         print("    预取未返回，改为同步请求")
                 if not ai_response:
-                    prompt = self.prompt_builder.build(normal_questions, directions) if normal_questions else ""
-                    if prompt and self._retry_hint:
-                        prompt += "\n\n【平台答案解析】\n" + self._retry_hint[:2000]
-                    if self._should_stop():
-                        return False
-                    shot = self._question_screenshot(normal_questions)
-                    ai_response = self.ai_client.ask(
-                        prompt, stop_requested=self.stop_requested, screenshot=shot,
-                        require_image=self._requires_image_context(normal_questions)
-                    ) if normal_questions else None
-                if self._should_stop():
-                    return False
-                if ai_response:
+                    chunk_size = max(1, int(getattr(self.config, "request_batch_size", 20) or 20))
+                    chunks = [normal_questions[i:i + chunk_size]
+                              for i in range(0, len(normal_questions), chunk_size)]
                     failed_questions = []
-                    spoilers = self._plan_spoilers(normal_questions)
-
-                    for q in normal_questions:
+                    for chunk_index, chunk in enumerate(chunks, 1):
                         if self._should_stop():
                             return False
-                        if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
-                                        QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
-                                        QuestionType.VOCABULARY_TEST]:
-                            ans = self._extract_single_answer(ai_response, q.number)
-                        elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
-                                          QuestionType.DROPDOWN_SELECT]:
-                            if q.q_type == QuestionType.FILL_IN and len(q.inputs or []) <= 1:
-                                # 单个空位的填空（如段落信息匹配的每条陈述）只能吃一个答案，
-                                # 整段 AI 回复灌进去会把多个答案写进同一个格子。
-                                ans = self._extract_single_answer(ai_response, q.number)
+                        prompt = self.prompt_builder.build(chunk, directions) if chunk else ""
+                        if prompt and self._retry_hint:
+                            prompt += "\n\n【平台答案解析】\n" + self._retry_hint[:2000]
+                        print(f"    【分批】第 {chunk_index}/{len(chunks)} 批：{len(chunk)} 题")
+                        shot = self._question_screenshot(chunk)
+                        response = self.ai_client.ask(
+                            prompt, stop_requested=self.stop_requested, screenshot=shot,
+                            require_image=self._requires_image_context(chunk)
+                        ) if chunk else None
+                        if self._should_stop():
+                            return False
+                        if not response:
+                            failed_questions.extend(chunk)
+                            continue
+                        ai_response = ai_response or response
+                        spoilers = self._plan_spoilers(chunk)
+                        for q in chunk:
+                            if self._should_stop():
+                                return False
+                            if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
+                                            QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
+                                            QuestionType.VOCABULARY_TEST]:
+                                ans = self._extract_single_answer(response, q.number)
+                            elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
+                                              QuestionType.DROPDOWN_SELECT]:
+                                if q.q_type == QuestionType.FILL_IN and len(q.inputs or []) <= 1:
+                                    ans = self._extract_single_answer(response, q.number)
+                                else:
+                                    ans = response
+                            elif q.q_type == QuestionType.SORTING and len(chunk) > 1:
+                                ans = self._extract_single_answer(response, q.number)
                             else:
-                                ans = ai_response
-                        elif q.q_type == QuestionType.SORTING and len(normal_questions) > 1:
-                            ans = self._extract_single_answer(ai_response, q.number)
-                        else:
-                            ans = ai_response
+                                ans = response
 
-                        if ans:
-                            ans = self._apply_target_accuracy(q, ans, spoilers)
-                            if q.q_type == QuestionType.SORTING:
-                                letters = [opt.letter for opt in q.options]
-                                order = self.executor._parse_sorting_order(ans, letters)
-                                corrected = self._reorder_sorting_by_transcript(q, order)
-                                if corrected and corrected != order:
-                                    ans = ' '.join(corrected)
-                            if self.executor.execute(q, ans):
-                                success_count += 1
+                            if ans:
+                                ans = self._apply_target_accuracy(q, ans, spoilers)
+                                if q.q_type == QuestionType.SORTING:
+                                    letters = [opt.letter for opt in q.options]
+                                    order = self.executor._parse_sorting_order(ans, letters)
+                                    corrected = self._reorder_sorting_by_transcript(q, order)
+                                    if corrected and corrected != order:
+                                        ans = ' '.join(corrected)
+                                if self.executor.execute(q, ans):
+                                    success_count += 1
+                                else:
+                                    failed_questions.append(q)
                             else:
+                                print(f"    题目 {q.number} 无答案")
                                 failed_questions.append(q)
-                        else:
-                            print(f"    题目 {q.number} 无答案")
-                            failed_questions.append(q)
 
                     if self.executor.suspicious:
                         for question in self.executor.suspicious:
@@ -11509,23 +11525,11 @@ class AISolver:
                         success_count += repaired
                         print(f"    二次修正成功 {repaired}/{len(failed_questions)} 题")
 
-                    total_answered += success_count
-                    print(f"    本页成功填写 {success_count}/{total_questions} 题")
-                    if success_count != total_questions:
-                        print("    本页未完整填写，停止当前任务，请检查答案和选项状态")
-                        return False
-                elif normal_questions:
-                    print("    AI 未返回答案，停止当前任务")
+                total_answered += success_count
+                print(f"    本页成功填写 {success_count}/{total_questions} 题")
+                if success_count != total_questions:
+                    print("    本页未完整填写，停止当前任务，请检查答案和选项状态")
                     return False
-                else:
-                    total_answered += success_count
-                    print(f"    本页成功填写 {success_count}/{total_questions} 题")
-                    if success_count != total_questions:
-                        print("    本页未完整填写，停止当前任务，请检查答案和选项状态")
-                        return False
-
-            if self._should_stop():
-                return False
             if (not self.homework_mode and self_check_handled and not normal_questions
                     and self.executor.submit()):
                 self._wait_for_submit_complete()

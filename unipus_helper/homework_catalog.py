@@ -43,6 +43,18 @@ CLICK_BY_TEXT_JS = """
 """
 
 
+def _parse_score(lines):
+    """从卡片文字里读分数：支持「86 分」「得分：86」「成绩 86」几种写法。"""
+    for line in lines:
+        match = re.search(r'(?:得分|成绩)\s*[：:]?\s*([0-9]+(?:\.[0-9]+)?)', line)
+        if match:
+            return float(match.group(1))
+        match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*分', line)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 def _line_value(lines, *prefixes):
     for line in lines:
         for prefix in prefixes:
@@ -113,6 +125,7 @@ def scan_homework(driver, timeout=25.0):
                 "teacher": _line_value(lines, "发布教师"),
                 "end_text": _line_value(lines, "提交截止"),
                 "submit_text": _line_value(lines, "提交时间"),
+            "score": _parse_score(lines),
                 "status": status,
                 "status_text": label,
                 "can_answer": can_answer and status == 0,
