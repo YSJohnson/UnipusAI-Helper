@@ -44,14 +44,22 @@ CLICK_BY_TEXT_JS = """
 
 
 def _parse_score(lines):
-    """从卡片文字里读分数：支持「86 分」「得分：86」「成绩 86」几种写法。"""
+    """从卡片文字里读分数：得分：86 / 86 分 / 成绩 86 / 86.5分 都认。"""
+    patterns = [
+        r"(?:得分|成绩|分数)\s*[：:]?\s*([0-9]{1,3}(?:\.[0-9]+)?)",
+        r"([0-9]{1,3}(?:\.[0-9]+)?)\s*分",
+        r"^([0-9]{1,3}(?:\.[0-9]+)?)\s*$",
+    ]
     for line in lines:
-        match = re.search(r'(?:得分|成绩)\s*[：:]?\s*([0-9]+(?:\.[0-9]+)?)', line)
-        if match:
-            return float(match.group(1))
-        match = re.search(r'([0-9]+(?:\.[0-9]+)?)\s*分', line)
-        if match:
-            return float(match.group(1))
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                try:
+                    value = float(match.group(1))
+                except ValueError:
+                    continue
+                if 0 <= value <= 100:
+                    return value
     return None
 
 

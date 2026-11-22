@@ -11462,18 +11462,34 @@ class AISolver:
                     chunks = [normal_questions[i:i + chunk_size]
                               for i in range(0, len(normal_questions), chunk_size)]
                     failed_questions = []
-                    for chunk_index, chunk in enumerate(chunks, 1):
-                        if self._should_stop():
-                            return False
+                    # 流水线：第 N 批的答案还在写页面时，第 N+1 批的请求已经在路上。
+                    # 只开一个 worker，保证请求本身仍是串行的，避免打爆网关。
+                    from concurrent.futures import ThreadPoolExecutor
+                    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-batch")
+                    pending = None
+
+                    def _ask(chunk, index):
                         prompt = self.prompt_builder.build(chunk, directions) if chunk else ""
                         if prompt and self._retry_hint:
                             prompt += "\n\n【平台答案解析】\n" + self._retry_hint[:2000]
-                        print(f"    【分批】第 {chunk_index}/{len(chunks)} 批：{len(chunk)} 题")
+                        print(f"    【分批】第 {index}/{len(chunks)} 批：{len(chunk)} 题（请求中）")
                         shot = self._question_screenshot(chunk)
-                        response = self.ai_client.ask(
+                        return self.ai_client.ask(
                             prompt, stop_requested=self.stop_requested, screenshot=shot,
                             require_image=self._requires_image_context(chunk)
                         ) if chunk else None
+
+                    try:
+                        pending = pool.submit(_ask, chunks[0], 1)
+                    except Exception:
+                        pending = None
+                    for chunk_index, chunk in enumerate(chunks, 1):
+                        if self._should_stop():
+                            return False
+                        response = pending.result() if pending else None
+                        pending = None
+                        if chunk_index + 1 <= len(chunks):
+                            pending = pool.submit(_ask, chunks[chunk_index], chunk_index + 1)
                         if self._should_stop():
                             return False
                         if not response:
@@ -11520,6 +11536,10 @@ class AISolver:
                             if question not in failed_questions:
                                 failed_questions.append(question)
                         self.executor.suspicious.clear()
+                    try:
+                        pool.shutdown(wait=False)
+                    except Exception:
+                        pass
                     if failed_questions:
                         repaired = self._repair_questions(failed_questions, directions)
                         success_count += repaired
