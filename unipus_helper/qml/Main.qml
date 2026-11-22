@@ -201,6 +201,10 @@ ApplicationWindow {
                     hint: "读取课程浏览器当前所在的单元"; enabled: window.appState.ready && !window.busy; onClicked: workbench.start("scan_unit")
                 }
                 ActionButton {
+                    objectName: "scanHomework"; visible: window.currentPage === 0; text: "扫描作业"; iconName: "list"; implicitHeight: window.compactHeight ? 36 : 40
+                    hint: "读取「我的作业」里的待作答/批阅中/已批阅"; enabled: window.appState.ready && !window.busy; onClicked: workbench.start("scan_homework")
+                }
+                ActionButton {
                     objectName: "processPage"; visible: window.currentPage === 0; text: "处理当前页"; iconName: "page"; implicitHeight: window.compactHeight ? 36 : 40
                     hint: "直接处理课程浏览器中已打开的题目"; enabled: window.appState.ready && !window.busy; onClicked: quickDialog.open()
                 }

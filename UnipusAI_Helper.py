@@ -212,6 +212,8 @@ class Config:
     # 目标正确率（0-100）：100 表示全部按 AI 答案作答；
     # 低于 100 时会挑一部分题故意做错，让整份得分落在这个值附近（误差约 ±10 分）
     target_accuracy: int = 100
+    # 云作业填完后是否自动点「提交」；关掉就停在提交前等你确认
+    homework_submit: bool = True
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -235,6 +237,7 @@ class Config:
             screenshot=bool(data.get("screenshot", False)),
             browser=normalize_browser(data.get("browser")),
             target_accuracy=_clamp_accuracy(data.get("target_accuracy", 100)),
+            homework_submit=bool(data.get("homework_submit", True)),
         )
 
 
@@ -9801,25 +9804,42 @@ class AISolver:
         return self.stop_requested.is_set()
 
     # ---- 目标正确率：按配置把一部分题故意做错 ---------------------------
+    QUESTION_POINTS_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*(?:分|points?)', re.IGNORECASE)
+
+    def _question_weight(self, q: Question) -> float:
+        """题目分值：题干里写了「（2 分）」这类就按它算，没写当 1 分。"""
+        match = self.QUESTION_POINTS_PATTERN.search(q.text or "")
+        if not match:
+            return 1.0
+        try:
+            return max(0.5, float(match.group(1)))
+        except ValueError:
+            return 1.0
+
     def _plan_spoilers(self, questions: List[Question]) -> set:
         """挑出本页要故意做错的题号，让整页得分落向 target_accuracy。
 
-        每道题按同权重估算：做错 k = round(N * (1 - target/100)) 道即可，
-        单题分值 100/N，取整误差不超过 100/(2N)，通常远小于 10 分。
+        先按分值算「总共允许多丢多少分」，再逐题累加，直到刚好覆盖这个差额；
+        题干带分值（如「（2 分）」）时按分值加权，否则每题等权。
         """
         target = getattr(self.config, 'target_accuracy', 100)
         if target >= 100 or not questions:
             return set()
-        total = len(questions)
-        want_wrong = int(round(total * (100 - target) / 100.0))
-        if want_wrong <= 0:
+        weighted = [(q.number, self._question_weight(q)) for q in questions if q.number is not None]
+        total_points = sum(weight for _, weight in weighted)
+        if not weighted or total_points <= 0:
             return set()
-        want_wrong = min(want_wrong, total - 1)
-        numbers = [q.number for q in questions if q.number is not None]
-        if not numbers:
-            return set()
-        picked = random.sample(numbers, min(want_wrong, len(numbers)))
-        print(f"    [正确率] 目标 {target}%：本页 {total} 题，故意做错 {len(picked)} 题")
+        allow_lose = total_points * (100 - target) / 100.0
+        picked, lost = [], 0.0
+        for number, weight in random.sample(weighted, len(weighted)):
+            if lost >= allow_lose:
+                break
+            picked.append(number)
+            lost += weight
+        if len(picked) >= len(weighted):  # 至少留一道对，别把整页做废
+            picked = picked[:-1]
+        print(f"    [正确率] 目标 {target}%：本页 {len(weighted)} 题 / {total_points:g} 分，"
+              f"故意做错 {len(picked)} 题（约 {lost:g} 分）")
         return set(picked)
 
     def _spoil_answer(self, q: Question, answer: str) -> Optional[str]:

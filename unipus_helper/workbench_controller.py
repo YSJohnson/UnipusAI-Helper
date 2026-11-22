@@ -15,6 +15,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from .course_catalog import CourseCatalogMixin
+from .homework_catalog import open_work, scan_homework
 from .task_grading import selectable_task
 
 
@@ -54,6 +55,8 @@ class WorkbenchController(CourseCatalogMixin):
         self._status = "正在登录"
         self._error = ""
         self._exclude_ungraded = False
+        # 当前任务列表来自课程目录还是「我的作业」，决定「开始处理」走哪条链路
+        self._task_mode = "course"
         self._completed = 0
         self._total = 0
         self._api_status, self._api_ok, self._api_fail = "正在检测接口", False, False
@@ -162,6 +165,7 @@ class WorkbenchController(CourseCatalogMixin):
                 "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),
                 "tasks": tasks, "logs": self._logs, "account": account,
                 "model": getattr(config, "model", "") or "未配置",
+                "taskMode": self._task_mode,
                 "apiStatus": self._api_status, "apiOk": self._api_ok, "apiFail": self._api_fail,
                 "progress": {"completed": self._completed, "total": self._total},
             })
@@ -203,7 +207,7 @@ class WorkbenchController(CourseCatalogMixin):
         return {"ok": True}
 
     def start_action(self, action):
-        if action not in ("scan", "scan_unit", "run", "quick"):
+        if action not in ("scan", "scan_unit", "run", "quick", "scan_homework"):
             return {"ok": False, "error": "无法识别此操作。"}
         with self._lock:
             if self._closed.is_set() or not self._ready or self._operation:
@@ -225,7 +229,15 @@ class WorkbenchController(CourseCatalogMixin):
 
     def _run_operation(self, action):
         try:
-            if action.startswith("scan"):
+            if action == "scan_homework":
+                tasks = self._scan_homework()
+                with self._lock:
+                    self._tasks = tasks
+                    self._task_mode = "homework"
+                    self._selected = {t["id"] for t in tasks
+                                      if t.get("can_answer") and t.get("status") != "done"}
+                self._add_log(f"扫描完成，共发现 {len(tasks)} 项作业。", "success")
+            elif action.startswith("scan"):
                 tasks = self.scan_tasks(current_unit_only=action == "scan_unit")
                 if not tasks:
                     raise RuntimeError("没有找到课程任务。请先在浏览器中打开课程目录，再重新扫描。")
@@ -233,11 +245,16 @@ class WorkbenchController(CourseCatalogMixin):
                     for index, task in enumerate(tasks):
                         task["id"] = f"task-{index}"
                     self._tasks = tasks
+                    self._task_mode = "course"
                     self._selected = {t["id"] for t in tasks if t.get("is_compulsory")
                                       and t.get("status") != "done" and selectable_task(t, self._exclude_ungraded)}
                 self._add_log(f"扫描完成，共发现 {len(tasks)} 项任务。", "success")
             else:
-                if action == "run":
+                if action == "run" and self._task_mode == "homework":
+                    with self._lock:
+                        selected = [t for t in self._tasks if t["id"] in self._selected]
+                    self._run_homework(selected)
+                elif action == "run":
                     with self._lock:
                         selected = [t for t in self._tasks if t["id"] in self._selected]
                     self.solver.process_selected_tabs(selected, on_task_done=self._task_done)
@@ -260,6 +277,48 @@ class WorkbenchController(CourseCatalogMixin):
         finally:
             with self._lock:
                 self._operation = None
+
+    def _scan_homework(self):
+        """读取「我的作业」列表，转成和课程任务同一套结构，复用现有工作台。"""
+        works = scan_homework(self.driver)
+        if not works:
+            raise RuntimeError("没有读到作业。请先在浏览器打开「我的作业」页面，再重新扫描。")
+        tasks = []
+        for index, work in enumerate(works):
+            if work["status"] == 0:
+                status = "todo" if work["can_answer"] else "doing"
+            else:
+                status = "done"
+            tasks.append({
+                "id": f"hw-{index}",
+                "l1_title": work["name"] or "云作业",
+                "display": work["name"] or "云作业",
+                "l2_title": work["course"],
+                "unit_label": work["course"] or "云作业",
+                "unit_name": work["course"] or "云作业",
+                "section": "云作业",
+                "is_compulsory": True,
+                "is_scored": None,
+                "score": work["score"],
+                "status": status,
+                "status_text": work["status_text"],
+                "can_answer": work["can_answer"],
+                "work": work,
+            })
+        return tasks
+
+    def _run_homework(self, tasks):
+        config = getattr(self.bot, "config", None) or getattr(self.solver, "config", None)
+        submit = bool(getattr(config, "homework_submit", True)) if config is not None else True
+        for task in tasks:
+            if self._stop_requested.is_set():
+                break
+            self._add_log(f"打开作业：{task['l1_title']}")
+            if not open_work(self.driver, task["work"]):
+                raise RuntimeError(f"作业打不开：{task['l1_title']}")
+            if not self.solver.solve_homework_page(task["l1_title"], submit=submit):
+                raise RuntimeError(f"作业未处理完成：{task['l1_title']}")
+            self._task_done(task)
 
     def _task_done(self, task):
         with self._lock:

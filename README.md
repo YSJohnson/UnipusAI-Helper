@@ -125,7 +125,8 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 | `tts_proxy` | 否 | `edge-tts` 需要走代理时填，例如 `http://127.0.0.1:7890`；离线 `sapi` 不需要 |
 | `screenshot` | 否 | 将题目截图发送给模型；图片口语题需开启并使用支持识图的模型，默认关闭 |
 | `browser` | 否 | 浏览器后端：`edge`（默认）/ `chrome`。环境检查、driver 启动与缓存目录都跟随这个值；Chrome 只做检测与提示，需自行安装 |
-| `target_accuracy` | 否 | 目标正确率 `0-100`，默认 `100`（全部按 AI 答案作答）。低于 100 时会挑一部分题故意做错，让整份得分落在这个值附近，误差约 ±10 分；编不出错误答案的题型（长文本、录音）保持原答案 |
+| `target_accuracy` | 否 | 目标正确率 `0-100`，默认 `100`（全部按 AI 答案作答）。低于 100 时会挑一部分题故意做错，让整份得分落在这个值附近，误差约 ±10 分；题干带分值（如「（2 分）」）时按分值加权挑选，否则每题等权。编不出错误答案的题型（长文本、录音）保持原答案 |
+| `homework_submit` | 否 | 云作业填完后是否自动点「提交」，默认 `true`。设为 `false` 会停在提交前，等你确认后再手动交 |
 
 
 
@@ -171,6 +172,9 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
   `QuestionParser._find_homework_containers()` 按 `.question-abs-question` 逐节收集容器，
   因此不会像课程页那样被「≥2 个选择题」短路掉前面的题组。
 - 提交：`submit_work()` 点「提交」再确认「确定」。作业通常只能提交一次。
+
+工作台上点「扫描作业」即可把待作答作业读进同一个任务列表（单元显示为课程名），
+勾选后点「开始处理」就会走作业链路：逐节作答 → 填完 → 按 `homework_submit` 决定是否提交。
 
 ```python
 from unipus_helper.homework_catalog import scan_homework, open_work

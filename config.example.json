@@ -14,5 +14,6 @@
   "tts_proxy": "",
   "screenshot": false,
   "browser": "edge",
-  "target_accuracy": 100
+  "target_accuracy": 100,
+  "homework_submit": true
 }
