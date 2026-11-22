@@ -14,8 +14,6 @@ Item {
     required property var scored
     required property string sectionHeader
     required property bool selectable
-    required property string scoreText
-    required property bool scoreAbnormal
     required property var accuracy
     signal accuracyRequested(string taskId, var value)
     property bool editable: true
@@ -135,18 +133,6 @@ Item {
                 ToolTip.text: "点击设置本任务的正确率"
                 ToolTip.delay: 650
                 HoverHandler { id: accuracyHover }
-            }
-            Item {
-                Layout.preferredWidth: 64; Layout.preferredHeight: 24
-                Rectangle {
-                    objectName: "score_" + row.taskId
-                    anchors.fill: parent; visible: row.scoreText !== ""; radius: 6
-                    color: row.scoreAbnormal ? "#5c1f1f" : Theme.successSurface
-                    UiText {
-                        anchors.centerIn: parent; text: row.scoreText; font.pixelSize: 13
-                        color: row.scoreAbnormal ? Theme.error : Theme.success
-                    }
-                }
             }
             Rectangle {
                 Layout.preferredWidth: 72; Layout.preferredHeight: 24; radius: 6
