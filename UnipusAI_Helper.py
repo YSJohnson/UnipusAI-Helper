@@ -180,6 +180,23 @@ def setup_logging():
     return logger
 
 
+_TRUE_TOKENS = {"true", "1", "yes", "on", "是", "开"}
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """宽松布尔：手改配置写成 "False"/"0"/"no" 时不能变成 True。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text in _TRUE_TOKENS
+
+
 def _clamp_accuracy(value: Any) -> int:
     """目标正确率：非数字或越界时回落到 100（全部按 AI 答案作答）。"""
     try:
@@ -239,8 +256,10 @@ class Config:
             screenshot=bool(data.get("screenshot", False)),
             browser=normalize_browser(data.get("browser")),
             target_accuracy=_clamp_accuracy(data.get("target_accuracy", 100)),
-            homework_submit=bool(data.get("homework_submit", True)),
-            allow_force_submit=bool((data.get("homework") or {}).get("allow_force_submit", False)),
+            homework_submit=_coerce_bool(data.get("homework_submit", True), True),
+            allow_force_submit=_coerce_bool(
+                data["homework"].get("allow_force_submit", False)
+                if isinstance(data.get("homework"), dict) else False, False),
         )
 
 
