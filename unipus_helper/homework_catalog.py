@@ -120,6 +120,8 @@ def scan_homework(driver, timeout=25.0):
             lines = [line.strip() for line in (raw.get("text") or "").split("\n") if line.strip()]
             buttons = raw.get("buttons") or []
             can_answer = any("继续作答" in text or text == "作答" for text in buttons)
+            print(f"[homework] 卡片{position}: 页签={label} 状态={label} "
+                  f"score={_parse_score(lines)} | " + " / ".join(lines[:6])[:160])
             works.append({
                 "tab": label,
                 "position": position,
