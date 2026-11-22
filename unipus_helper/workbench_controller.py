@@ -282,26 +282,32 @@ class WorkbenchController(CourseCatalogMixin):
         """读取「我的作业」列表，转成和课程任务同一套结构，复用现有工作台。"""
         works = scan_homework(self.driver)
         if not works:
-            raise RuntimeError("没有读到作业。请先在浏览器打开「我的作业」页面，再重新扫描。")
+            raise RuntimeError("「我的作业」里没有作业。")
         tasks = []
+        seen = set()
         for index, work in enumerate(works):
+            key = (work.get("name"), work.get("submit_text"), work.get("end_text"))
+            if key in seen:
+                continue
+            seen.add(key)
             if work["status"] == 0:
                 status = "todo" if work["can_answer"] else "doing"
             else:
                 status = "done"
+            detail = " · ".join(part for part in (work.get("work_type"), work.get("mode")) if part)
             tasks.append({
                 "id": f"hw-{index}",
                 "l1_title": work["name"] or "云作业",
                 "display": work["name"] or "云作业",
-                "l2_title": work["course"],
-                "unit_label": work["course"] or "云作业",
-                "unit_name": work["course"] or "云作业",
-                "section": "云作业",
+                "l2_title": detail,
+                "unit_label": work.get("course") or "云作业",
+                "unit_name": work.get("course") or "云作业",
+                "section": detail or "云作业",
                 "is_compulsory": True,
                 "is_scored": None,
-                "score": work["score"],
+                "score": work.get("score"),
                 "status": status,
-                "status_text": work["status_text"],
+                "status_text": work.get("status_text", ""),
                 "can_answer": work["can_answer"],
                 "work": work,
             })

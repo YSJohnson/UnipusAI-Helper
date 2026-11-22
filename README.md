@@ -166,8 +166,9 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 
 `我的作业` 里的作业和课程任务不是同一套入口，所以单独走一条链路：
 
-- 列表：`unipus_helper/homework_catalog.py` 在页面内 `POST /api/hwucs/student/work/list`
-  读取待作答 / 批阅中 / 已批阅，字段包含作业名、课程、截止时间、能否作答、分数。
+- 列表：`unipus_helper/homework_catalog.py` 先把浏览器带到「我的作业」页面，
+  再读作业卡片（名称、课程、教师、截止时间、继续作答/查看报告），
+  和课程目录扫描一样只读 DOM，不自己拼接口请求。
 - 作答：作业详情页是「一页多节」（选词填空、段落匹配、阅读单选都在同一个文档里），
   `QuestionParser._find_homework_containers()` 按 `.question-abs-question` 逐节收集容器，
   因此不会像课程页那样被「≥2 个选择题」短路掉前面的题组。
@@ -179,7 +180,7 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 ```python
 from unipus_helper.homework_catalog import scan_homework, open_work
 works = [w for w in scan_homework(driver) if w["can_answer"]]
-open_work(driver, works[0])
+open_work(driver, works[0]["index"])
 solver.solve_homework_page(works[0]["name"], submit=True)
 ```
 
