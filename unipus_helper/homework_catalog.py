@@ -77,8 +77,30 @@ def wait_for_list(driver, timeout=25.0):
     return False
 
 
+def ensure_alive_window(driver):
+    """作业提交后详情页会自己关掉，driver 停在失效句柄上会连锁报 no such window。"""
+    try:
+        driver.current_url
+        return True
+    except Exception:
+        pass
+    try:
+        handles = driver.window_handles
+    except Exception:
+        return False
+    for handle in handles:
+        try:
+            driver.switch_to.window(handle)
+            driver.current_url
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def scan_homework(driver, timeout=25.0):
     """逐个页签读取「我的作业」：待作答 / 批阅中 / 已批阅。"""
+    ensure_alive_window(driver)
     driver.get(HOMEWORK_LIST_URL)
     if not wait_for_list(driver, timeout):
         raise RuntimeError("作业列表没有加载出来，请确认已登录后再试。")
@@ -223,4 +245,5 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False) -> bo
     time.sleep(wait)
     if click_by_text(driver, "确 定") or click_by_text(driver, "确定"):
         time.sleep(wait)
+    ensure_alive_window(driver)
     return True
