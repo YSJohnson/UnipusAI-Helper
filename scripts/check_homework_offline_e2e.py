@@ -59,6 +59,7 @@ def main():
         ok &= scenario_force_gate(U, driver)
         ok &= scenario_course_mode(U)
         ok &= scenario_paragraph_fallback(U, driver)
+        ok &= scenario_unanswered(U, driver)
     except Exception:
         log("脚本异常：")
         log(traceback.format_exc())
@@ -326,6 +327,44 @@ def scenario_paragraph_fallback(U, driver):
     passed &= check("退回 FILL_IN", question is not None and question.q_type.name == "FILL_IN",
                     question.q_type.name if question else "None")
     return bool(passed)
+
+
+def scenario_unanswered(U, driver):
+    log()
+    log("=== 场景10 提交闸门空位计数（不依赖 type 属性）===")
+    from unipus_helper.homework_catalog import UNANSWERED_JS, unanswered_count
+
+    driver.get(SNAPSHOT.as_uri())
+    parts = driver.execute_script(UNANSWERED_JS) or {}
+    check("空位 = 40 下拉 + 10 填空",
+          parts == {"dropdowns": 40, "inputs": 10, "total": 50}, f"got={parts}")
+    check("unanswered_count == 50", unanswered_count(driver) == 50,
+          f"got={unanswered_count(driver)}")
+
+    old_js = """
+        const dropdowns = [...document.querySelectorAll('.scoop-select-wrapper')]
+            .filter(el => {
+                const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                return !text || text === '点击选择';
+            }).length;
+        const inputs = [...document.querySelectorAll(
+            '.question-abs-question input[type="text"]')]
+            .filter(el => !(el.value || '').trim()).length;
+        return {dropdowns, inputs, total: dropdowns + inputs};
+    """
+    old = driver.execute_script(old_js) or {}
+    check("旧选择器对填空完全失明（inputs=0）", old.get("inputs") == 0, f"got={old.get('inputs')}")
+
+    driver.execute_script(
+        "const i = document.querySelectorAll('.comp-abs-input input')[0];"
+        "if (!i) return;"
+        "const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(i), 'value');"
+        "if (d && d.set) { d.set.call(i, 'x'); } else { i.value = 'x'; }")
+    after = driver.execute_script(UNANSWERED_JS) or {}
+    check("填一个空后 inputs=9 / total=49",
+          after == {"dropdowns": 40, "inputs": 9, "total": 49}, f"got={after}")
+    return (parts == {"dropdowns": 40, "inputs": 10, "total": 50}
+            and after == {"dropdowns": 40, "inputs": 9, "total": 49})
 
 
 def build_no_letter_html():
