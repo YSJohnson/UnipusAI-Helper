@@ -216,12 +216,20 @@ UNANSWERED_JS = """
 """
 
 
+def unanswered_detail(driver) -> dict:
+    """作业页空位明细：{dropdowns, inputs, total}。"""
+    try:
+        parts = driver.execute_script(UNANSWERED_JS) or {}
+    except Exception:
+        parts = {}
+    dropdowns = int(parts.get("dropdowns") or 0)
+    inputs = int(parts.get("inputs") or 0)
+    return {"dropdowns": dropdowns, "inputs": inputs, "total": dropdowns + inputs}
+
+
 def unanswered_count(driver):
     """作业页上还剩多少个空没填（下拉仍显示「点击选择」或输入框为空）。"""
-    try:
-        return int((driver.execute_script(UNANSWERED_JS) or {}).get("total") or 0)
-    except Exception:
-        return 0
+    return unanswered_detail(driver)["total"]
 
 
 def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
@@ -234,9 +242,11 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
     if getattr(driver, "_dsh_homework_submitted", False):
         print("    本次运行已经提交过作业，跳过重复提交")
         return True
-    left = unanswered_count(driver)
+    detail = unanswered_detail(driver)
+    left = detail["total"]
     if left and not allow_incomplete:
-        print(f"    还有 {left} 个空没填，先不提交（提交后无法修改）")
+        print(f"    还有 {left} 个空没填（下拉 {detail['dropdowns']} / "
+              f"输入 {detail['inputs']}），先不提交（提交后无法修改）")
         return False
     if not click_by_text(driver, "提 交") and not click_by_text(driver, "提交"):
         return False
@@ -253,14 +263,39 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
     return _confirm_submitted(driver, work, verify_timeout)
 
 
+def _work_in_current_dom(driver, name: str) -> bool:
+    """只读当前 DOM 判断是否已提交，避免每轮都整页刷新 + 点三个页签。"""
+    try:
+        text = (driver.execute_script(
+            "return (document.body && document.body.innerText) || '';") or "")
+    except Exception:
+        return False
+    if name not in text:
+        return False
+    return ("提交时间" in text) or ("已批阅" in text) or ("批阅中" in text)
+
+
 def _confirm_submitted(driver, work: dict, timeout: float) -> bool:
-    """轮询作业列表，确认目标作业已经不在「待作答」。"""
+    """回读确认提交：前 10 秒只读当前 DOM，之后整页扫描最多 3 次 / 总轮数 5。"""
     name = (work.get("name") or "").strip()
     if not name:
         return True
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        time.sleep(3.0)
+    scans = 0
+    for round_index in range(5):
+        if time.time() >= deadline:
+            break
+        time.sleep(10.0 if round_index == 0 else 6.0)
+        if time.time() > deadline:
+            break
+        if round_index == 0:
+            if _work_in_current_dom(driver, name):
+                print(f"    提交已确认（当前页面）：{name}")
+                return True
+            continue
+        if scans >= 3:
+            break
+        scans += 1
         try:
             works = scan_homework(driver)
         except Exception as exc:
