@@ -10187,6 +10187,7 @@ class AISolver:
             if self._should_stop():
                 print("  已请求停止，批量处理提前结束")
                 break
+            self.target_accuracy = tab.get('accuracy')
 
             print(f"\n  [{task_idx + 1}/{len(selected_tabs)}] {tab.get('display') or tab.get('l1_title', '')}")
             try:

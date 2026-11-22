@@ -284,7 +284,8 @@ class WorkbenchController(CourseCatalogMixin):
                     self._run_homework(selected)
                 elif action == "run":
                     with self._lock:
-                        selected = [t for t in self._tasks if t["id"] in self._selected]
+                        selected = [dict(t, accuracy=self._accuracy.get(t["id"]))
+                                    for t in self._tasks if t["id"] in self._selected]
                     self.solver.process_selected_tabs(selected, on_task_done=self._task_done)
                 else:
                     self.solver.processed_hashes.clear()
