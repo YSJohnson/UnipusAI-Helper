@@ -5435,6 +5435,8 @@ class AnswerExecutor:
         r'^[ \t]*(?:填空题|单选题|多选题|选词填空|段落信息匹配|判断题|简答题|翻译题|排序题)'
         r'\s*[：:]?\s*', re.M)
     # 有的模型不给「第N题：」，而是「填空题1：/Cloze 2：」；同样要能当题块切
+    Q_HEADER_RE = re.compile(
+        r'^[ \t]*Q\s*(\d{1,2})\s*[^\n:：]{0,10}[：:]\s*', re.M)
     NUMBERED_SECTION_RE = re.compile(
         r'^[ \t]*(?:填空题|选词填空|完形填空|填空|Cloze|cloze)\s*(\d{1,2})\s*[：:]\s*', re.M)
     LINE_NUMBER_RE = re.compile(r'^[ \t]*(\d{1,2})\s*[.、:：]\s*(.+)$', re.M)
@@ -5454,6 +5456,9 @@ class AnswerExecutor:
             headers.append((int(match.group(1)), match.start(), match.end()))
         for match in cls.NUMBERED_SECTION_RE.finditer(text):
             headers.append((int(match.group(1)), match.start(), match.end()))
+        for match in cls.Q_HEADER_RE.finditer(text):
+            headers.append((int(match.group(1)), match.start(), match.end()))
+
         numbered = [item for item in headers if item[0] is not None]
         if not numbered:
             return None
@@ -5484,6 +5489,13 @@ class AnswerExecutor:
         return result
 
     @classmethod
+    def _looks_like_single_answer(cls, value: str) -> bool:
+        """单个答案不应包含其它编号，也不应超长/含换行。"""
+        if not value or '\n' in value or len(value) > cls.MAX_ANSWER_CHARS:
+            return False
+        return not re.search(r'\d\s*[.、:：]\s*[A-Za-z]', value)
+
+    @classmethod
     def _inline_number_map(cls, text: str) -> Dict[int, str]:
         """同一行里连写的「4.D 5.D 6.C」也要能取到。"""
         result: Dict[int, str] = {}
@@ -5502,14 +5514,19 @@ class AnswerExecutor:
         if block is not None and block.strip():
             numbered = cls._line_number_map(block)
             if question_number in numbered:
-                return cls._clean_extracted_answer(numbered[question_number])
+                value = cls._clean_extracted_answer(numbered[question_number])
+                if cls._looks_like_single_answer(value):
+                    return value
             others = {num for num in numbered if num != question_number}
-            if others:
-                return ""
-            value = cls._clean_extracted_answer(block)
-            if not value or '\n' in value or len(value) > cls.MAX_ANSWER_CHARS:
-                return ""
-            return value
+            if not others:
+                value = cls._clean_extracted_answer(block)
+                if value and '\n' not in value and len(value) <= cls.MAX_ANSWER_CHARS:
+                    return value
+            # 题块里混着多个编号/整段文本：退回行内编号（单选小节连写）
+            inline = cls._inline_number_map(text)
+            if question_number in inline:
+                return cls._clean_extracted_answer(inline[question_number])
+            return ""
         if block == "":
             # 有题块结构但本题不在其中：可能本题写在小节里（填空题：/单选题：）
             numbered = cls._line_number_map(text)
@@ -5522,7 +5539,9 @@ class AnswerExecutor:
 
         numbered = cls._line_number_map(text)
         if question_number in numbered:
-            return cls._clean_extracted_answer(numbered[question_number])
+            value = cls._clean_extracted_answer(numbered[question_number])
+            if cls._looks_like_single_answer(value):
+                return value
         inline = cls._inline_number_map(text)
         if question_number in inline:
             return cls._clean_extracted_answer(inline[question_number])
