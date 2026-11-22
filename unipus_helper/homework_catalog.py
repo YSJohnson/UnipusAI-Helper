@@ -26,9 +26,19 @@ CARD_JS = """
         .filter(el => el.offsetParent !== null)
         .map(el => (el.innerText || '').replace(/\\s+/g, ' ').trim())
         .filter(Boolean);
+    // 分数可能藏在 title / aria-label / alt / 图片文件名里，全部捞出来
+    const attrs = [];
+    card.querySelectorAll('*').forEach(el => {
+        ['title', 'aria-label', 'alt', 'src', 'data-score', 'data-value'].forEach(name => {
+            const value = el.getAttribute && el.getAttribute(name);
+            if (value) attrs.push(name + '=' + String(value).slice(0, 120));
+        });
+    });
     return {
         text: (card.innerText || '').replace(/\\n{2,}/g, '\\n'),
-        buttons
+        buttons,
+        attrs: [...new Set(attrs)].slice(0, 120),
+        imgs: [...card.querySelectorAll('img')].map(img => (img.getAttribute('alt') || '') + '|' + (img.getAttribute('src') || '')).slice(0, 20)
     };
 """
 
@@ -120,8 +130,13 @@ def scan_homework(driver, timeout=25.0):
             lines = [line.strip() for line in (raw.get("text") or "").split("\n") if line.strip()]
             buttons = raw.get("buttons") or []
             can_answer = any("继续作答" in text or text == "作答" for text in buttons)
-            print(f"[homework] 卡片{position}: 页签={label} 状态={label} "
-                  f"score={_parse_score(lines)} | " + " / ".join(lines[:6])[:160])
+            score = _parse_score(lines)
+            if score is None:
+                score = _parse_score(raw.get("attrs") or []) or _parse_score(raw.get("imgs") or [])
+            print(f"[homework] 卡片{position} 页签={label} score={score}")
+            print(f"[homework]   文本: " + " / ".join(lines)[:300])
+            print(f"[homework]   属性: " + " / ".join(raw.get("attrs") or [])[:300])
+            print(f"[homework]   图片: " + " / ".join(raw.get("imgs") or [])[:200])
             works.append({
                 "tab": label,
                 "position": position,
@@ -135,7 +150,7 @@ def scan_homework(driver, timeout=25.0):
                 "teacher": _line_value(lines, "发布教师"),
                 "end_text": _line_value(lines, "提交截止"),
                 "submit_text": _line_value(lines, "提交时间"),
-            "score": _parse_score(lines),
+            "score": score,
                 "status": status,
                 "status_text": label,
                 "can_answer": can_answer and status == 0,
