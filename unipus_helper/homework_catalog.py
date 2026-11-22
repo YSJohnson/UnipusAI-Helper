@@ -53,26 +53,6 @@ CLICK_BY_TEXT_JS = """
 """
 
 
-def _parse_score(lines):
-    """从卡片文字里读分数：得分：86 / 86 分 / 成绩 86 / 86.5分 都认。"""
-    patterns = [
-        r"(?:得分|成绩|分数)\s*[：:]?\s*([0-9]{1,3}(?:\.[0-9]+)?)",
-        r"([0-9]{1,3}(?:\.[0-9]+)?)\s*分",
-        r"^([0-9]{1,3}(?:\.[0-9]+)?)\s*$",
-    ]
-    for line in lines:
-        for pattern in patterns:
-            match = re.search(pattern, line)
-            if match:
-                try:
-                    value = float(match.group(1))
-                except ValueError:
-                    continue
-                if 0 <= value <= 100:
-                    return value
-    return None
-
-
 def _line_value(lines, *prefixes):
     for line in lines:
         for prefix in prefixes:
@@ -130,13 +110,6 @@ def scan_homework(driver, timeout=25.0):
             lines = [line.strip() for line in (raw.get("text") or "").split("\n") if line.strip()]
             buttons = raw.get("buttons") or []
             can_answer = any("继续作答" in text or text == "作答" for text in buttons)
-            score = _parse_score(lines)
-            if score is None:
-                score = _parse_score(raw.get("attrs") or []) or _parse_score(raw.get("imgs") or [])
-            print(f"[homework] 卡片{position} 页签={label} score={score}")
-            print(f"[homework]   文本: " + " / ".join(lines)[:300])
-            print(f"[homework]   属性: " + " / ".join(raw.get("attrs") or [])[:300])
-            print(f"[homework]   图片: " + " / ".join(raw.get("imgs") or [])[:200])
             works.append({
                 "tab": label,
                 "position": position,
@@ -150,7 +123,6 @@ def scan_homework(driver, timeout=25.0):
                 "teacher": _line_value(lines, "发布教师"),
                 "end_text": _line_value(lines, "提交截止"),
                 "submit_text": _line_value(lines, "提交时间"),
-            "score": score,
                 "status": status,
                 "status_text": label,
                 "can_answer": can_answer and status == 0,

@@ -359,15 +359,7 @@ class WorkbenchController(CourseCatalogMixin):
             if not self.solver.solve_homework_page(task["l1_title"], submit=submit,
                                                    work=task.get("work")):
                 raise RuntimeError(f"作业未处理完成：{task['l1_title']}")
-            # 回读一次作业列表拿分数（已批阅/已出分才有；没有就如实说未读到）
-            try:
-                for item in scan_homework(self.driver):
-                    if (item.get("name") or "").strip() == task["l1_title"] \
-                            and item.get("score") is not None:
-                        task["session_score"] = item["score"]
-                        break
-            except Exception as exc:
-                self._add_log(f"读取作业成绩失败：{str(exc)[:60]}", "warning")
+            # 作业列表页没有分数（只在「查看报告」里），不再回读
             self._task_done(task)
 
     def _task_done(self, task):
@@ -376,7 +368,8 @@ class WorkbenchController(CourseCatalogMixin):
             self._selected.discard(task["id"])
             self._completed += 1
         score = task.get("session_score")
-        suffix = f"，得分 {score:g}" if isinstance(score, (int, float)) else "，本次未读到成绩"
+        suffix = f"，得分 {score:g}" if isinstance(score, (int, float)) \
+            else "（成绩请在平台「查看报告」里查看）"
         self._add_log(f"已完成：{task.get('l1_title', '')}{suffix}", "success")
 
     def stop(self):
