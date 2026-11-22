@@ -62,6 +62,11 @@ FILLS = ["need-based aid", "FAFSA", "Direct Loan", "application deadline",
          "co-op programs", "Stafford and Perkins loans", "merit scholarships"]
 CHOICES = list("BDCBBBCCCBACCAADBDCD")  # 13..32
 
+FIXTURE2 = """填空题1：1.quantity 2.concern 3.ripped 4.a chain of 5.as well as 6.interrelated 7.in combination 8.in a way 9.switching 10.absurd 11.be extinguished 12.harnessed 13.perpetual 14.narrowing 15.preached 16.insulating 17.spreads 18.slice 19.ideology 20.supply
+填空题2：1.diet 2.with 3.wishing 4.get rid of 5.contemplate 6.takes 7.feat 8.than 9.stubborn 10.mixture 11.permanent 12.avoiding 13.unsuitable 14.include 15.in 16.to 17.Stay 18.equipped 19.as well as 20.balanced
+单选题：4.D 5.D 6.C 7.B 8.D 9.B 10.C 11.C 12.C 13.B 14.A 15.C 16.C 17.A 18.C 19.D 20.B 21.D 22.C 23.B"""
+
+
 LINES = []
 
 
@@ -92,6 +97,15 @@ def main():
     choices = [U.AnswerExecutor._extract_answer_by_number(FIXTURE, number)
                for number in range(13, 33)]
     ok &= check("Q13-Q32 单选", choices == CHOICES, f"got={''.join(choices)}")
+
+    log()
+    log("=== 另一家模型格式：填空题1：/单选题：连写 ===")
+    q1b = U.AnswerExecutor._parse_banked_answer(FIXTURE2, 20, 1)
+    q2b = U.AnswerExecutor._parse_banked_answer(FIXTURE2, 20, 2)
+    ok &= check("填空题1 首尾", q1b[:1] + q1b[-1:] == ["quantity", "supply"], f"got={q1b[:1] + q1b[-1:]}")
+    ok &= check("填空题2 首尾", q2b[:1] + q2b[-1:] == ["diet", "balanced"], f"got={q2b[:1] + q2b[-1:]}")
+    inline = [U.AnswerExecutor._extract_answer_by_number(FIXTURE2, n) for n in range(4, 24)]
+    ok &= check("单选题连写解析", "".join(inline) == "DDCBDBCCCBACCACDBDCB", f"got={''.join(inline)}")
 
     log()
     log("=== 坏格式必须判失败 ===")

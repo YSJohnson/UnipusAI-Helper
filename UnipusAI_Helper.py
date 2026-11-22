@@ -5433,7 +5433,10 @@ class AnswerExecutor:
     BLOCK_HEADER_RE = re.compile(r'^[ \t]*第\s*(\d{1,2})\s*题\s*[：:]\s*', re.M)
     SECTION_HEADER_RE = re.compile(
         r'^[ \t]*(?:填空题|单选题|多选题|选词填空|段落信息匹配|判断题|简答题|翻译题|排序题)'
-        r'\s*[：:]?\s*$', re.M)
+        r'\s*[：:]?\s*', re.M)
+    # 有的模型不给「第N题：」，而是「填空题1：/Cloze 2：」；同样要能当题块切
+    NUMBERED_SECTION_RE = re.compile(
+        r'^[ \t]*(?:填空题|选词填空|完形填空|填空|Cloze|cloze)\s*(\d{1,2})\s*[：:]\s*', re.M)
     LINE_NUMBER_RE = re.compile(r'^[ \t]*(\d{1,2})\s*[.、:：]\s*(.+)$', re.M)
     MAX_ANSWER_CHARS = 40
 
@@ -5446,18 +5449,27 @@ class AnswerExecutor:
         没有题块结构时返回 None（交给上层走单题逻辑）；有结构但没有本题返回 ""。
         """
         text = answer or ""
-        headers = list(cls.BLOCK_HEADER_RE.finditer(text))
-        if not headers:
+        headers = []
+        for match in cls.BLOCK_HEADER_RE.finditer(text):
+            headers.append((int(match.group(1)), match.start(), match.end()))
+        for match in cls.NUMBERED_SECTION_RE.finditer(text):
+            headers.append((int(match.group(1)), match.start(), match.end()))
+        numbered = [item for item in headers if item[0] is not None]
+        if not numbered:
             return None
-        for index, match in enumerate(headers):
-            if int(match.group(1)) != int(question_number):
+        # 边界：所有标题（含无编号的「单选题：」小节）都要能截断题块
+        boundaries = [(m.start(), m.end()) for m in cls.SECTION_HEADER_RE.finditer(text)]
+        boundaries.extend((item[1], item[2]) for item in headers)
+        boundaries.sort()
+        for number, start, end in numbered:
+            if number != int(question_number):
                 continue
-            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
-            # 最后一个题块后面可能还跟着「填空题：/单选题：」小节，不能一路吃到全文
-            for section in cls.SECTION_HEADER_RE.finditer(text, match.end()):
-                end = min(end, section.start())
-                break
-            return text[match.end():end]
+            boundary = len(text)
+            for b_start, _ in boundaries:
+                if b_start >= end:
+                    boundary = b_start
+                    break
+            return text[end:boundary]
         return ""
 
     @classmethod
@@ -5469,6 +5481,17 @@ class AnswerExecutor:
             if number in result:
                 continue
             result[number] = match.group(2).strip()
+        return result
+
+    @classmethod
+    def _inline_number_map(cls, text: str) -> Dict[int, str]:
+        """同一行里连写的「4.D 5.D 6.C」也要能取到。"""
+        result: Dict[int, str] = {}
+        for match in re.finditer(r'(?<![\d.])(\d{1,2})\s*[.、:：]\s*([A-Za-z][A-Za-z\'-]{0,20})',
+                                 text or ""):
+            number = int(match.group(1))
+            # 单选小节排在最后，同号以「最后一次出现」为准（前面是完形的空号）
+            result[number] = match.group(2)
         return result
 
     @classmethod
@@ -5488,16 +5511,22 @@ class AnswerExecutor:
                 return ""
             return value
         if block == "":
-            # 有「第N题：」结构但本题不在其中：可能本题写在小节里（填空题：/单选题：）
+            # 有题块结构但本题不在其中：可能本题写在小节里（填空题：/单选题：）
             numbered = cls._line_number_map(text)
             if question_number in numbered:
                 return cls._clean_extracted_answer(numbered[question_number])
+            inline = cls._inline_number_map(text)
+            if question_number in inline:
+                return cls._clean_extracted_answer(inline[question_number])
             return ""
 
         numbered = cls._line_number_map(text)
         if question_number in numbered:
             return cls._clean_extracted_answer(numbered[question_number])
-        if numbered:
+        inline = cls._inline_number_map(text)
+        if question_number in inline:
+            return cls._clean_extracted_answer(inline[question_number])
+        if numbered or inline:
             # 有编号但没本题：不猜、不跨题兜底
             return ""
 
