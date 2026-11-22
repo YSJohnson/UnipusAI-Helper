@@ -15,5 +15,8 @@
   "screenshot": false,
   "browser": "edge",
   "target_accuracy": 100,
-  "homework_submit": true
+  "homework_submit": true,
+  "homework": {
+    "allow_force_submit": false
+  }
 }

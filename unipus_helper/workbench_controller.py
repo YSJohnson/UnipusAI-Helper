@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 from .course_catalog import CourseCatalogMixin
 from .homework_catalog import open_work, scan_homework
+from .window_guard import ensure_alive_window, window_failure_hint
 from .task_grading import selectable_task
 
 
@@ -229,6 +230,8 @@ class WorkbenchController(CourseCatalogMixin):
 
     def _run_operation(self, action):
         try:
+            if not ensure_alive_window(self.driver):
+                raise RuntimeError(window_failure_hint())
             if action == "scan_homework":
                 tasks = self._scan_homework()
                 with self._lock:
@@ -322,7 +325,8 @@ class WorkbenchController(CourseCatalogMixin):
             self._add_log(f"打开作业：{task['l1_title']}")
             if not open_work(self.driver, task["work"]):
                 raise RuntimeError(f"作业打不开：{task['l1_title']}")
-            if not self.solver.solve_homework_page(task["l1_title"], submit=submit):
+            if not self.solver.solve_homework_page(task["l1_title"], submit=submit,
+                                                   work=task.get("work")):
                 raise RuntimeError(f"作业未处理完成：{task['l1_title']}")
             self._task_done(task)
 

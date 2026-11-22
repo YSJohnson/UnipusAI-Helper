@@ -10,6 +10,8 @@ import time
 
 from selenium.webdriver.common.by import By
 
+from .window_guard import ensure_alive_window
+
 HOMEWORK_LIST_URL = "https://ucloud.unipus.cn/app/homework/my-homework"
 
 # 页面用三个页签分状态，只读当前页签会漏掉已交/批阅中的作业
@@ -74,27 +76,6 @@ def wait_for_list(driver, timeout=25.0):
         except Exception:
             pass
         time.sleep(0.4)
-    return False
-
-
-def ensure_alive_window(driver):
-    """作业提交后详情页会自己关掉，driver 停在失效句柄上会连锁报 no such window。"""
-    try:
-        driver.current_url
-        return True
-    except Exception:
-        pass
-    try:
-        handles = driver.window_handles
-    except Exception:
-        return False
-    for handle in handles:
-        try:
-            driver.switch_to.window(handle)
-            driver.current_url
-            return True
-        except Exception:
-            continue
     return False
 
 
@@ -234,8 +215,16 @@ def unanswered_count(driver):
         return 0
 
 
-def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False) -> bool:
-    """点「提交」，再确认「确定」。作业只能提交一次，调用前要想清楚。"""
+def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
+                work: dict | None = None, verify_timeout: float = 60.0) -> bool:
+    """点「提交」→「确定」，并回读作业列表确认真的提交成功。
+
+    作业只能提交一次，所以这里：① 同一个 driver 只提交一次；② 有空位时不提交；
+    ③ 提交后必须从「待作答」里消失才算成功，否则打印「提交未确认」。
+    """
+    if getattr(driver, "_dsh_homework_submitted", False):
+        print("    本次运行已经提交过作业，跳过重复提交")
+        return True
     left = unanswered_count(driver)
     if left and not allow_incomplete:
         print(f"    还有 {left} 个空没填，先不提交（提交后无法修改）")
@@ -245,5 +234,34 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False) -> bo
     time.sleep(wait)
     if click_by_text(driver, "确 定") or click_by_text(driver, "确定"):
         time.sleep(wait)
-    ensure_alive_window(driver)
-    return True
+    try:
+        setattr(driver, "_dsh_homework_submitted", True)
+    except Exception:
+        pass
+    if work is None:
+        ensure_alive_window(driver)
+        return True
+    return _confirm_submitted(driver, work, verify_timeout)
+
+
+def _confirm_submitted(driver, work: dict, timeout: float) -> bool:
+    """轮询作业列表，确认目标作业已经不在「待作答」。"""
+    name = (work.get("name") or "").strip()
+    if not name:
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3.0)
+        try:
+            works = scan_homework(driver)
+        except Exception as exc:
+            print(f"    回读作业列表失败: {str(exc)[:80]}")
+            continue
+        for item in works:
+            if (item.get("name") or "").strip() != name:
+                continue
+            if item.get("status") != 0:
+                print(f"    提交已确认：{name} → {item.get('status_text')}")
+                return True
+    print(f"    提交未确认，请人工检查：{name}")
+    return False

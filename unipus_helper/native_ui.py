@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "target_accuracy": 100,
     # 云作业填完后自动提交；关掉则停在提交前等待人工确认
     "homework_submit": True,
+    # 有空位仍强制提交（默认关闭，避免把没填完的作业交上去）
+    "homework": {"allow_force_submit": False},
     # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
     "screenshot": False,
 }
