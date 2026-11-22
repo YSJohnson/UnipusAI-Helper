@@ -127,11 +127,12 @@ def open_work(driver, work, timeout=30.0):
     if not wait_for_list(driver):
         return False
     tab = work.get("tab") or "待作答"
-    if tab != TABS[0][0] and not click_by_text(driver, tab):
+    # 扫描会把页面停在「已批阅」页签，这里必须无条件点回目标页签，
+    # 否则可见卡片是别的页签的，position 会指到错误的作业。
+    if not click_by_text(driver, tab):
         return False
-    if tab != TABS[0][0]:
-        time.sleep(1.2)
-        wait_for_list(driver, 10)
+    time.sleep(1.4)
+    wait_for_list(driver, 10)
     cards = _visible_cards(driver)
     position = int(work.get("position") or 0)
     if position >= len(cards):
