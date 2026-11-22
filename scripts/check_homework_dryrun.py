@@ -120,6 +120,12 @@ def main():
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--window-size=1400,900")
+    if not SNAPSHOT.exists():
+        log(f"SKIP: 快照缺失（{SNAPSHOT}）——快照不进仓库，跳过本套件")
+        (ROOT / "logs").mkdir(exist_ok=True)
+        (ROOT / "logs" / "check_homework_dryrun.log").write_text("SKIP: 快照缺失", encoding="utf-8")
+        print("SKIP: 快照缺失")
+        return 0
     driver = webdriver.Edge(options=opts)
     original_submit = U.submit_work
     try:

@@ -37,14 +37,14 @@ def main():
         log("=== 1. 默认配置往返 ===")
         data = dict(ui.DEFAULT_CONFIG)
         data.update({
-            "username": "17880336209", "password": "pw", "api_key": "sk-test",
+            "username": "13800000000", "password": "pw", "api_key": "sk-test",
             "base_url": "https://example.com/v1", "model": "deepseek-v4.1-flash",
             "target_accuracy": 60, "homework_submit": False,
         })
         ui.save_config(target, data)
         saved = json.loads(target.read_text(encoding="utf-8"))
         check("homework 仍是 dict", isinstance(saved.get("homework"), dict), f"got={type(saved.get('homework'))}")
-        check("allow_force_submit 仍是 bool", saved["homework"].get("allow_force_submit") is False)
+        check("allow_force_submit 默认 True", saved["homework"].get("allow_force_submit") is True)
         check("homework_submit 是 bool False", saved.get("homework_submit") is False,
               f"got={saved.get('homework_submit')!r}")
         check("target_accuracy 是 int 60", saved.get("target_accuracy") == 60
@@ -71,7 +71,7 @@ def main():
 
         log()
         log("=== 3. target_accuracy 宽松解析 ===")
-        for raw, expect in (("abc", 100), (200, 100), (-5, 0), ("61", 61)):
+        for raw, expect in (("abc", 85), (200, 100), (-5, 0), ("61", 61)):
             item = dict(saved)
             item["target_accuracy"] = raw
             path = tmp / "acc.json"

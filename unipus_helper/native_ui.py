@@ -39,11 +39,11 @@ DEFAULT_CONFIG = {
     "browser": "edge",
     # 目标正确率：100 = 全部按 AI 答案作答；低于 100 会故意做错一部分，
     # 让整份得分落在该值附近（误差约 ±10 分）
-    "target_accuracy": 100,
+    "target_accuracy": 85,
     # 云作业填完后自动提交；关掉则停在提交前等待人工确认
     "homework_submit": True,
     # 有空位仍强制提交（默认关闭，避免把没填完的作业交上去）
-    "homework": {"allow_force_submit": False},
+    "homework": {"allow_force_submit": True},
     # 每批发给模型的题数；页面上题多时会分批请求
     "request_batch_size": 20,
     # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
@@ -117,7 +117,7 @@ def normalize_config(data: dict) -> dict:
         if key in out:
             out[key] = "" if out[key] is None else str(out[key]).strip()
     out["max_tokens"] = _as_int(out.get("max_tokens"), 32768, 100, 200000)
-    out["target_accuracy"] = _as_int(out.get("target_accuracy"), 100, 0, 100)
+    out["target_accuracy"] = _as_int(out.get("target_accuracy"), 85, 0, 100)
     out["request_batch_size"] = _as_int(out.get("request_batch_size"), 20, 1, 50)
     out["temperature"] = _as_float(out.get("temperature"), 0.3, 0, 2)
     for key in BOOL_FIELDS:
@@ -126,7 +126,7 @@ def normalize_config(data: dict) -> dict:
     if not isinstance(homework, dict):
         homework = {}
     homework = dict(homework)
-    homework["allow_force_submit"] = _as_bool(homework.get("allow_force_submit"), False)
+    homework["allow_force_submit"] = _as_bool(homework.get("allow_force_submit"), True)
     out["homework"] = homework
     return out
 

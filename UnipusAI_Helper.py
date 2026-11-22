@@ -206,11 +206,11 @@ def _clamp_int(value: Any, default: int, low: int, high: int) -> int:
 
 
 def _clamp_accuracy(value: Any) -> int:
-    """目标正确率：非数字或越界时回落到 100（全部按 AI 答案作答）。"""
+    """目标正确率：非数字时回落到 85；超界按 0/100 夹紧。"""
     try:
         number = int(round(float(value)))
     except (TypeError, ValueError):
-        return 100
+        return 85
     return max(0, min(100, number))
 
 
@@ -236,7 +236,7 @@ class Config:
     browser: str = DEFAULT_BROWSER
     # 目标正确率（0-100）：100 表示全部按 AI 答案作答；
     # 低于 100 时会挑一部分题故意做错，让整份得分落在这个值附近（误差约 ±10 分）
-    target_accuracy: int = 100
+    target_accuracy: int = 85
     # 云作业填完后是否自动点「提交」；关掉就停在提交前等你确认
     homework_submit: bool = True
     # 有空位时是否仍强制提交（homework.allow_force_submit，默认关闭）
@@ -265,7 +265,7 @@ class Config:
             tts_proxy=(data.get("tts_proxy") or "").strip(),
             screenshot=bool(data.get("screenshot", False)),
             browser=normalize_browser(data.get("browser")),
-            target_accuracy=_clamp_accuracy(data.get("target_accuracy", 100)),
+            target_accuracy=_clamp_accuracy(data.get("target_accuracy", 85)),
             homework_submit=_coerce_bool(data.get("homework_submit", True), True),
             request_batch_size=_clamp_int(data.get("request_batch_size", 20), 20, 1, 50),
             allow_force_submit=_coerce_bool(
