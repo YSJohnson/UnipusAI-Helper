@@ -5057,6 +5057,9 @@ class AnswerExecutor:
 
         for opt in q.options:
             if opt.letter.upper() == answer_letter.upper():
+                if self._option_already_selected(opt):
+                    print(f"\t选项 {opt.letter} 已选中，跳过点击")
+                    return True
                 print(f"\t点击选项 {opt.letter}: {opt.text[:30]}...")
                 return WebDriverHelper.safe_click(self.driver, opt.element)
 
@@ -5070,6 +5073,16 @@ class AnswerExecutor:
             pass
 
         return False
+
+    def _option_already_selected(self, opt) -> bool:
+        """页面上的选项已经选中时不再重复点击。"""
+        try:
+            classes = (opt.element.get_attribute('class') or '').lower()
+            if 'selected' in classes or 'checked' in classes or 'active' in classes:
+                return True
+        except Exception:
+            pass
+        return bool(getattr(opt, 'is_selected', False))
 
     def _fill_multiple_choice(self, q: Question, answer: str) -> bool:
         letters = self._parse_choice_letters(answer, [opt.letter for opt in q.options])
@@ -5531,7 +5544,9 @@ class AnswerExecutor:
             # 有题块结构但本题不在其中：可能本题写在小节里（填空题：/单选题：）
             numbered = cls._line_number_map(text)
             if question_number in numbered:
-                return cls._clean_extracted_answer(numbered[question_number])
+                value = cls._clean_extracted_answer(numbered[question_number])
+                if cls._looks_like_single_answer(value):
+                    return value
             inline = cls._inline_number_map(text)
             if question_number in inline:
                 return cls._clean_extracted_answer(inline[question_number])
@@ -6854,8 +6869,7 @@ class AnswerExecutor:
                             if not opt.is_displayed():
                                 continue
                             label = (opt.text or '').strip()
-                            if label and (label.lower() == ans.lower()
-                                          or ans.lower() in label.lower()):
+                            if label and self._label_matches_answer(label, ans):
                                 ActionChains(self.driver).move_to_element(opt).click().perform()
                                 print(f"         通用候选项点击: {label[:20]}")
                                 option_clicked = True
@@ -6931,6 +6945,22 @@ class AnswerExecutor:
                 self.suspicious.append(q)
             return False
         return True
+
+    @staticmethod
+    def _label_matches_answer(label: str, ans: str) -> bool:
+        """候选项与答案的宽松匹配：忽略大小写/空格/标点，再加一次相似度兜底。"""
+        def norm(text):
+            return re.sub(r"[\s\u3000,，。.;；:：'\"()（）\-]", "", str(text or "")).lower()
+        left, right = norm(label), norm(ans)
+        if not left or not right:
+            return False
+        if left == right or left.startswith(right) or right.startswith(left):
+            return True
+        try:
+            from difflib import SequenceMatcher
+            return SequenceMatcher(None, left, right).ratio() >= 0.82
+        except Exception:
+            return False
 
     def _retry_dropdown_blank(self, wrapper, ans: str) -> bool:
         """补选一个没选上的下拉空位：再点开一次，按文本点候选项并回读校验。"""
@@ -10129,7 +10159,8 @@ class AISolver:
         先按分值算「总共允许多丢多少分」，再逐题累加，直到刚好覆盖这个差额；
         题干带分值（如「（2 分）」）时按分值加权，否则每题等权。
         """
-        target = self.target_accuracy if self.target_accuracy is not None \
+        override = getattr(self, 'target_accuracy', None)
+        target = override if override is not None \
             else getattr(self.config, 'target_accuracy', 100)
         if target >= 100 or not questions:
             return set()
