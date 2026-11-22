@@ -3791,22 +3791,27 @@ class DropdownSelectStrategy(QuestionParserStrategy):
                     context = ""
 
             options = []
+            # 直接从未显示的下拉面板里读选项，避免解析阶段点开下拉造成闪动
             try:
-                hidden_div = elem.find_element(By.CSS_SELECTOR, 'div[style*="visibility: hidden"]')
-                option_elems = hidden_div.find_elements(By.TAG_NAME, 'i')
-                for opt in option_elems:
-                    text = opt.text.strip()
-                    if text and text not in options:
-                        options.append(text)
-            except:
+                options = driver.execute_script("""
+                    const wrap = arguments[0];
+                    const out = [];
+                    wrap.querySelectorAll('i').forEach(function (el) {
+                        const text = (el.textContent || '').trim();
+                        if (text && out.indexOf(text) === -1) out.push(text);
+                    });
+                    return out;
+                """, elem) or []
+            except Exception:
+                options = []
+            if not options:
                 try:
                     select = elem.find_element(By.TAG_NAME, 'select')
-                    option_elems = select.find_elements(By.TAG_NAME, 'option')
-                    for opt in option_elems:
+                    for opt in select.find_elements(By.TAG_NAME, 'option'):
                         text = opt.text.strip()
                         if text and text not in ['', CLOZE_DROPDOWN_PLACEHOLDER]:
                             options.append(text)
-                except:
+                except Exception:
                     pass
 
             blanks.append({
@@ -3826,8 +3831,8 @@ class DropdownSelectStrategy(QuestionParserStrategy):
 
         banked_options = list(dict.fromkeys(
             opt for b in blanks for opt in b['options']))
-        if not banked_options and blanks:
-            banked_options = self._peek_dropdown_options(driver, blanks[0]['element'])
+        # 解析阶段绝不点开下拉：之前会先弹开第 1 题、再滚动弹开第 21 题再关掉，
+        # 用户看到的就是「开局闪两下」。选项已在上面从 DOM 读过了。
         return Question(
             number=question_number,
             text=text,
