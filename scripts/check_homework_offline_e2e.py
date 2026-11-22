@@ -58,6 +58,7 @@ def main():
         ok &= scenario_spoilers(U)
         ok &= scenario_force_gate(U, driver)
         ok &= scenario_course_mode(U)
+        ok &= scenario_paragraph_fallback(U, driver)
     except Exception:
         log("脚本异常：")
         log(traceback.format_exc())
@@ -299,6 +300,50 @@ def build_questions(U):
                                              for l in "ABCD"]))
         number += 1
     return questions
+
+
+def scenario_paragraph_fallback(U, driver):
+    log()
+    log("=== 场景9 段匹配识别失败要告警并退回填空 ===")
+    page = ROOT / "logs" / "no_letters.html"
+    page.write_text(build_no_letter_html(), encoding="utf-8")
+    driver.get(page.as_uri())
+    parser = U.QuestionParser(driver)
+    parser.homework_mode = True
+    import contextlib
+    import io
+
+    section = driver.find_elements("css selector", ".question-abs-question")[0]
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        recognized = parser._is_paragraph_match_section(section)
+        containers = parser._find_homework_containers()
+    output = buffer.getvalue()
+    passed = check("识别为 False（不放宽判定）", recognized is False)
+    passed &= check("日志出现告警", "段落匹配识别失败" in output,
+                    output.strip().splitlines()[0][:60] if output.strip() else "")
+    question = parser._parse_single(containers[0], 1) if containers else None
+    passed &= check("退回 FILL_IN", question is not None and question.q_type.name == "FILL_IN",
+                    question.q_type.name if question else "None")
+    return bool(passed)
+
+
+def build_no_letter_html():
+    statements = "".join(
+        f'<div class="question-common-abs-reply"><div class="question-common-abs-scoop">'
+        f'<div class="item"><div class="component-htmlview">Statement {i} without letters.'
+        f'<span class="fe-scoop"><span class="scoop-input-wrapper">'
+        f'<span class="question-number">{i}</span>'
+        f'<div class="comp-abs-input"><div class="placeholder"></div><input type="text">'
+        f'</div></span></span></div></div></div></div>'
+        for i in range(1, 3))
+    return ("<!doctype html><html><head><meta charset='utf-8'></head><body>"
+            '<div class="question-abs-question"><div class="layout-container">'
+            '<div class="layoutBody-container vertical has-material has-reply">'
+            '<div class="layout-material-container"><div class="component-htmlview">'
+            'A passage without any paragraph letters.</div></div>'
+            f'<div class="layout-reply-container"><div class="reply-wrap">{statements}'
+            '</div></div></div></div></div></body></html>')
 
 
 def build_two_section_html():
