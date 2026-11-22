@@ -822,6 +822,9 @@ class OpenAICompatibleClient:
         推理型模型（如 deepseek-flash）可能把 max_tokens 全部消耗在 reasoning 上，
         导致 content 为空且 finish_reason=length；这里在重试次数内调整预算和问法。
         """
+        if require_image and not screenshot:
+            print("   需要题目图片上下文但截图不可用，停止作答")
+            return None
         print(f"当前ai对话历史共{len(self.conversation_history)}条")
         # 推理型模型会把预算全烧在 reasoning 上，配置值太小时必然拿不到正文；
         # 这里设一个下限，配置里写得更小也按 32768 走。
@@ -988,6 +991,11 @@ class QuestionParserStrategy(ABC):
                                    '[class*="MultipleChoice"], [class*="multiple-choice"]'):
             return True
         instructions = ' '.join([directions, *[e.text for e in container.find_elements(By.CSS_SELECTOR, '.ques-title')]])
+        if re.search(
+                r'\b(?:choose|select)\s+(?:the\s+)?true\s+statements\b|'
+                r'\bwhich\s+statements\s+are\s+true\b',
+                instructions, re.IGNORECASE):
+            return True
         return bool(re.search(
             r'多选|\b(?:choose|select|check|tick|mark)\s+(?:all|two|three|four|five|six|seven|eight|nine|ten|[2-9]|multiple|more than one)\b',
             instructions, re.IGNORECASE))
@@ -4502,7 +4510,7 @@ class PromptBuilder:
     def _build_listening_choice(self, q: Question) -> List[str]:
         lines = [
             f"{q.number}. 【听力选择题】{q.text}",
-            "   请根据前面提供的音频转写内容选择最佳答案。",
+            "   请结合前面提供的音频转写内容和题干、选项中的图片信息选择最佳答案。",
         ]
         for opt in q.options:
             lines.append(f"   {opt.letter}. {opt.text}")
@@ -4614,8 +4622,20 @@ class PromptBuilder:
 
     def _build_multiple_choice(self, q: Question) -> List[str]:
         lines = [f"{q.number}. 【多选】{q.text}", "   （注意：本题有多个正确答案）"]
+        has_option_images = False
+        elements = [getattr(q, 'element', None)]
+        elements.extend(getattr(opt, 'element', None) for opt in q.options)
+        for element in elements:
+            try:
+                if element and element.find_elements(By.CSS_SELECTOR, 'img[src], img[data-src]'):
+                    has_option_images = True
+                    break
+            except Exception:
+                continue
         for opt in q.options:
             lines.append(f"   {opt.letter}. {opt.text}")
+        if has_option_images:
+            lines.append("   图片选项必须核对图片人物与听力中的说话者是否对应，包括 he/she；不能只因活动关键词出现在转写中就选该项。")
         lines.append("")
         return lines
 
@@ -9644,11 +9664,12 @@ class AnswerPrefetch:
     """后台预取 AI 答案；只做网络请求，不碰 Selenium。"""
 
     def __init__(self, client, prompt: str, screenshot: Optional[bytes],
-                 stop_requested: threading.Event):
+                 stop_requested: threading.Event, require_image: bool = False):
         self.client = client
         self.materials = tuple((m['role'], m['content']) for m in client.material_messages)
         self.prompt = prompt
         self.screenshot = screenshot
+        self.require_image = require_image
         self.stop_requested = stop_requested
         self.answer: Optional[str] = None
         self.error: Optional[Exception] = None
@@ -9661,7 +9682,8 @@ class AnswerPrefetch:
         try:
             self.answer = self.client.ask(
                 self.prompt, stop_requested=self.stop_requested,
-                screenshot=self.screenshot, remember=False)
+                screenshot=self.screenshot, remember=False,
+                require_image=self.require_image)
         except Exception as exc:
             self.error = exc
         finally:
@@ -10543,7 +10565,10 @@ class AISolver:
         prompt += ("\n\n【修正要求】上一轮这些题没有填好：答案格式不符合题型或没有写进输入框。"
                    "请严格按题型作答——选项/匹配题只输出字母（如 1.B），填空题每空一个答案，"
                    "文本题给完整段落，不要解释、不要重复题号之外的文字。")
-        response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+        response = self.ai_client.ask(
+            prompt, stop_requested=self.stop_requested,
+            screenshot=self._question_screenshot(questions),
+            require_image=self._requires_image_context(questions))
         if not response or self._should_stop():
             return 0
 
@@ -10662,7 +10687,8 @@ class AISolver:
             return None
         shot = self._question_screenshot(questions)
         print(f"    后台预取答案（{len(questions)} 题，与视频播放并行）...")
-        return AnswerPrefetch(self.ai_client, prompt, shot, self.stop_requested)
+        return AnswerPrefetch(self.ai_client, prompt, shot, self.stop_requested,
+                              require_image=self._requires_image_context(questions))
 
     def _material_corpus(self) -> str:
         parts = []
@@ -10915,8 +10941,10 @@ class AISolver:
                     if self._should_stop():
                         return False
                     shot = self._question_screenshot(normal_questions)
-                    ai_response = self.ai_client.ask(prompt, stop_requested=self.stop_requested,
-                                                     screenshot=shot) if normal_questions else None
+                    ai_response = self.ai_client.ask(
+                        prompt, stop_requested=self.stop_requested, screenshot=shot,
+                        require_image=self._requires_image_context(normal_questions)
+                    ) if normal_questions else None
                 if self._should_stop():
                     return False
                 if ai_response:
@@ -12167,11 +12195,38 @@ class AISolver:
             time.sleep(retry)
         return True
 
+    def _requires_image_context(self, questions) -> bool:
+        choice_types = {
+            QuestionType.SINGLE_CHOICE, QuestionType.MULTIPLE_CHOICE,
+            QuestionType.LISTENING_CHOICE, QuestionType.VIDEO_CHOICE,
+        }
+        for question in questions:
+            if question.q_type not in choice_types:
+                continue
+            elements = [getattr(question, 'element', None)]
+            elements.extend(option.element for option in question.options)
+            for element in elements:
+                if element is None:
+                    continue
+                try:
+                    if element.find_elements(By.CSS_SELECTOR, 'img[src], img[data-src]'):
+                        return True
+                except Exception:
+                    continue
+        return False
+
     def _question_screenshot(self, questions) -> Optional[bytes]:
         """题目区域截图，给支持识图的模型补上版面结构。"""
-        if not getattr(self.config, 'screenshot', False):
+        if (not getattr(self.config, 'screenshot', False)
+                and not self._requires_image_context(questions)):
             return None
-        elements = [getattr(q, 'element', None) for q in questions]
+        elements = []
+        for question in questions:
+            element = getattr(question, 'element', None)
+            if element is not None:
+                elements.append(element)
+            elements.extend(option.element for option in question.options
+                            if getattr(option, 'element', None) is not None)
         elements = [element for element in elements if element is not None]
         if not elements:
             return None
