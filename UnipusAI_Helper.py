@@ -10084,7 +10084,9 @@ class AISolver:
                   f"本次不启用正确率调整（不会静默降级）")
             return set()
         picked, lost = [], 0.0
-        # 只在「真的能改错」的题里挑；段落匹配等编不出错答案的题只进分母，不进分子
+        # 只在「真的能改错」的题里挑；段落匹配等编不出错答案的题只进分母，不进分子。
+        # 策略性排除 PARAGRAPH_MATCH：它是一整块 10 分，按 32 分口径目标 60% 只需丢 13 分，
+        # 可改空间（22 分）足够；把这块改错会从 ~59% 掉到 ~28%，风险不对称。
         for number, weight in random.sample(spoilable, len(spoilable)):
             if lost >= allow_lose:
                 break
