@@ -196,13 +196,22 @@ def click_by_text(driver, text: str) -> bool:
 
 
 UNANSWERED_JS = """
+    const placeholder = el => {
+        const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        return !text || text === '点击选择';
+    };
     const dropdowns = [...document.querySelectorAll('.scoop-select-wrapper')]
-        .filter(el => {
-            const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-            return !text || text === '点击选择';
-        }).length;
-    const inputs = [...document.querySelectorAll('.question-abs-question input[type="text"]')]
-        .filter(el => !(el.value || '').trim()).length;
+        .filter(placeholder).length;
+    // 真实页面的填空 input 没有 type 属性（024 快照里 input[type="text"] 命中 0），
+    // 用 input[type="text"] 会把段落匹配/填空题整块漏掉，空卷也会被判「填完了」。
+    const seen = new Set();
+    document.querySelectorAll(
+        '.question-abs-question input:not([type="hidden"]):not([type="radio"])' +
+        ':not([type="checkbox"]):not([type="file"])'
+    ).forEach(el => seen.add(el));
+    // 并集去重：段匹配/填空的输入框在 .comp-abs-input 里，单独再收一遍更稳
+    document.querySelectorAll('.comp-abs-input input').forEach(el => seen.add(el));
+    const inputs = [...seen].filter(el => !(el.value || '').trim()).length;
     return {dropdowns, inputs, total: dropdowns + inputs};
 """
 
