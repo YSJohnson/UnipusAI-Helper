@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "tts_voice": "",
     "tts_proxy": "",
     "browser": "edge",
+    # 目标正确率：100 = 全部按 AI 答案作答；低于 100 会故意做错一部分，
+    # 让整份得分落在该值附近（误差约 ±10 分）
+    "target_accuracy": 100,
     # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
     "screenshot": False,
 }

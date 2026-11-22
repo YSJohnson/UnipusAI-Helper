@@ -13,5 +13,6 @@
   "tts_voice": "",
   "tts_proxy": "",
   "screenshot": false,
-  "browser": "edge"
+  "browser": "edge",
+  "target_accuracy": 100
 }

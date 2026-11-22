@@ -82,6 +82,7 @@ ensure_writable_temp_dir()
 from unipus_helper.audio_recognizer import AudioTranscriber
 from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser
 from unipus_helper.environment_checker import EnvironmentChecker
+from unipus_helper.homework_catalog import open_work, scan_homework, submit_work
 from openai import OpenAI
 from selenium.common.exceptions import (NoSuchDriverException, NoSuchElementException,
                                         TimeoutException, StaleElementReferenceException,
@@ -179,6 +180,15 @@ def setup_logging():
     return logger
 
 
+def _clamp_accuracy(value: Any) -> int:
+    """目标正确率：非数字或越界时回落到 100（全部按 AI 答案作答）。"""
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 100
+    return max(0, min(100, number))
+
+
 @dataclass(frozen=True)
 class Config:
     """不可变配置类"""
@@ -199,6 +209,9 @@ class Config:
     screenshot: bool = False
     # 浏览器后端：edge（默认）/ chrome，见 unipus_helper/browser.py
     browser: str = DEFAULT_BROWSER
+    # 目标正确率（0-100）：100 表示全部按 AI 答案作答；
+    # 低于 100 时会挑一部分题故意做错，让整份得分落在这个值附近（误差约 ±10 分）
+    target_accuracy: int = 100
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -221,6 +234,7 @@ class Config:
             tts_proxy=(data.get("tts_proxy") or "").strip(),
             screenshot=bool(data.get("screenshot", False)),
             browser=normalize_browser(data.get("browser")),
+            target_accuracy=_clamp_accuracy(data.get("target_accuracy", 100)),
         )
 
 
@@ -1216,11 +1230,45 @@ class QuestionParser:
             logger.error(f"详细错误: {error_msg}", exc_info=True)
             return False
 
+    def _find_homework_containers(self) -> List[Any]:
+        """云作业是「一页多节」：逐节收集容器，别把整页当成一节选择题。
+
+        课程页一页一题组，所以原有逻辑看到 ≥2 个选择题就直接返回；
+        作业页把所有大题（选词填空、匹配、阅读单选）放在同一个文档里，
+        沿用那条短路会漏掉前面的题组（实测漏了 41~50 的段落匹配）。
+        """
+        containers = []
+        for section in self.driver.find_elements(By.CSS_SELECTOR, '.question-abs-question'):
+            try:
+                replies = section.find_elements(
+                    By.CSS_SELECTOR,
+                    '.question-common-abs-reply > .question-common-abs-choice')
+                if replies:
+                    containers.extend(replies)
+                    continue
+                scoops = section.find_elements(
+                    By.CSS_SELECTOR, '.question-common-abs-scoop')
+                if scoops:
+                    containers.extend(scoops)
+                    continue
+                reply = section.find_elements(
+                    By.CSS_SELECTOR, '.question-common-abs-reply')
+                containers.append(reply[0] if reply else section)
+            except StaleElementReferenceException:
+                raise
+            except Exception:
+                continue
+        print(f"     作业页共收集 {len(containers)} 个题目容器")
+        return containers
+
     def _find_containers(self) -> List[Any]:
         """查找题目容器"""
         if self._is_discussion_board_page():
             print("     检测到讨论板页面，跳过")
             return []
+
+        if getattr(self, "homework_mode", False):
+            return self._find_homework_containers()
 
         role_play = [c for c in self.driver.find_elements(
             By.CSS_SELECTOR, '.layoutBody-container')
@@ -9752,6 +9800,66 @@ class AISolver:
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
 
+    # ---- 目标正确率：按配置把一部分题故意做错 ---------------------------
+    def _plan_spoilers(self, questions: List[Question]) -> set:
+        """挑出本页要故意做错的题号，让整页得分落向 target_accuracy。
+
+        每道题按同权重估算：做错 k = round(N * (1 - target/100)) 道即可，
+        单题分值 100/N，取整误差不超过 100/(2N)，通常远小于 10 分。
+        """
+        target = getattr(self.config, 'target_accuracy', 100)
+        if target >= 100 or not questions:
+            return set()
+        total = len(questions)
+        want_wrong = int(round(total * (100 - target) / 100.0))
+        if want_wrong <= 0:
+            return set()
+        want_wrong = min(want_wrong, total - 1)
+        numbers = [q.number for q in questions if q.number is not None]
+        if not numbers:
+            return set()
+        picked = random.sample(numbers, min(want_wrong, len(numbers)))
+        print(f"    [正确率] 目标 {target}%：本页 {total} 题，故意做错 {len(picked)} 题")
+        return set(picked)
+
+    def _spoil_answer(self, q: Question, answer: str) -> Optional[str]:
+        """给一道题编一个错误答案；编不出来返回 None（该题保持原答案）。"""
+        try:
+            if q.q_type in (QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
+                            QuestionType.VIDEO_CHOICE, QuestionType.VOCABULARY_TEST,
+                            QuestionType.MULTIPLE_CHOICE):
+                letters = [opt.letter or chr(65 + i) for i, opt in enumerate(q.options)]
+                right = set(self.executor._parse_choice_letters(answer, letters))
+                wrong = [letter for letter in letters if letter not in right]
+                return random.choice(wrong) if wrong else None
+            if q.q_type in (QuestionType.BANKED_CLOZE, QuestionType.DROPDOWN_SELECT,
+                            QuestionType.FILL_IN, QuestionType.LISTENING_FILL_IN):
+                pool = [word.strip() for word in (q.banked_options or []) if str(word).strip()]
+                if not pool:
+                    return None
+                for match in re.finditer(r'(\d+\s*[.、:：\)]?\s*)([A-Za-z][A-Za-z\'-]*)',
+                                         answer or ''):
+                    correct = match.group(2).strip().lower()
+                    # 只用单词型候选替换，保住编号和分隔符，别把答案格式弄坏
+                    wrong = [word for word in pool
+                             if word.lower() != correct and ' ' not in word]
+                    if wrong:
+                        return (answer[:match.start(2)] + random.choice(wrong)
+                                + answer[match.end(2):])
+            return None
+        except Exception:
+            return None
+
+    def _apply_target_accuracy(self, q: Question, answer: str, spoilers: set) -> str:
+        if not spoilers or q.number not in spoilers:
+            return answer
+        wrong = self._spoil_answer(q, answer)
+        if wrong is None:
+            print(f"    [正确率] 第 {q.number} 题编不出错误答案，保持正确答案")
+            return answer
+        print(f"    [正确率] 第 {q.number} 题按目标正确率改为错误答案")
+        return wrong
+
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = "",
                               on_task_done: Optional[Callable[[Dict], None]] = None):
         """
@@ -10949,6 +11057,7 @@ class AISolver:
                     return False
                 if ai_response:
                     failed_questions = []
+                    spoilers = self._plan_spoilers(normal_questions)
 
                     for q in normal_questions:
                         if self._should_stop():
@@ -10966,6 +11075,7 @@ class AISolver:
                             ans = ai_response
 
                         if ans:
+                            ans = self._apply_target_accuracy(q, ans, spoilers)
                             if q.q_type == QuestionType.SORTING:
                                 letters = [opt.letter for opt in q.options]
                                 order = self.executor._parse_sorting_order(ans, letters)
@@ -11931,6 +12041,24 @@ class AISolver:
             parts.append(f"{q.number}:{q_type}:{text_preview}:{option_preview}:{page_progress}")
 
         return hashlib.md5("|".join(parts).encode()).hexdigest()[:16]
+
+    def solve_homework_page(self, name: str = "homework", submit: bool = True) -> bool:
+        """处理当前打开的云作业：逐节作答，全部填完后可选择自动提交。"""
+        print("\n" + "=" * 60)
+        print(f" 开始处理作业：{name}")
+        print("=" * 60)
+        self.parser.homework_mode = True
+        try:
+            solved = self.solve_current_page(name)
+        finally:
+            self.parser.homework_mode = False
+        if solved and submit:
+            print("    准备提交作业...")
+            if submit_work(self.driver):
+                print("    已提交作业")
+            else:
+                print("    没找到提交按钮，请手动提交")
+        return solved
 
     def solve_current_page(self, chapter_name: str = "unknown") -> bool:
         print("\n" + "=" * 60)

@@ -79,7 +79,8 @@ ApplicationWindow {
                                 { key: "tts_engine", label: "录音题 TTS 引擎", hint: "auto / edge / sapi / off" },
                                 { key: "tts_voice", label: "TTS 音色", hint: "留空使用默认英语音色" },
                                 { key: "tts_proxy", label: "TTS 代理", hint: "可选，例如 http://127.0.0.1:7890" },
-                                { key: "browser", label: "浏览器", hint: "edge（默认）/ chrome" }
+                                { key: "browser", label: "浏览器", hint: "edge（默认）/ chrome" },
+                                { key: "target_accuracy", label: "目标正确率", hint: "0–100，100 表示全对" }
                             ]
                             delegate: RowLayout {
                                 required property var modelData
