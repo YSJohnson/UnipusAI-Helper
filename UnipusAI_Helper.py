@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.11"
+APP_VERSION = "3.9.12"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -4984,9 +4984,9 @@ class AnswerExecutor:
         js = """
         const root = arguments[0];
         const order = arguments[1];
-        const wrapper = root.classList.contains('sortable-list-wrapper')
+        const wrapper = root.matches('.sortable-list-wrapper, .sequence-view')
             ? root
-            : root.querySelector('.sortable-list-wrapper');
+            : root.querySelector('.sortable-list-wrapper') || root.querySelector('.sequence-view');
         if (!wrapper) return false;
         const fiberKey = Object.keys(wrapper).find(k => k.startsWith('__reactFiber$'));
         if (!fiberKey) return false;
@@ -5056,7 +5056,7 @@ class AnswerExecutor:
         js = """
         const root = arguments[0];
         const order = arguments[1];
-        const wrapper = root.querySelector('.sortable-list-wrapper');
+        const wrapper = root.querySelector('.sortable-list-wrapper') || root.querySelector('.sequence-view');
         if (!wrapper) return false;
 
         const children = Array.from(wrapper.children);

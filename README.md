@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.11-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.12-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -168,6 +168,10 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 
 U校园涉及的教材比较多，不同课程和题型的适配仍在完善中，项目也还有很大的提升空间。遇到问题时，欢迎在 issue 反馈问题，有能力的也欢迎提交 PR
 
+**个别题目分数低**
+
+经过排查，部分题目依赖前文、图片或听力材料等上下文；有的教材未完全适配的，可能部分题目没有传递上下文给AI，AI 只能根据题干作答，结果可能不准确。遇到低分时，欢迎在 issue 中附上教材名称、单元或任务点、题目类型和运行日志，方便定位和修复。
+
 **为什么使用 Selenium 浏览器操作，而不是直接调用接口上报完成？**
 
 直接上报进度确实更快，但是平台可能有检测机制，这样的操作风险也更高，不只是账号风险还有法律风险。目前项目通过 Selenium 操作页面，尽量按照平台原有的学习和作答流程运行，速度会慢一些，但是相比之下尽量降低风险。
@@ -184,6 +188,14 @@ U校园涉及的教材比较多，不同课程和题型的适配仍在完善中�
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.12（2026-11-22）</b>：修复旧播放器排序题自动作答（issue #62）</summary>
+
+- **排序题**：兼容旧播放器排序组件的 `.sequence-view` 容器，支持自动调整选项顺序。
+- **致谢**：感谢 [@MaiYidai](https://github.com/MaiYidai) 提供复现资料，帮助定位并验证问题。
+
+</details>
 
 <details>
 <summary><b>v3.9.11（2026-11-21）</b>：听力上下文与选择题作答修复（issue #63）</summary>
