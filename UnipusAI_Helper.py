@@ -10044,6 +10044,8 @@ class AISolver:
         self._last_question_types: set = set()
         # 云作业「一页多节」，没有课程那种 Vocabulary 子标签，别去切页找词表
         self.homework_mode = False
+        # 单任务覆盖的「目标正确率」；None 表示用 config.target_accuracy
+        self.target_accuracy: Optional[int] = None
 
     def request_stop(self):
         self.stop_requested.set()
@@ -10079,7 +10081,8 @@ class AISolver:
         先按分值算「总共允许多丢多少分」，再逐题累加，直到刚好覆盖这个差额；
         题干带分值（如「（2 分）」）时按分值加权，否则每题等权。
         """
-        target = getattr(self.config, 'target_accuracy', 100)
+        target = self.target_accuracy if self.target_accuracy is not None \
+            else getattr(self.config, 'target_accuracy', 100)
         if target >= 100 or not questions:
             return set()
         weighted = [(q.number, self._question_weight(q)) for q in questions if q.number is not None]

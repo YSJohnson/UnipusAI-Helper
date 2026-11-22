@@ -58,6 +58,8 @@ class WorkbenchController(CourseCatalogMixin):
         self._exclude_ungraded = False
         # 当前任务列表来自课程目录还是「我的作业」，决定「开始处理」走哪条链路
         self._task_mode = "course"
+        # 每个任务单独的目标正确率覆盖（task_id -> 0..100）；不在表里就用全局配置
+        self._accuracy = {}
         self._completed = 0
         self._total = 0
         self._api_status, self._api_ok, self._api_fail = "正在检测接口", False, False
@@ -155,6 +157,7 @@ class WorkbenchController(CourseCatalogMixin):
                       "scored": t.get("is_scored"), "score": t.get("score"),
                       "score_abnormal": bool(t.get("score_abnormal")),
                       "progress": t.get("progress"), "status": t.get("status", "unknown"),
+                      "accuracy": self._accuracy.get(t["id"]),
                       "selected": t["id"] in self._selected} for t in self._tasks]
             config = getattr(self.bot, "config", SimpleNamespace(username="", model=""))
             username = str(getattr(config, "username", ""))
@@ -196,6 +199,28 @@ class WorkbenchController(CourseCatalogMixin):
                                       and selectable_task(t, self._exclude_ungraded)
                                       and (mode == "all" or t.get("is_compulsory"))
                                       and (mode != "pending" or t.get("status") != "done"))
+            return {"ok": True}
+
+    def set_accuracy(self, ids, value):
+        """给指定任务设置目标正确率；value < 0 表示恢复默认（用全局配置）。"""
+        with self._lock:
+            if self._operation:
+                return {"ok": False, "error": "当前操作进行中。"}
+            if not isinstance(ids, list):
+                return {"ok": False, "error": "任务选择无效。"}
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "正确率需为 0–100 的整数。"}
+            if number >= 0 and not 0 <= number <= 100:
+                return {"ok": False, "error": "正确率需为 0–100 的整数。"}
+            for task_id in ids:
+                if not isinstance(task_id, str):
+                    continue
+                if number < 0:
+                    self._accuracy.pop(task_id, None)
+                else:
+                    self._accuracy[task_id] = number
             return {"ok": True}
 
     def set_exclude_ungraded(self, enabled):
@@ -323,6 +348,11 @@ class WorkbenchController(CourseCatalogMixin):
             if self._stop_requested.is_set():
                 break
             self._add_log(f"打开作业：{task['l1_title']}")
+            if task.get("accuracy") is not None:
+                self.solver.target_accuracy = int(task["accuracy"])
+                self._add_log(f"目标正确率：{task['accuracy']}%（本作业单独设置）")
+            else:
+                self.solver.target_accuracy = None
             if not open_work(self.driver, task["work"]):
                 raise RuntimeError(f"作业打不开：{task['l1_title']}")
             if not self.solver.solve_homework_page(task["l1_title"], submit=submit,

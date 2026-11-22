@@ -292,7 +292,7 @@ def configure_ui_font(app):
 class TaskListModel(QAbstractListModel):
     """Keep delegates and scroll position when only selection/status changes."""
     fields = ("taskId", "title", "isRequired", "status", "chosen", "scored", "statusName",
-              "sectionHeader", "selectable", "scoreText", "scoreAbnormal")
+              "sectionHeader", "selectable", "scoreText", "scoreAbnormal", "accuracy")
     roles = {Qt.UserRole + i + 1: name.encode() for i, name in enumerate(fields)}
 
     def __init__(self, parent=None):
@@ -455,6 +455,23 @@ class NativeBridge(QObject):
         self._result(result)
         return bool(result.get("ok"))
 
+    @Slot(int, result=bool)
+    def setAccuracyForSelection(self, value):
+        ids = [t["id"] for t in self._state.get("tasks", []) if t.get("selected")]
+        result = self.controller.set_accuracy(ids, value) if ids else {
+            "ok": False, "error": "请先勾选任务，再设置正确率。"}
+        self._result(result)
+        if result.get("ok"):
+            self._notice = "已为 %d 个任务设置正确率" % len(ids)
+            self.noticeChanged.emit()
+        return bool(result.get("ok"))
+
+    @Slot(str, int, result=bool)
+    def setTaskAccuracy(self, task_id, value):
+        result = self.controller.set_accuracy([task_id], value)
+        self._result(result)
+        return bool(result.get("ok"))
+
     @Slot()
     def stop(self):
         self._result(self.controller.stop())
@@ -498,6 +515,7 @@ class NativeBridge(QObject):
             or self._filter == "required" and t["required"])]
         statuses = {"done": "已完成", "doing": "进行中", "todo": "未开始", "unknown": "待确认"}
         rows = [dict(t, taskId=t["id"], chosen=t["selected"], isRequired=t["required"],
+                     accuracy=t.get("accuracy"),
                      statusName=statuses.get(t["status"], "待确认"),
                      scoreText=f'{score_text(t.get("score"))} 分' if t.get("score") is not None else "",
                      scoreAbnormal=bool(t.get("score_abnormal")),
