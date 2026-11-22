@@ -20,9 +20,9 @@ PRIMARY_BUTTON = ".ucloud-work-btn-primary"
 
 CARD_JS = """
     const card = arguments[0];
-    const buttons = [...card.querySelectorAll('button')]
-        .filter(btn => btn.offsetParent !== null)
-        .map(btn => (btn.innerText || '').replace(/\\s+/g, ' ').trim())
+    const buttons = [...card.querySelectorAll('button, a, [class*="ucloud-work-btn"]')]
+        .filter(el => el.offsetParent !== null)
+        .map(el => (el.innerText || '').replace(/\\s+/g, ' ').trim())
         .filter(Boolean);
     return {
         text: (card.innerText || '').replace(/\\n{2,}/g, '\\n'),
@@ -134,26 +134,54 @@ def open_work(driver, work, timeout=30.0):
     if position >= len(cards):
         return False
     card = cards[position]
-    buttons = card.find_elements(By.CSS_SELECTOR, PRIMARY_BUTTON) or card.find_elements(By.TAG_NAME, "button")
+    buttons = (card.find_elements(By.CSS_SELECTOR, PRIMARY_BUTTON)
+               or card.find_elements(By.CSS_SELECTOR, '[class*="ucloud-work-btn"]')
+               or card.find_elements(By.TAG_NAME, "button"))
     if not buttons:
+        print("[homework] 卡片上没有可点的按钮")
         return False
+    try:
+        print(f"[homework] 打开卡片 {position}: {(card.text or '').replace(chr(10), ' ')[:50]}")
+    except Exception:
+        pass
     before = driver.window_handles
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", buttons[0])
-    time.sleep(0.3)
-    buttons[0].click()
-    time.sleep(2.5)
+    time.sleep(0.4)
+    try:
+        buttons[0].click()
+    except Exception as exc:
+        print(f"[homework] 原生点击失败，改用 JS 点击: {str(exc)[:60]}")
+        driver.execute_script("arguments[0].click();", buttons[0])
+    time.sleep(3.0)
     handles = driver.window_handles
     if len(handles) > len(before):
         driver.switch_to.window(handles[-1])
+        # 新窗口有时先是 about:blank，等它自己导航过去
+        for _ in range(12):
+            try:
+                if not (driver.current_url or "").startswith("about:"):
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        print(f"[homework] 新窗口: {driver.current_url[:90]}")
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             if driver.find_elements(By.CSS_SELECTOR, ".question-abs-question"):
                 time.sleep(1.0)
                 return True
+            url = driver.current_url or ""
+            if "login" in url or "sso" in url:
+                print(f"[homework] 被弹回登录页: {url[:90]}")
+                return False
         except Exception:
             pass
         time.sleep(0.6)
+    try:
+        print(f"[homework] 等题目超时，当前地址: {driver.current_url[:90]}")
+    except Exception:
+        pass
     return False
 
 
@@ -164,8 +192,32 @@ def click_by_text(driver, text: str) -> bool:
         return False
 
 
-def submit_work(driver, wait: float = 2.0) -> bool:
+UNANSWERED_JS = """
+    const dropdowns = [...document.querySelectorAll('.scoop-select-wrapper')]
+        .filter(el => {
+            const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+            return !text || text === '点击选择';
+        }).length;
+    const inputs = [...document.querySelectorAll('.question-abs-question input[type="text"]')]
+        .filter(el => !(el.value || '').trim()).length;
+    return {dropdowns, inputs, total: dropdowns + inputs};
+"""
+
+
+def unanswered_count(driver):
+    """作业页上还剩多少个空没填（下拉仍显示「点击选择」或输入框为空）。"""
+    try:
+        return int((driver.execute_script(UNANSWERED_JS) or {}).get("total") or 0)
+    except Exception:
+        return 0
+
+
+def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False) -> bool:
     """点「提交」，再确认「确定」。作业只能提交一次，调用前要想清楚。"""
+    left = unanswered_count(driver)
+    if left and not allow_incomplete:
+        print(f"    还有 {left} 个空没填，先不提交（提交后无法修改）")
+        return False
     if not click_by_text(driver, "提 交") and not click_by_text(driver, "提交"):
         return False
     time.sleep(wait)

@@ -675,6 +675,22 @@ class WebDriverHelper:
         return None
 
     @staticmethod
+    def fast_find_element(context, selectors: List[str], visible: bool = True) -> Optional[Any]:
+        """容器内即时查找：不等待，适合 DOM 已经渲染完的场景。
+
+        safe_find_element 会对每个选择器各等 5 秒，在「本来就没有这个元素」的
+        容器上（作业页的填空题、选词填空）等于每题白等 15 秒。
+        """
+        for selector in selectors:
+            try:
+                for element in context.find_elements(By.CSS_SELECTOR, selector):
+                    if not visible or element.is_displayed():
+                        return element
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
     def safe_find_elements(driver, selectors: List[str], parent=None) -> List[Any]:
         """安全查找多个元素"""
         search_context = parent if parent else driver
@@ -1695,7 +1711,7 @@ class VocabularyTestStrategy(QuestionParserStrategy):
         if len(options) < 2:
             return False
 
-        title_elem = WebDriverHelper.safe_find_element(driver, Selectors.QUESTION_TITLE, container)
+        title_elem = WebDriverHelper.fast_find_element(container, Selectors.QUESTION_TITLE)
         if not title_elem:
             return False
 
@@ -1712,7 +1728,7 @@ class VocabularyTestStrategy(QuestionParserStrategy):
         return (is_eng_word and has_chi_opts) or (has_chinese and has_eng_opts)
 
     def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
-        title_elem = WebDriverHelper.safe_find_element(driver, Selectors.QUESTION_TITLE, container)
+        title_elem = WebDriverHelper.fast_find_element(container, Selectors.QUESTION_TITLE)
         text = title_elem.text.strip() if title_elem else ""
 
         options = self._extract_options(container, driver)
@@ -3457,7 +3473,7 @@ class FillInStrategy(QuestionParserStrategy):
         return False
 
     def parse(self, container, driver, question_number: int, directions: str = "") -> Optional[Question]:
-        title_elem = WebDriverHelper.safe_find_element(driver, Selectors.QUESTION_TITLE, container)
+        title_elem = WebDriverHelper.fast_find_element(container, Selectors.QUESTION_TITLE)
         text = title_elem.text.strip() if title_elem else ""
         text = re.sub(r"^\d+[.、)\]]\s*", "", text)
 
@@ -3500,6 +3516,10 @@ class FillInStrategy(QuestionParserStrategy):
         material = self._page_material(container)
         if material:
             header += f"\n【题面/词库】{material}"
+        # 段落信息匹配的另一种实现：每条陈述一个普通 input。此时整页材料里有 A)–N)
+        # 的段落编号，答案只应该是一个段落字母，不提醒模型就会写成单词。
+        if len(inputs) == 1 and len(re.findall(r'(?:^|\s)([A-N])\)\s', material or '')) >= 5:
+            header += "\n【题型提示】本题是段落信息匹配：答案只填一个段落字母（A–N），不要写单词或句子。"
         if directions:
             header = f"【题目要求】{directions}\n{header}"
 
@@ -3746,7 +3766,7 @@ class DropdownSelectStrategy(QuestionParserStrategy):
                 'options': options
             })
 
-        title_elem = WebDriverHelper.safe_find_element(driver, Selectors.QUESTION_TITLE, container)
+        title_elem = WebDriverHelper.fast_find_element(container, Selectors.QUESTION_TITLE)
         text = title_elem.text.strip() if title_elem else "下拉选择填空"
         if directions:
             text = directions + text
@@ -6665,7 +6685,58 @@ class AnswerExecutor:
                 logger.error(f"详细错误: {str(e)}", exc_info=True)
                 continue
 
+        # 收尾补选：自绘下拉偶尔会点空，回头把仍显示「点击选择」的空位再补一遍
+        retried = 0
+        for blank, ans in zip(q.banked_blanks, answers):
+            if not ans:
+                continue
+            try:
+                shown = (blank['element'].text or '').replace('\n', ' ').strip()
+            except Exception:
+                continue
+            if shown and shown != CLOZE_DROPDOWN_PLACEHOLDER:
+                continue
+            if self._retry_dropdown_blank(blank['element'], ans):
+                success_count += 1
+                retried += 1
+        if retried:
+            print(f"      补选成功 {retried} 个空")
+
         return success_count > 0
+
+    def _retry_dropdown_blank(self, wrapper, ans: str) -> bool:
+        """补选一个没选上的下拉空位：再点开一次，按文本点候选项并回读校验。"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", wrapper)
+            time.sleep(0.4)
+            ActionChains(self.driver).move_to_element(wrapper).click().perform()
+            time.sleep(0.8)
+            candidates = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                '[role="option"], .ant-select-item-option, .ant-dropdown-menu-item, li[class*="option"], '
+                '[class*="dropdown"] li')
+            for option in candidates:
+                try:
+                    if not option.is_displayed():
+                        continue
+                    label = (option.text or '').strip()
+                    if not label:
+                        continue
+                    if label.lower() != ans.lower() and not label.lower().startswith(ans.lower()):
+                        continue
+                    ActionChains(self.driver).move_to_element(option).click().perform()
+                    time.sleep(0.4)
+                    shown = (wrapper.text or '').replace('\n', ' ').strip()
+                    if shown and shown != CLOZE_DROPDOWN_PLACEHOLDER:
+                        print(f"      补选成功: {ans}")
+                        return True
+                except Exception:
+                    continue
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            print(f"      补选失败: {ans}")
+        except Exception:
+            pass
+        return False
 
     def _fill_listening_fill_in(self, q: Question, answer: str) -> bool:
         answers = self._parse_banked_answer(answer, len(q.inputs))
@@ -9793,6 +9864,8 @@ class AISolver:
         self._publish_scope_url: str = ''
         self._retry_hint: str = ''
         self._last_question_types: set = set()
+        # 云作业「一页多节」，没有课程那种 Vocabulary 子标签，别去切页找词表
+        self.homework_mode = False
 
     def request_stop(self):
         self.stop_requested.set()
@@ -10934,7 +11007,8 @@ class AISolver:
             self._harvest_vocabulary()
             # 当前 Tab 是 Exercise、缓存还是空的（快速处理当前页时很常见）：
             # 借同任务的 Vocabulary 子标签抓一遍再切回来，答案就能逐字对上
-            if page_num == 1 and not len(self._vocab()) and self._needs_vocabulary(questions):
+            if (not self.homework_mode and page_num == 1 and not len(self._vocab())
+                    and self._needs_vocabulary(questions)):
                 switched = self._harvest_from_vocabulary_tab()
                 if switched is None:
                     return False
@@ -11088,7 +11162,13 @@ class AISolver:
                             ans = self._extract_single_answer(ai_response, q.number)
                         elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
                                           QuestionType.DROPDOWN_SELECT]:
-                            ans = ai_response
+                            if q.q_type == QuestionType.FILL_IN and len(q.inputs or []) <= 1:
+                                # 单个空位的填空（如段落信息匹配的每条陈述）只能吃一个答案，
+                                # 整段 AI 回复灌进去会把多个答案写进同一个格子。
+                                ans = (self._extract_single_answer(ai_response, q.number)
+                                       or self._first_answer_token(ai_response))
+                            else:
+                                ans = ai_response
                         elif q.q_type == QuestionType.SORTING and len(normal_questions) > 1:
                             ans = self._extract_single_answer(ai_response, q.number)
                         else:
@@ -12032,6 +12112,17 @@ class AISolver:
             return lines[question_number - 1]
         return ""
 
+    def _first_answer_token(ai_response: str) -> str:
+        """取回复里的第一个答案词，用于只有一个空位的题。"""
+        for line in (ai_response or "").splitlines():
+            cleaned = re.sub(r'^\s*\d+\s*[.、:：\)]\s*', '', line.strip())
+            if not cleaned:
+                continue
+            token = cleaned.split()[0].strip('.,;:，。；：')
+            if token:
+                return token
+        return ""
+
     def _generate_questions_signature(self, questions: List[Question]) -> str:
         if not questions:
             return "empty"
@@ -12067,11 +12158,14 @@ class AISolver:
         print("\n" + "=" * 60)
         print(f" 开始处理作业：{name}")
         print("=" * 60)
+        self.clear_stop()
         self.parser.homework_mode = True
+        self.homework_mode = True
         try:
             solved = self.solve_current_page(name)
         finally:
             self.parser.homework_mode = False
+            self.homework_mode = False
         if solved and submit:
             print("    准备提交作业...")
             if submit_work(self.driver):
@@ -12176,6 +12270,9 @@ class AISolver:
         if self._is_publish_page():
             # 新版路由包含教材/单元/任务，外壳没有旧版题干；不要白等 3 × 5 秒。
             return hashlib.md5(self._publish_current_url().encode()).hexdigest()[:16]
+        if getattr(self, 'homework_mode', False):
+            # 作业页没有 .abs-direction，三条选择器白等 15 秒也没有结果
+            return "homework"
         try:
             direction_elem = WebDriverHelper.safe_find_element(
                 self.driver,
@@ -12192,6 +12289,17 @@ class AISolver:
     def _generate_content_hash(self) -> str:
         if self._is_publish_page():
             return hashlib.md5(self._publish_current_url().encode()).hexdigest()[:16]
+        if getattr(self, 'homework_mode', False):
+            # 作业页没有 .abs-direction，走下面那条路会先 parse_all 一遍（整页几十题，
+            # 白花 3~4 分钟）。作业用 URL 里的作业 id 当标识就够了。
+            try:
+                url = self.driver.current_url or ""
+                match = re.search(r'/do/(\d+)', url)
+                key = match.group(1) if match else url
+                if key:
+                    return hashlib.md5(key.encode()).hexdigest()[:16]
+            except Exception:
+                pass
         try:
             direction_elem = WebDriverHelper.safe_find_element(
                 self.driver,
