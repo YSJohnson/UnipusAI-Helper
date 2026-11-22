@@ -1261,7 +1261,20 @@ class QuestionParser:
                 return False
             text = section.text or ""
             letters = re.findall(r'(?:^|\n)\s*([A-N])\)\s', text)
-            return len(set(letters)) >= 2
+            if len(set(letters)) < 2:
+                # 第二来源：材料容器里的 A)/B) 段落（和 ParagraphMatchingStrategy 同一套解析）
+                try:
+                    material = ParagraphMatchingStrategy._paragraph_material(
+                        section.parent, section)
+                    letters = list(material.get('letters') or [])
+                except Exception:
+                    letters = []
+            if len(set(letters)) >= 2:
+                return True
+            excerpt = re.sub(r'\s+', ' ', text)[:80]
+            print(f"    ⚠ 段落匹配识别失败（inputs={len(inputs)}, "
+                  f"letters={len(set(letters))}），退回通用填空题：{excerpt}")
+            return False
         except StaleElementReferenceException:
             raise
         except Exception:
@@ -6406,7 +6419,7 @@ class AnswerExecutor:
         """段落信息匹配：每个输入框只写一个段落字母。"""
         total = len(q.inputs) or len(q.banked_blanks)
         pool = [str(x).upper() for x in (q.banked_options or [])] or list("ABCDEFGHIJKLMNO")
-        letters = self._parse_paragraph_letters(answer, total, pool)
+        letters = self._parse_paragraph_letters(answer, total, pool, q.number)
         if not any(letters):
             print(f"\t段落匹配没有解析出字母: {answer[:80]}")
             return False
@@ -6429,9 +6442,22 @@ class AnswerExecutor:
         return success == total
 
     @staticmethod
-    def _parse_paragraph_letters(answer: str, total: int, pool: List[str]) -> List[str]:
-        """解析 1.H 2.N 形式的答案；字母池由段落数决定，支持 A-Z 与重复使用。"""
-        text = (answer or "").upper()
+    def _parse_paragraph_letters(answer: str, total: int, pool: List[str],
+                                 question_number: Optional[int] = None) -> List[str]:
+        """解析 1.H 2.N 形式的答案；字母池由段落数决定，支持 A-Z 与重复使用。
+
+        一页可能有两节段落匹配，必须按「第N题：」题块取字母，否则两节会拿到同一批。
+        """
+        raw = answer or ""
+        blocked = False
+        if question_number is not None:
+            block = AnswerExecutor._split_blocks_for_question(raw, question_number)
+            if block is not None:
+                blocked = True
+                if not block.strip():
+                    return [""] * total
+                raw = block
+        text = raw.upper()
         valid = set(pool)
         found = {}
         for num, letter in re.findall(
@@ -6441,6 +6467,9 @@ class AnswerExecutor:
                 found.setdefault(idx, letter)
         if found:
             return [found.get(i, "") for i in range(total)]
+        if blocked:
+            # 题块内解析不出字母：交给二次修正，禁止跨块兜底
+            return [""] * total
         seq = [c for c in re.findall(r'(?<![A-Z])([A-Z])(?![A-Z])', text)
                if c in valid]
         return (seq + [""] * total)[:total]
@@ -6714,8 +6743,13 @@ class AnswerExecutor:
 
                 if not dropdown_menu:
                     print(f"         下拉菜单未出现，尝试备选方案")
-                    if self._force_select_by_js(select_wrapper, ans):
+                    forced = self._force_select_by_js(select_wrapper, ans)
+                    if forced is True:
                         success_count += 1
+                    else:
+                        print("         ⚠ 未验证强设（不计成功）")
+                        if q not in self.suspicious:
+                            self.suspicious.append(q)
                     continue
 
                 option_selectors = [
@@ -6796,7 +6830,10 @@ class AnswerExecutor:
                 else:
                     print(f"         未找到选项 '{ans}'")
                     # 强设只写 DOM，不计入成功，交给二次修正
-                    self._force_select_by_js(select_wrapper, ans)
+                    if self._force_select_by_js(select_wrapper, ans) is not True:
+                        print("         ⚠ 未验证强设（不计成功）")
+                        if q not in self.suspicious:
+                            self.suspicious.append(q)
 
             except Exception as e:
                 print(f"        处理空{i + 1}失败: {str(e)[:50]}")
@@ -10002,7 +10039,13 @@ class AISolver:
     QUESTION_POINTS_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*(?:分|points?)', re.IGNORECASE)
 
     def _question_weight(self, q: Question) -> float:
-        """题目分值：题干里写了「（2 分）」这类就按它算，没写当 1 分。"""
+        """题目分值：题干里写了「（2 分）」这类就按它算，没写当 1 分。
+
+        段落信息匹配被合并成一道题，但它对应平台上的多个小题，
+        权重按空位数算，否则整页总分会被低估（60% 会漂到 65%~68%）。
+        """
+        if q.q_type == QuestionType.PARAGRAPH_MATCH:
+            return float(max(1, len(q.inputs or [])))
         match = self.QUESTION_POINTS_PATTERN.search(q.text or "")
         if not match:
             return 1.0
@@ -10031,19 +10074,23 @@ class AISolver:
                            QuestionType.DROPDOWN_SELECT, QuestionType.FILL_IN,
                            QuestionType.LISTENING_FILL_IN)
         by_number = {q.number: q for q in questions}
-        spoilable_points = sum(weight for number, weight in weighted
-                               if by_number[number].q_type in spoilable_types)
+        spoilable = [(number, weight) for number, weight in weighted
+                     if by_number[number].q_type in spoilable_types]
+        spoilable_points = sum(weight for _, weight in spoilable)
+        print(f"    [正确率] 平台近似总分 {total_points:g} 分 / 可改分值 {spoilable_points:g} 分，"
+              f"目标 {target}% 需丢 {allow_lose:g} 分")
         if spoilable_points <= 0 or allow_lose > spoilable_points:
-            print(f"    [正确率] 配置无效：目标 {target}% 需要丢 {allow_lose:g} 分，"
-                  f"但可改题只有 {spoilable_points:g} 分，本次不启用正确率调整")
+            print(f"    [正确率] 配置无效：还差 {allow_lose - spoilable_points:g} 分可改空间，"
+                  f"本次不启用正确率调整（不会静默降级）")
             return set()
         picked, lost = [], 0.0
-        for number, weight in random.sample(weighted, len(weighted)):
+        # 只在「真的能改错」的题里挑；段落匹配等编不出错答案的题只进分母，不进分子
+        for number, weight in random.sample(spoilable, len(spoilable)):
             if lost >= allow_lose:
                 break
             picked.append(number)
             lost += weight
-        if len(picked) >= len(weighted):  # 至少留一道对，别把整页做废
+        if len(picked) >= len(spoilable):  # 至少留一道对，别把整页做废
             picked = picked[:-1]
         print(f"    [正确率] 目标 {target}%：本页 {len(weighted)} 题 / {total_points:g} 分，"
               f"故意做错 {len(picked)} 题（约 {lost:g} 分）")
