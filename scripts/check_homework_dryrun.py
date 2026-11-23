@@ -12,7 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-SNAPSHOT = ROOT / "output" / "probe" / "024_222542_goto" / "page_main.html"
+FIXTURE_PAGE = ROOT / "scripts" / "fixtures" / "homework_page.html"
+SNAPSHOT = FIXTURE_PAGE if FIXTURE_PAGE.exists() else (
+    ROOT / "output" / "probe" / "024_222542_goto" / "page_main.html")
 
 FIXTURE = """第1题：1.quantity 2.concern 3.ripped 4.a chain of 5.as well as 6.interrelated 7.in combination 8.in a way 9.switching 10.absurd 11.be extinguished 12.harnessed 13.perpetual 14.narrowing 15.baffled 16.insulating 17.spreads 18.slice 19.ideology 20.supply
 第2题：1.diet 2.with 3.wishing 4.get rid of 5.contemplate 6.takes 7.feat 8.than 9.stubborn 10.mixture 11.permanent 12.avoiding 13.unsuitable 14.include 15.in 16.to 17.Stay 18.equipped 19.as well as 20.balanced

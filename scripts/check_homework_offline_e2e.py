@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT))
 # 说明：027_223624_solve 的快照在保存时 .question-common-abs-choice 只剩 CSS（DOM 命中 0），
 # 用它做容器断言会得到 7 个容器；009/024 与真实运行时一致（7 section / 20 选择题容器 /
 # 10 个 comp-abs-input / 40 个下拉），所以这里用 024。
-SNAPSHOT = ROOT / "output" / "probe" / "024_222542_goto" / "page_main.html"
+FIXTURE_PAGE = ROOT / "scripts" / "fixtures" / "homework_page.html"
+SNAPSHOT = FIXTURE_PAGE if FIXTURE_PAGE.exists() else (
+    ROOT / "output" / "probe" / "024_222542_goto" / "page_main.html")
 LOG_LINES = []
 
 
