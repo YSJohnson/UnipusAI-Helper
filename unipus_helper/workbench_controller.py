@@ -289,8 +289,9 @@ class WorkbenchController(CourseCatalogMixin):
                     self._run_homework(selected)
                 elif action == "run":
                     with self._lock:
-                        selected = [dict(t, accuracy=self._accuracy.get(t["id"]))
-                                    for t in self._tasks if t["id"] in self._selected]
+                        selected = [t for t in self._tasks if t["id"] in self._selected]
+                        for task in selected:
+                            task["accuracy"] = self._accuracy_for(task)
                     self.solver.process_selected_tabs(selected, on_task_done=self._task_done)
                 else:
                     self.solver.processed_hashes.clear()
@@ -312,6 +313,11 @@ class WorkbenchController(CourseCatalogMixin):
             with self._lock:
                 self._operation = None
 
+    def _accuracy_for(self, task):
+        """目标正确率的唯一数据源：任务 id → 覆盖值；没有则 None（跟随全局）。"""
+        value = self._accuracy.get(task.get("id"))
+        return int(value) if value is not None else None
+
     def _scan_homework(self):
         """读取「我的作业」列表，转成和课程任务同一套结构，复用现有工作台。"""
         works = scan_homework(self.driver)
@@ -329,8 +335,9 @@ class WorkbenchController(CourseCatalogMixin):
             else:
                 status = "done"
             detail = " · ".join(part for part in (work.get("work_type"), work.get("mode")) if part)
+            work_id = work.get("work_id") or f"{work.get('tab', '')}:{index}"
             tasks.append({
-                "id": f"hw-{index}",
+                "id": f"hw-{work_id}",
                 "l1_title": work["name"] or "云作业",
                 "display": work["name"] or "云作业",
                 "l2_title": detail,
@@ -354,11 +361,12 @@ class WorkbenchController(CourseCatalogMixin):
             if self._stop_requested.is_set():
                 break
             self._add_log(f"打开作业：{task['l1_title']}")
-            if task.get("accuracy") is not None:
-                self.solver.target_accuracy = int(task["accuracy"])
-                self._add_log(f"目标正确率：{task['accuracy']}%（本作业单独设置）")
+            accuracy = self._accuracy_for(task)
+            self.solver.target_accuracy = accuracy
+            if accuracy is not None:
+                self._add_log(f"目标正确率：{accuracy}%（本作业单独设置）")
             else:
-                self.solver.target_accuracy = None
+                self._add_log("目标正确率：跟随全局")
             if not open_work(self.driver, task["work"]):
                 raise RuntimeError(f"作业打不开：{task['l1_title']}")
             if not self.solver.solve_homework_page(task["l1_title"], submit=submit,
