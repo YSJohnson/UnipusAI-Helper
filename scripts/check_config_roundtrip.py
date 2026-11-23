@@ -104,6 +104,27 @@ def main():
         check("homework 仍是对象且值为 True",
               isinstance(on_disk.get("homework"), dict)
               and on_disk["homework"].get("allow_force_submit") is True)
+        log()
+        log("=== 6. 保存全部：点号 key 写入嵌套结构 ===")
+        base = {"username": "x", "password": "p", "api_key": "k",
+                "base_url": "https://x/v1", "model": "m"}
+        base["homework.allow_force_submit"] = True
+        editor.save(base)
+        on_disk = json.loads(editor_path.read_text(encoding="utf-8"))
+        check("username 写入", on_disk.get("username") == "x", on_disk.get("username"))
+        check("嵌套 homework.allow_force_submit=True",
+              isinstance(on_disk.get("homework"), dict)
+              and on_disk["homework"].get("allow_force_submit") is True,
+              on_disk.get("homework"))
+        check("不存在顶层点号键",
+              "homework.allow_force_submit" not in on_disk)
+        base["homework.allow_force_submit"] = False
+        editor.save(base)
+        on_disk = json.loads(editor_path.read_text(encoding="utf-8"))
+        check("再保存 False 生效",
+              on_disk["homework"].get("allow_force_submit") is False,
+              on_disk.get("homework"))
+
         check("saveOne 拒绝非法值 999", editor.saveOne("target_accuracy", "999") is False)
         check("拒绝时不写盘", json.loads(editor_path.read_text(encoding="utf-8"))["target_accuracy"] == 61)
     except Exception:
