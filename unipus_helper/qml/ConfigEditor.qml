@@ -26,6 +26,7 @@ ApplicationWindow {
     property bool allEditing: false
     property string query: ""
     property var revealed: ({})
+    property var drafts: ({})
     property var rowsModel: []
 
     readonly property var rowSpecs: [
@@ -103,6 +104,7 @@ ApplicationWindow {
             })
         }
         window.rowsModel = rows
+        if (!window.allEditing) window.drafts = ({})
     }
 
     function matches(row) {
@@ -115,7 +117,9 @@ ApplicationWindow {
         let values = ({})
         for (let i = 0; i < window.rowsModel.length; ++i) {
             let row = window.rowsModel[i]
-            values[row.key] = row.isBool ? (row.display === "开") : row.draftText
+            values[row.key] = row.isBool
+                    ? (row.display === "开")
+                    : (window.drafts.hasOwnProperty(row.key) ? window.drafts[row.key] : row.draftText)
         }
         return values
     }
@@ -282,7 +286,10 @@ ApplicationWindow {
                                 implicitHeight: 34
                                 color: Theme.ink; selectionColor: Theme.accentFill
                                 font.family: Theme.fontFamily; font.pixelSize: 13
-                                onTextEdited: rowItem.draft = text
+                                onTextEdited: {
+                                    rowItem.draft = text
+                                    window.drafts[rowItem.fieldKey] = text
+                                }
                                 Keys.onEscapePressed: {
                                     rowItem.editing = false
                                     window.allEditing = false

@@ -122,6 +122,16 @@ def normalize_config(data: dict) -> dict:
     out["temperature"] = _as_float(out.get("temperature"), 0.3, 0, 2)
     for key in BOOL_FIELDS:
         out[key] = _as_bool(out.get(key), DEFAULT_CONFIG.get(key, False))
+    # 防御：任何含点号的顶层键都归并进嵌套结构，避免 "homework.allow_force_submit" 被写平
+    for key in [k for k in list(out) if isinstance(k, str) and "." in k]:
+        value = out.pop(key)
+        nested = {}
+        set_field(nested, key, value)
+        for head, child in nested.items():
+            if isinstance(child, dict) and isinstance(out.get(head), dict):
+                out[head] = {**out[head], **child}
+            else:
+                out[head] = child
     homework = out.get("homework")
     if not isinstance(homework, dict):
         homework = {}
@@ -256,7 +266,11 @@ class ConfigEditor(QObject):
     @Slot("QVariantMap")
     def save(self, values):
         data = dict(self.cfg)
-        data.update(values or {})
+        for key, value in (values or {}).items():
+            if isinstance(key, str) and "." in key:
+                set_field(data, key, value)
+            else:
+                data[key] = value
         data = normalize_config(data)
         missing = [label for key, label in REQUIRED_FIELDS if not data.get(key)]
         if missing:
