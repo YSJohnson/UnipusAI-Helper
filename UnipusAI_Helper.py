@@ -239,8 +239,8 @@ class Config:
     target_accuracy: int = 85
     # 云作业填完后是否自动点「提交」；关掉就停在提交前等你确认
     homework_submit: bool = True
-    # 有空位时是否仍强制提交（homework.allow_force_submit，默认关闭）
-    allow_force_submit: bool = False
+    # 有空位时是否仍强制提交（homework.allow_force_submit，默认开启）
+    allow_force_submit: bool = True
     # 每批发给模型的题数（1-50），默认 20；超长页面会分批请求
     request_batch_size: int = 20
 
@@ -269,8 +269,8 @@ class Config:
             homework_submit=_coerce_bool(data.get("homework_submit", True), True),
             request_batch_size=_clamp_int(data.get("request_batch_size", 20), 20, 1, 50),
             allow_force_submit=_coerce_bool(
-                data["homework"].get("allow_force_submit", False)
-                if isinstance(data.get("homework"), dict) else False, False),
+                data["homework"].get("allow_force_submit", True)
+                if isinstance(data.get("homework"), dict) else True, True),
         )
 
 
@@ -12490,11 +12490,13 @@ class AISolver:
             self.homework_mode = False
         if solved and submit:
             print("    准备提交作业...")
-            allow_force = bool(getattr(self.config, "allow_force_submit", False))
+            allow_force = bool(getattr(self.config, "allow_force_submit", True))
             if submit_work(self.driver, allow_incomplete=allow_force, work=work):
                 print("    已提交作业")
             else:
+                # 提交失败必须向上传播：否则工作台会把没交的作业标成已完成
                 print("    提交未确认，请人工检查")
+                return False
         return solved
 
     def solve_current_page(self, chapter_name: str = "unknown") -> bool:

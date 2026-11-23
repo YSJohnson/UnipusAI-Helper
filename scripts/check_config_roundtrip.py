@@ -66,7 +66,7 @@ def main():
         bad.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         config = U.Config.from_json(str(bad))
         check("坏的 homework 不崩", config is not None)
-        check("坏 homework → allow_force_submit=False", config.allow_force_submit is False)
+        check("坏 homework → 缺省 allow_force_submit=True", config.allow_force_submit is True)
         check("字符串 False → homework_submit=False", config.homework_submit is False)
 
         log()

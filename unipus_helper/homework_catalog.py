@@ -243,6 +243,13 @@ def unanswered_count(driver):
     return unanswered_detail(driver)["total"]
 
 
+def _work_key(work) -> str:
+    """作业身份：优先用 id，其次用名称；空作业返回空串（不做幂等）。"""
+    if not isinstance(work, dict):
+        return ""
+    return str(work.get("id") or work.get("name") or "").strip()
+
+
 def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
                 work: dict | None = None, verify_timeout: float = 60.0) -> bool:
     """点「提交」→「确定」，并回读作业列表确认真的提交成功。
@@ -250,8 +257,16 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
     作业只能提交一次，所以这里：① 同一个 driver 只提交一次；② 有空位时不提交；
     ③ 提交后必须从「待作答」里消失才算成功，否则打印「提交未确认」。
     """
-    if getattr(driver, "_dsh_homework_submitted", False):
-        print("    本次运行已经提交过作业，跳过重复提交")
+    key = _work_key(work)
+    submitted = getattr(driver, "_dsh_submitted_works", None)
+    if not isinstance(submitted, set):
+        submitted = set()
+        try:
+            setattr(driver, "_dsh_submitted_works", submitted)
+        except Exception:
+            pass
+    if key and key in submitted:
+        print(f"    本次运行已提交过「{(work or {}).get('name', '')}」，跳过重复提交")
         return True
     detail = unanswered_detail(driver)
     left = detail["total"]
@@ -264,14 +279,15 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
     time.sleep(wait)
     if click_by_text(driver, "确 定") or click_by_text(driver, "确定"):
         time.sleep(wait)
-    try:
-        setattr(driver, "_dsh_homework_submitted", True)
-    except Exception:
-        pass
     if work is None:
         ensure_alive_window(driver)
+        if key:
+            submitted.add(key)
         return True
-    return _confirm_submitted(driver, work, verify_timeout)
+    confirmed = _confirm_submitted(driver, work, verify_timeout)
+    if confirmed and key:
+        submitted.add(key)
+    return confirmed
 
 
 def _work_in_current_dom(driver, name: str) -> bool:
