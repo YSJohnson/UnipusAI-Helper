@@ -5,6 +5,7 @@
 会用自己的会话把数据拉下来），也不会因为少一个 header 就整片读不到。
 """
 
+import hashlib
 import re
 import time
 
@@ -89,6 +90,67 @@ def wait_for_list(driver, timeout=25.0):
     return False
 
 
+def _work_identity(tab: str, lines, href: str = "") -> str:
+    """稳定标识：优先 /do/<digits>，否则 name+course+submit+end 的 md5，并带上页签。"""
+    match = re.search(r'/do/(\d+)', str(href or ""))
+    if match:
+        return f"{tab}:{match.group(1)}"
+    name = lines[0] if lines else ""
+    course = _line_value(lines, "发布课程")
+    submit = _line_value(lines, "提交时间")
+    end = _line_value(lines, "提交截止")
+    digest = hashlib.md5(f"{name}|{course}|{submit}|{end}".encode("utf-8")).hexdigest()[:12]
+    return f"{tab}:{digest}"
+
+
+CARD_LINK_JS = """
+    const card = arguments[0];
+    const link = card.querySelector('a[href*="/do/"]');
+    return link ? (link.getAttribute('href') || '') : '';
+"""
+
+
+def _card_href(driver, card) -> str:
+    try:
+        return driver.execute_script(CARD_LINK_JS, card) or ""
+    except Exception:
+        return ""
+
+
+def _first_line(card) -> str:
+    try:
+        text = (card.text or "").strip()
+    except Exception:
+        return ""
+    return text.split("\n")[0].strip() if text else ""
+
+
+def locate_card(cards, work, read):
+    """按 work_id 定位卡片；退回 position 时必须校验首行名称，不符直接拒绝。
+
+    read(card) -> {"work_id": str, "name": str}
+    """
+    target_id = work.get("work_id") or ""
+    if target_id:
+        for card in cards:
+            try:
+                info = read(card) or {}
+            except Exception:
+                continue
+            if info.get("work_id") == target_id:
+                return card
+        raise RuntimeError(f"作业列表已变化，请重新扫描：找不到 {work.get('name', '')}")
+    position = int(work.get("position") or 0)
+    if position >= len(cards):
+        raise RuntimeError(f"作业列表已变化，请重新扫描：找不到 {work.get('name', '')}")
+    card = cards[position]
+    expected = (work.get("name") or "").strip()
+    actual = _first_line(card)
+    if expected and actual and expected != actual:
+        raise RuntimeError(f"作业列表已变化，请重新扫描：期望 {expected}，实际 {actual}")
+    return card
+
+
 def scan_homework(driver, timeout=25.0):
     """逐个页签读取「我的作业」：待作答 / 批阅中 / 已批阅。"""
     ensure_alive_window(driver)
@@ -109,10 +171,12 @@ def scan_homework(driver, timeout=25.0):
                 continue
             lines = [line.strip() for line in (raw.get("text") or "").split("\n") if line.strip()]
             buttons = raw.get("buttons") or []
+            work_id = _work_identity(label, lines, _card_href(driver, card))
             can_answer = any("继续作答" in text or text == "作答" for text in buttons)
             works.append({
                 "tab": label,
                 "position": position,
+                "work_id": work_id,
                 "name": lines[0] if lines else "云作业",
                 "work_type": _line_value(lines, "作业类型") or next(
                     (line for line in lines[1:4]
@@ -144,10 +208,16 @@ def open_work(driver, work, timeout=30.0):
     time.sleep(1.4)
     wait_for_list(driver, 10)
     cards = _visible_cards(driver)
-    position = int(work.get("position") or 0)
-    if position >= len(cards):
-        return False
-    card = cards[position]
+    card = locate_card(cards, work, lambda c: {
+        "work_id": _work_identity(tab, [
+            line.strip() for line in ((c.text or "").split("\n")) if line.strip()
+        ], _card_href(driver, c)),
+        "name": _first_line(c),
+    })
+    try:
+        position = cards.index(card)
+    except ValueError:
+        position = -1
     buttons = (card.find_elements(By.CSS_SELECTOR, PRIMARY_BUTTON)
                or card.find_elements(By.CSS_SELECTOR, '[class*="ucloud-work-btn"]')
                or card.find_elements(By.TAG_NAME, "button"))
@@ -290,17 +360,43 @@ def submit_work(driver, wait: float = 2.0, allow_incomplete: bool = False,
     return confirmed
 
 
+CONFIRM_CARD_JS = """
+    const name = (arguments[0] || '').trim();
+    const cards = [...document.querySelectorAll('.ucloud-work-card')]
+        .filter(c => c.offsetParent !== null);
+    const hits = cards.filter(card => {
+        const first = ((card.innerText || '').split('\\n')[0] || '').trim();
+        const titled = card.querySelector('[title]');
+        const title = titled ? (titled.getAttribute('title') || '').trim() : '';
+        return first === name || title === name;
+    });
+    if (hits.length !== 1) return null;
+    const card = hits[0];
+    return {
+        buttons: [...card.querySelectorAll('button')]
+            .map(b => (b.innerText || '').replace(/\\s+/g, ' ').trim())
+            .filter(Boolean),
+        text: (card.innerText || '').replace(/\\s+/g, ' ')
+    };
+"""
+
+
 def _work_in_current_dom(driver, name: str) -> bool:
-    """只读当前 DOM 判断是否已提交，避免每轮都整页刷新 + 点三个页签。"""
+    """只看目标作业卡片：仍在「继续作答」= 未提交；出现查看报告/提交时间 = 已提交。"""
+    if not name:
+        return False
     try:
-        text = (driver.execute_script(
-            "return (document.body && document.body.innerText) || '';") or "")
+        info = driver.execute_script(CONFIRM_CARD_JS, name)
     except Exception:
         return False
-    if name not in text:
+    if not info:
         return False
-    return ("提交时间" in text) or ("已批阅" in text) or ("批阅中" in text)
-
+    buttons = " ".join(info.get("buttons") or [])
+    if "继续作答" in buttons or "作答" in buttons:
+        return False
+    if "查看报告" in buttons:
+        return True
+    return "提交时间" in (info.get("text") or "")
 
 def _confirm_submitted(driver, work: dict, timeout: float) -> bool:
     """回读确认提交：前 10 秒只读当前 DOM，之后整页扫描最多 3 次 / 总轮数 5。"""
