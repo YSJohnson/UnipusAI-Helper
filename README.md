@@ -63,6 +63,13 @@ py -m venv .venv
 .venv\Scripts\python.exe UnipusAI_Helper.py
 ```
 
+已安装 uv 的用户，也可用以下命令在现有 `.venv` 中安装依赖并检查兼容性：
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+uv pip check --python .venv\Scripts\python.exe
+```
+
 如需跳过环境检查：
 
 ```powershell

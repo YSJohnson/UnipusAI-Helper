@@ -17,6 +17,14 @@ from typing import Dict, Optional, Tuple
 DEFAULT_BROWSER = "edge"
 
 
+def quit_driver(driver):
+    """关闭浏览器后回收本次启动创建的临时配置目录。"""
+    driver.quit()
+    profile = getattr(driver, "_unipus_profile_dir", None)
+    if profile:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 @dataclass(frozen=True)
 class BrowserSpec:
     """一种浏览器后端的全部差异点。"""

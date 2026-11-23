@@ -80,7 +80,7 @@ def ensure_writable_temp_dir() -> str:
 ensure_writable_temp_dir()
 
 from unipus_helper.audio_recognizer import AudioTranscriber
-from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser
+from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser, quit_driver
 from unipus_helper.environment_checker import EnvironmentChecker
 from openai import OpenAI
 from selenium.common.exceptions import (NoSuchDriverException, NoSuchElementException,
@@ -12719,16 +12719,21 @@ class UCampusBot:
             # must not receive the console interrupt before cleanup starts.
             service_options['popen_kw'] = {'creation_flags': subprocess.CREATE_NEW_PROCESS_GROUP}
         try:
-            driver = webdriver_cls(options=options, service=service_cls(**service_options))
-        except NoSuchDriverException:
-            if not install_path:
-                raise
-            # 指定了路径反而拿不到 driver（该路径不是 Selenium Manager 认识的
-            # 发行版，或探测到的那一刻文件正好不可用）时，退回自动解析，
-            # 避免这条分支比「不指定路径」更容易失败。
-            print(f" 按 {install_path} 取不到 driver，改由自动解析重试...")
-            options.binary_location = ""
-            driver = webdriver_cls(options=options, service=service_cls(**service_options))
+            try:
+                driver = webdriver_cls(options=options, service=service_cls(**service_options))
+            except NoSuchDriverException:
+                if not install_path:
+                    raise
+                # 指定了路径反而拿不到 driver（该路径不是 Selenium Manager 认识的
+                # 发行版，或探测到的那一刻文件正好不可用）时，退回自动解析，
+                # 避免这条分支比「不指定路径」更容易失败。
+                print(f" 按 {install_path} 取不到 driver，改由自动解析重试...")
+                options.binary_location = ""
+                driver = webdriver_cls(options=options, service=service_cls(**service_options))
+        except BaseException:
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+            raise
+        driver._unipus_profile_dir = user_data_dir
         try:
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
@@ -12737,7 +12742,7 @@ class UCampusBot:
             # A failed tab can still leave a live browser behind. Close this
             # attempt before the caller retries with compatibility options.
             try:
-                driver.quit()
+                quit_driver(driver)
             except Exception:
                 pass
             raise
@@ -12813,7 +12818,7 @@ class UCampusBot:
         if old is not None:
             def quit_old():
                 try:
-                    old.quit()
+                    quit_driver(old)
                 except Exception:
                     pass
             worker = threading.Thread(target=quit_old, daemon=True, name="browser-quit")
@@ -13196,7 +13201,7 @@ if __name__ == '__main__':
                 gui.close()
             elif bot.driver:
                 try:
-                    bot.driver.quit()
+                    quit_driver(bot.driver)
                 except Exception:
                     pass
     sys.exit(exit_code)
