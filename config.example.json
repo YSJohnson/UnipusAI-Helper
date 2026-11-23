@@ -7,6 +7,8 @@
   "model": "",
   "max_tokens": 32768,
   "temperature": 0.3,
+  "record_score_threshold": 70,
+  "score_threshold": 80,
   "token_full": "",
   "debug_mode": false,
   "tts_engine": "auto",

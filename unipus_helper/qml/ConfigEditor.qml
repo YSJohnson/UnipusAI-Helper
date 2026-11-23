@@ -76,6 +76,8 @@ ApplicationWindow {
                                 { key: "model", label: "模型名称 *", hint: "输入模型名称" },
                                 { key: "max_tokens", label: "最大 Token 数", hint: "32768" },
                                 { key: "temperature", label: "温度（0–2）", hint: "0.3" },
+                                { key: "record_score_threshold", label: "录音、朗读达标分", hint: "70（0–100）" },
+                                { key: "score_threshold", label: "其余题型达标分", hint: "80（0–100）" },
                                 { key: "tts_engine", label: "录音题 TTS 引擎", hint: "auto / edge / sapi / off" },
                                 { key: "tts_voice", label: "TTS 音色", hint: "留空使用默认英语音色" },
                                 { key: "tts_proxy", label: "TTS 代理", hint: "可选，例如 http://127.0.0.1:7890" },

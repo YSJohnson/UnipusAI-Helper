@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "model": "",
     "max_tokens": 32768,
     "temperature": 0.3,
+    "record_score_threshold": 70,
+    "score_threshold": 80,
     "debug_mode": False,
     # 录音题（Exercise 2 这类主观题）没有原声，需要 TTS 生成语音
     "tts_engine": "auto",
@@ -109,6 +111,15 @@ class ConfigEditor(QObject):
             data["temperature"] = float(data["temperature"])
         except (ValueError, TypeError):
             data["temperature"] = 0.3
+        for key, label in (("record_score_threshold", "录音、朗读达标分"),
+                           ("score_threshold", "其余题型达标分")):
+            try:
+                data[key] = float(data[key])
+                if not 0 <= data[key] <= 100:
+                    raise ValueError
+            except (ValueError, TypeError):
+                self.saved.emit(f"{label}必须是 0–100 之间的分数", False)
+                return
         try:
             save_config(self.path, data)
         except Exception as exc:

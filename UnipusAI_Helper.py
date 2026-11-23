@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.12"
+APP_VERSION = "3.9.13"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -199,11 +199,20 @@ class Config:
     screenshot: bool = False
     # 浏览器后端：edge（默认）/ chrome，见 unipus_helper/browser.py
     browser: str = DEFAULT_BROWSER
+    record_score_threshold: float = 70
+    score_threshold: float = 80
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
         with open(path, "r", encoding="UTF-8") as f:
             data = json.load(f)
+        for key, default in (("record_score_threshold", 70), ("score_threshold", 80)):
+            try:
+                data[key] = float(data.get(key, default))
+                if not 0 <= data[key] <= 100:
+                    raise ValueError
+            except (ValueError, TypeError):
+                raise ValueError(f"{key} 必须是 0–100 之间的分数") from None
         global DEBUG_MODE
         DEBUG_MODE = data.get("debug_mode", False)
         return cls(
@@ -221,6 +230,8 @@ class Config:
             tts_proxy=(data.get("tts_proxy") or "").strip(),
             screenshot=bool(data.get("screenshot", False)),
             browser=normalize_browser(data.get("browser")),
+            record_score_threshold=data["record_score_threshold"],
+            score_threshold=data["score_threshold"],
         )
 
 
@@ -9873,7 +9884,8 @@ class AISolver:
         types = getattr(self, '_last_question_types', set())
         record_types = {QuestionType.RECORD, QuestionType.ORAL_ALOUD,
                         QuestionType.MY_VOICE_TEXT}
-        threshold = 80 if types & record_types else 100
+        threshold = (self.config.record_score_threshold if types & record_types
+                     else self.config.score_threshold)
         return score < threshold
 
     def _read_answer_analysis(self) -> str:

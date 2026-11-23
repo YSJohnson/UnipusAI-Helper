@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.12-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.13-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -103,6 +103,8 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
   "model": "",
   "max_tokens": 32768,
   "temperature": 0.3,
+  "record_score_threshold": 70,
+  "score_threshold": 80,
   "token_full": "",
   "debug_mode": false
 }
@@ -118,6 +120,8 @@ brew install --cask microsoft-edge      # 默认后端；想用 Chrome 就改成
 | `model` | 是 | 接口支持的模型名称 |
 | `max_tokens` | 否 | 最大 token 数，默认 `32768`。推理型模型会把预算烧在思考上，代码层下限也是 32768；模型不接受时会自动减半重试 |
 | `temperature` | 否 | 生成温度，保持默认数值即可 |
+| `record_score_threshold` | 否 | 录音、朗读及 My Voice 题型的任务达标分，默认 `70`，范围 `0–100`；低于此分数时自动重做 |
+| `score_threshold` | 否 | 其余题型的任务达标分，默认 `80`，范围 `0–100`；低于此分数时自动重做 |
 | `token_full` | 否 | 认证兜底；支持旧版完整 `__token` JSON 或 U校园 5.0 的 JWT，正常登录时留空 |
 | `debug_mode` | 否 | 是否开启调试日志，默认 `false` |
 | `tts_engine` | 否 | 录音题语音合成后端：`auto`（默认，先 edge 后 sapi）/ `edge` / `sapi` / `off` |
@@ -188,6 +192,15 @@ U校园涉及的教材比较多，不同课程和题型的适配仍在完善中�
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.13（2026-11-23）</b>：支持配置自动重做达标分（issue #67）</summary>
+
+- **达标分**：录音、朗读及 My Voice 题型默认 70 分，其余题型默认 80 分；达到对应分数即停止自动重做。
+- **配置项**：新增 `record_score_threshold` 和 `score_threshold`，支持在配置文件或工作台配置界面设置，范围为 0–100 分，保存后重新启动生效。
+- **配置兼容**：已有配置未填写这两个字段时，自动使用 70／80 分默认值。
+
+</details>
 
 <details>
 <summary><b>v3.9.12（2026-11-22）</b>：修复旧播放器排序题自动作答（issue #62）</summary>
