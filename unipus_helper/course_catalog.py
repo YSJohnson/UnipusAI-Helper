@@ -3,6 +3,7 @@ import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
+from .window_guard import ensure_alive_window, window_failure_hint
 from .task_grading import (READ_GRADING_JS, assign_task_records, build_record_index,
                            grading_text, score_text)
 
@@ -101,6 +102,8 @@ class CourseCatalogMixin:
         return "unknown"
 
     def _scan_course_directory(self, current_unit_only: bool = False):
+        if not ensure_alive_window(self.driver):
+            raise RuntimeError(window_failure_hint())
         tabs = []
         try:
             player_unit = ''

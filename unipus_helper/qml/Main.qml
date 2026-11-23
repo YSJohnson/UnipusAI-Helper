@@ -46,6 +46,19 @@ ApplicationWindow {
         finishProcessingNavigation()
     }
 
+    function openAccuracy(taskId, value) {
+        accuracyDialog.taskId = taskId === undefined ? "" : taskId
+        accuracyDialog.error = ""
+        accuracyInput.text = (value === null || value === undefined || value < 0) ? "" : String(value)
+        accuracyDialog.open()
+    }
+
+    function applyAccuracy(value) {
+        if (accuracyDialog.taskId === "") workbench.setAccuracyForSelection(value)
+        else workbench.setTaskAccuracy(accuracyDialog.taskId, value)
+        accuracyDialog.close()
+    }
+
     function resetTaskPosition() { if (taskList) { taskList.currentIndex = -1; taskList.positionViewAtBeginning() } }
     function focusFirstTask() {
         if (taskList.count === 0) return
@@ -201,6 +214,15 @@ ApplicationWindow {
                     hint: "读取课程浏览器当前所在的单元"; enabled: window.appState.ready && !window.busy; onClicked: workbench.start("scan_unit")
                 }
                 ActionButton {
+                    objectName: "scanHomework"; visible: window.currentPage === 0; text: "扫描作业"; iconName: "list"; implicitHeight: window.compactHeight ? 36 : 40
+                    hint: "读取「我的作业」里的待作答/批阅中/已批阅"; enabled: window.appState.ready && !window.busy; onClicked: workbench.start("scan_homework")
+                }
+                ActionButton {
+                    objectName: "setAccuracy"; visible: window.currentPage === 0; text: "设置正确率"; iconName: "check"; implicitHeight: window.compactHeight ? 36 : 40
+                    hint: "给已勾选的任务统一设置目标正确率"; enabled: window.appState.ready && !window.busy && summary.selected > 0
+                    onClicked: window.openAccuracy("", -1)
+                }
+                ActionButton {
                     objectName: "processPage"; visible: window.currentPage === 0; text: "处理当前页"; iconName: "page"; implicitHeight: window.compactHeight ? 36 : 40
                     hint: "直接处理课程浏览器中已打开的题目"; enabled: window.appState.ready && !window.busy; onClicked: quickDialog.open()
                 }
@@ -303,7 +325,10 @@ ApplicationWindow {
                         Layout.fillWidth: true; Layout.fillHeight: true; Layout.minimumHeight: 0; Layout.bottomMargin: 8
                         clip: true; model: taskModel; currentIndex: -1
                         boundsBehavior: Flickable.StopAtBounds
-                        delegate: TaskRow { width: taskList.width; editable: !window.busy }
+                        delegate: TaskRow {
+                    width: taskList.width; editable: !window.busy
+                    onAccuracyRequested: function(taskId, value) { window.openAccuracy(taskId, value) }
+                }
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         ColumnLayout {
                             anchors.centerIn: parent; width: Math.min(400, parent.width - 64); spacing: 12
@@ -394,6 +419,73 @@ ApplicationWindow {
                 Item { Layout.fillWidth: true }
                 ActionButton { id: cancelQuick; objectName: "cancelQuick"; text: "取消"; onClicked: quickDialog.reject() }
                 ActionButton { objectName: "confirmQuick"; text: "处理当前页"; primary: true; enabled: window.appState.ready && !window.busy; onClicked: quickDialog.accept() }
+            }
+        }
+    }
+
+    Dialog {
+        id: accuracyDialog
+        objectName: "accuracyDialog"
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        anchors.centerIn: parent; width: 460; padding: 24
+        property string taskId: ""
+        property string error: ""
+        header: UiText { text: "设置目标正确率"; font.pixelSize: 20; font.weight: Font.Medium; padding: 24; bottomPadding: 8 }
+        background: Rectangle { color: Theme.surface; radius: 16; border.color: Theme.line }
+        ColumnLayout {
+            width: parent.width; spacing: 16
+            UiText {
+                Layout.fillWidth: true
+                text: accuracyDialog.taskId === ""
+                      ? "应用到已勾选的 " + summary.selected + " 个任务"
+                      : "只应用到当前这一个任务"
+                color: Theme.secondary; font.pixelSize: 13
+            }
+            TextField {
+                id: accuracyInput
+                objectName: "accuracyInput"
+                Layout.fillWidth: true; implicitHeight: 38
+                placeholderText: "0–100 的整数；留空=跟随全局默认"
+                placeholderTextColor: Theme.muted
+                color: Theme.ink; selectionColor: Theme.accentFill
+                font.family: Theme.fontFamily; font.pixelSize: 14
+                onTextChanged: accuracyDialog.error = ""
+                background: Rectangle {
+                    radius: 7; color: Theme.canvas
+                    border.color: accuracyInput.activeFocus ? Theme.accent : Theme.line
+                }
+            }
+            UiText {
+                Layout.fillWidth: true
+                visible: accuracyDialog.error !== ""
+                text: accuracyDialog.error; color: Theme.error; font.pixelSize: 12
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true; spacing: 8
+                ActionButton {
+                    objectName: "accuracyDefault"
+                    text: "跟随全局"
+                    quiet: true
+                    onClicked: window.applyAccuracy(-1)
+                }
+                Item { Layout.fillWidth: true }
+                ActionButton { text: "取消"; onClicked: accuracyDialog.close() }
+                ActionButton {
+                    objectName: "accuracyApply"
+                    text: "应用"; primary: true
+                    onClicked: {
+                        let raw = accuracyInput.text.trim()
+                        if (raw === "") { window.applyAccuracy(-1); return }
+                        let value = Number(raw)
+                        if (!isFinite(value) || Math.floor(value) !== value || value < 0 || value > 100) {
+                            accuracyDialog.error = "请输入 0–100 的整数"
+                            return
+                        }
+                        window.applyAccuracy(value)
+                    }
+                }
             }
         }
     }

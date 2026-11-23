@@ -37,9 +37,137 @@ DEFAULT_CONFIG = {
     "tts_voice": "",
     "tts_proxy": "",
     "browser": "edge",
+    # 目标正确率：100 = 全部按 AI 答案作答；低于 100 会故意做错一部分，
+    # 让整份得分落在该值附近（误差约 ±10 分）
+    "target_accuracy": 85,
+    # 云作业填完后自动提交；关掉则停在提交前等待人工确认
+    "homework_submit": True,
+    # 有空位仍强制提交（默认关闭，避免把没填完的作业交上去）
+    "homework": {"allow_force_submit": True},
+    # 每批发给模型的题数；页面上题多时会分批请求
+    "request_batch_size": 20,
     # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
     "screenshot": False,
 }
+
+
+TRUE_TOKENS = {"true", "1", "yes", "on", "是", "开"}
+
+TEXT_FIELDS = ("username", "password", "url", "api_key", "base_url", "model",
+               "tts_engine", "tts_voice", "tts_proxy", "browser", "token_full")
+BOOL_FIELDS = ("debug_mode", "screenshot", "homework_submit")
+
+
+def _as_bool(value, default=False):
+    """宽松布尔："False"/"false"/"0"/"no"/"" 都是 False，别让 bool("False") 变 True。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text in TRUE_TOKENS
+
+
+def _as_int(value, default, low, high):
+    try:
+        number = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _as_float(value, default, low, high):
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def get_field(data: dict, key: str):
+    """支持 "homework.allow_force_submit" 这种点号路径。"""
+    current = data
+    for part in key.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def set_field(data: dict, key: str, value):
+    parts = key.split(".")
+    current = data
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = value
+
+
+def normalize_config(data: dict) -> dict:
+    """保存前统一类型：字符串字段 strip，数值/布尔归一，homework 保持 dict。"""
+    out = dict(data or {})
+    for key in TEXT_FIELDS:
+        if key in out:
+            out[key] = "" if out[key] is None else str(out[key]).strip()
+    out["max_tokens"] = _as_int(out.get("max_tokens"), 32768, 100, 200000)
+    out["target_accuracy"] = _as_int(out.get("target_accuracy"), 85, 0, 100)
+    out["request_batch_size"] = _as_int(out.get("request_batch_size"), 20, 1, 50)
+    out["temperature"] = _as_float(out.get("temperature"), 0.3, 0, 2)
+    for key in BOOL_FIELDS:
+        out[key] = _as_bool(out.get(key), DEFAULT_CONFIG.get(key, False))
+    homework = out.get("homework")
+    if not isinstance(homework, dict):
+        homework = {}
+    homework = dict(homework)
+    homework["allow_force_submit"] = _as_bool(homework.get("allow_force_submit"), True)
+    out["homework"] = homework
+    return out
+
+
+def validate_field(key: str, value):
+    """单字段校验：返回 (归一后的值, 错误信息)。错误信息为 None 表示通过。"""
+    if key == "target_accuracy":
+        try:
+            number = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None, "目标正确率需为 0–100 的整数"
+        if not 0 <= number <= 100:
+            return None, "目标正确率需为 0–100 的整数"
+        return number, None
+    if key == "request_batch_size":
+        try:
+            number = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None, "每批题数需为 1–50 的整数"
+        if not 1 <= number <= 50:
+            return None, "每批题数需为 1–50 的整数"
+        return number, None
+    if key == "max_tokens":
+        try:
+            number = int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None, "最大 Token 数需为 100–200000 的整数"
+        if not 100 <= number <= 200000:
+            return None, "最大 Token 数需为 100–200000 的整数"
+        return number, None
+    if key == "temperature":
+        try:
+            number = float(str(value).strip())
+        except (TypeError, ValueError):
+            return None, "温度需为 0–2 之间的数字"
+        if not 0 <= number <= 2:
+            return None, "温度需为 0–2 之间的数字"
+        return number, None
+    if key.endswith("allow_force_submit") or key in ("debug_mode", "screenshot", "homework_submit"):
+        return _as_bool(value), None
+    return ("" if value is None else str(value)).strip(), None
 
 
 def load_config(path):
@@ -48,28 +176,31 @@ def load_config(path):
             cfg = json.load(f)
         merged = dict(DEFAULT_CONFIG)
         merged.update(cfg)
-        return merged
-    return dict(DEFAULT_CONFIG)
+        return normalize_config(merged)
+    return normalize_config(dict(DEFAULT_CONFIG))
 
 
 def save_config(path, data: dict):
-    out = dict(data)
+    out = normalize_config(data)
     token = out.get("token_full", "")
     if token and isinstance(token, str):
-        token = token.strip()
         if (token.startswith("'") and token.endswith("'")) or (
             token.startswith('"') and token.endswith('"')
         ):
-            token = token[1:-1].strip()
-        out["token_full"] = token
+            out["token_full"] = token[1:-1].strip()
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2, ensure_ascii=False)
     return True
 
 
+REQUIRED_FIELDS = (("username", "账号"), ("password", "密码"), ("api_key", "API Key"),
+                   ("base_url", "API 地址"), ("model", "模型名称"))
+
+
 class ConfigEditor(QObject):
     saved = Signal(str, bool)
+    changed = Signal()
 
     def __init__(self, path, first_run=False):
         super().__init__()
@@ -78,43 +209,64 @@ class ConfigEditor(QObject):
         self.completed = False
         self.cfg = load_config(path)
 
-    @Property("QVariantMap", constant=True)
+    @Property("QVariantMap", notify=changed)
     def values(self):
         return self.cfg
+
+    @Property("QVariantMap", constant=True)
+    def defaults(self):
+        import copy
+        return copy.deepcopy(DEFAULT_CONFIG)
 
     @Property(bool, constant=True)
     def firstRun(self):
         return self.first_run
 
+    def _persist(self, data: dict):
+        save_config(self.path, data)
+        self.cfg = normalize_config(data)
+        self.changed.emit()
+
+    @Slot(str, str, result=bool)
+    def saveOne(self, key, value):
+        """行内单字段保存：校验失败不写盘，直接 emit 错误提示。"""
+        normalized, error = validate_field(key, value)
+        if error:
+            self.saved.emit(error, False)
+            return False
+        data = dict(self.cfg)
+        if key.endswith("allow_force_submit"):
+            homework = data.get("homework")
+            if not isinstance(homework, dict):
+                homework = {}
+            homework = dict(homework)
+            homework["allow_force_submit"] = normalized
+            data["homework"] = homework
+        else:
+            data[key] = normalized
+        try:
+            self._persist(data)
+        except Exception as exc:
+            self.saved.emit(f"保存失败：{exc}", False)
+            return False
+        self.completed = True
+        self.saved.emit("已保存", True)
+        return True
+
     @Slot("QVariantMap")
     def save(self, values):
         data = dict(self.cfg)
-        data.update(values)
-        for key in DEFAULT_CONFIG:
-            if key in ("debug_mode", "screenshot"):
-                continue
-            if key in data:
-                data[key] = str(data[key]).strip()
-        missing = [label for key, label in (("username", "账号"), ("password", "密码"), ("api_key", "API Key"), ("base_url", "API 地址"), ("model", "模型名称")) if not data.get(key)]
+        data.update(values or {})
+        data = normalize_config(data)
+        missing = [label for key, label in REQUIRED_FIELDS if not data.get(key)]
         if missing:
             self.saved.emit("请填写必填项：" + "、".join(missing), False)
             return
-        data["debug_mode"] = bool(data.get("debug_mode", False))
-        data["screenshot"] = bool(data.get("screenshot", False))
         try:
-            data["max_tokens"] = int(data["max_tokens"])
-        except (ValueError, TypeError):
-            data["max_tokens"] = 32768
-        try:
-            data["temperature"] = float(data["temperature"])
-        except (ValueError, TypeError):
-            data["temperature"] = 0.3
-        try:
-            save_config(self.path, data)
+            self._persist(data)
         except Exception as exc:
             self.saved.emit(f"保存失败：{exc}", False)
             return
-        self.cfg = data
         self.completed = True
         self.saved.emit("配置已保存" if self.first_run else "配置已保存，重新启动后生效", True)
 
@@ -151,7 +303,7 @@ def configure_ui_font(app):
 class TaskListModel(QAbstractListModel):
     """Keep delegates and scroll position when only selection/status changes."""
     fields = ("taskId", "title", "isRequired", "status", "chosen", "scored", "statusName",
-              "sectionHeader", "selectable", "scoreText", "scoreAbnormal")
+              "sectionHeader", "selectable", "scoreText", "scoreAbnormal", "accuracy")
     roles = {Qt.UserRole + i + 1: name.encode() for i, name in enumerate(fields)}
 
     def __init__(self, parent=None):
@@ -314,6 +466,23 @@ class NativeBridge(QObject):
         self._result(result)
         return bool(result.get("ok"))
 
+    @Slot(int, result=bool)
+    def setAccuracyForSelection(self, value):
+        ids = [t["id"] for t in self._state.get("tasks", []) if t.get("selected")]
+        result = self.controller.set_accuracy(ids, value) if ids else {
+            "ok": False, "error": "请先勾选任务，再设置正确率。"}
+        self._result(result)
+        if result.get("ok"):
+            self._notice = "已为 %d 个任务设置正确率" % len(ids)
+            self.noticeChanged.emit()
+        return bool(result.get("ok"))
+
+    @Slot(str, int, result=bool)
+    def setTaskAccuracy(self, task_id, value):
+        result = self.controller.set_accuracy([task_id], value)
+        self._result(result)
+        return bool(result.get("ok"))
+
     @Slot()
     def stop(self):
         self._result(self.controller.stop())
@@ -357,6 +526,7 @@ class NativeBridge(QObject):
             or self._filter == "required" and t["required"])]
         statuses = {"done": "已完成", "doing": "进行中", "todo": "未开始", "unknown": "待确认"}
         rows = [dict(t, taskId=t["id"], chosen=t["selected"], isRequired=t["required"],
+                     accuracy=t.get("accuracy"),
                      statusName=statuses.get(t["status"], "待确认"),
                      scoreText=f'{score_text(t.get("score"))} 分' if t.get("score") is not None else "",
                      scoreAbnormal=bool(t.get("score_abnormal")),

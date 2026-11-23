@@ -13,5 +13,11 @@
   "tts_voice": "",
   "tts_proxy": "",
   "screenshot": false,
-  "browser": "edge"
+  "browser": "edge",
+  "target_accuracy": 85,
+  "homework_submit": true,
+  "homework": {
+    "allow_force_submit": true
+  },
+  "request_batch_size": 20
 }

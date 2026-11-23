@@ -14,8 +14,8 @@ Item {
     required property var scored
     required property string sectionHeader
     required property bool selectable
-    required property string scoreText
-    required property bool scoreAbnormal
+    required property var accuracy
+    signal accuracyRequested(string taskId, var value)
     property bool editable: true
     height: sectionHeader ? 84 : 48
 
@@ -113,17 +113,26 @@ Item {
                 UiText { anchors.centerIn: parent; text: row.isRequired ? "必修" : "选修"; color: row.isRequired ? Theme.requiredInk : Theme.secondary; font.pixelSize: 13 }
             }
             UiText { text: row.scored === false ? "不计分" : row.scored === null ? "待确认" : "计分"; color: Theme.secondary; font.pixelSize: 13; Layout.preferredWidth: 64; horizontalAlignment: Text.AlignHCenter }
-            Item {
-                Layout.preferredWidth: 64; Layout.preferredHeight: 24
-                Rectangle {
-                    objectName: "score_" + row.taskId
-                    anchors.fill: parent; visible: row.scoreText !== ""; radius: 6
-                    color: row.scoreAbnormal ? "#5c1f1f" : Theme.successSurface
-                    UiText {
-                        anchors.centerIn: parent; text: row.scoreText; font.pixelSize: 13
-                        color: row.scoreAbnormal ? Theme.error : Theme.success
-                    }
+            Rectangle {
+                objectName: "accuracy_" + row.taskId
+                Layout.preferredWidth: 64; Layout.preferredHeight: 24; radius: 6
+                color: row.accuracy === null || row.accuracy === undefined ? Theme.raised : Theme.navigation
+                border.width: 1; border.color: Theme.line
+                UiText {
+                    anchors.centerIn: parent
+                    text: row.accuracy === null || row.accuracy === undefined ? "默认" : row.accuracy + "%"
+                    font.pixelSize: 13
+                    color: row.accuracy === null || row.accuracy === undefined ? Theme.secondary : Theme.accent
                 }
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: row.accuracyRequested(row.taskId, row.accuracy)
+                }
+                ToolTip.visible: accuracyHover.hovered
+                ToolTip.text: "点击设置本任务的正确率"
+                ToolTip.delay: 650
+                HoverHandler { id: accuracyHover }
             }
             Rectangle {
                 Layout.preferredWidth: 72; Layout.preferredHeight: 24; radius: 6
