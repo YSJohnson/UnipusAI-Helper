@@ -1,4 +1,3 @@
-"""UI-independent course state and operations for the native workbench."""
 from __future__ import annotations
 
 import copy
@@ -20,7 +19,6 @@ from .task_grading import selectable_task
 
 
 def log_level(message):
-    """Classify the backend's plain-text messages for the native log view."""
     text = message.casefold()
     if any(word in text for word in ("失败", "异常", "错误", "阻断")) or re.search(r"\b(error|exception|traceback|fatal)\b", text):
         return "error"
@@ -34,7 +32,6 @@ def log_level(message):
 
 
 class WorkbenchController(CourseCatalogMixin):
-    """Python state and operations shared with the existing automation backend."""
     def __init__(self, driver=None, solver=None, bot=None, app_globals=None):
         self.driver, self.solver, self.bot = driver, solver, bot
         self._globals = app_globals or {}
@@ -63,7 +60,6 @@ class WorkbenchController(CourseCatalogMixin):
         threading.Thread(target=self._probe_api, daemon=True, name="workbench-api").start()
 
     def _api_request(self, config):
-        """发一个最小的对话请求，返回耗时；异常原样抛出。"""
         base = str(getattr(config, "base_url", "") or "").rstrip("/")
         payload = json.dumps({
             "model": getattr(config, "model", "") or "",
@@ -329,7 +325,6 @@ class WorkbenchController(CourseCatalogMixin):
         finally:
             with self._lock:
                 self._operation = None
-                # 重建并登录成功后才恢复可操作。
                 self._ready = succeeded and not self._closed.is_set()
 
     def close(self):

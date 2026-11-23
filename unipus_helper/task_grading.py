@@ -1,10 +1,8 @@
-"""Read the portal's explicit scoring flags without opening or submitting tasks."""
 
 import re
 from collections import Counter, defaultdict
 
 
-# Keep credentials in the browser. Only the requested units' record trees leave it.
 READ_GRADING_JS = """
     const resource = arguments[0], units = arguments[1];
     const done = arguments[arguments.length - 1];
@@ -64,7 +62,6 @@ def _path(section):
 
 
 def build_record_index(units):
-    """Index unique full task paths; repeated names alone cannot identify a task."""
     candidates = defaultdict(list)
 
     def visit(node, unit_id, parents):
@@ -77,13 +74,11 @@ def build_record_index(units):
                 visit(child, unit_id, parents + ([name] if name else []))
         elif node.get('role') not in ('unit', 'section', 'node') and name:
             flag = node.get('scoreTaskFlag')
-            # A missing flag (or a changed API type) must never mean "ungraded".
             score = node.get('score')
             progress = node.get('finishProgress')
             key = (unit_id, tuple(_clean(p) for p in parents), _clean(name))
             candidates[key].append({
                 'scored': flag if type(flag) is bool else None,
-                # 还没做过的任务接口里没有 score，这时保持 None，不要当成 0 分
                 'score': round(float(score), 1)
                 if type(score) in (int, float) and 0 <= score <= 100 else None,
                 'progress': int(progress) if type(progress) in (int, float) else None,
@@ -94,7 +89,6 @@ def build_record_index(units):
         if not unit_id:
             continue
         for root in unit.get('tree', []):
-            # Ignore data for other units, even if names and sections coincide.
             if isinstance(root, dict) and root.get('nodeId') == unit_id and root.get('role') == 'unit':
                 for child in root.get('children', []):
                     visit(child, unit_id, [])
@@ -127,7 +121,6 @@ def assign_task_scoring(tasks, index):
 
 
 def assign_task_records(tasks, index):
-    """把学习记录里的计分标记、已有分数、完成度写回任务。"""
     keys, counts = _task_keys(tasks)
     for task, key in zip(tasks, keys):
         record = index.get(key) if key[0] and counts[key] == 1 else None

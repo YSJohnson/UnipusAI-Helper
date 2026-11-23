@@ -58,8 +58,6 @@ Item {
         objectName: "task_" + row.taskId
         anchors.fill: parent; anchors.topMargin: row.sectionHeader ? 36 : 0
         enabled: row.editable; hoverEnabled: true
-        // The model owns selection. Do not let a rejected click leave a local
-        // checked state out of sync with the Python controller.
         checkable: false; checked: row.chosen
         focusPolicy: Qt.StrongFocus
         leftPadding: 24; rightPadding: 24; topPadding: 0; bottomPadding: 0

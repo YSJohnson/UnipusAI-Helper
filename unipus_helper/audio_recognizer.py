@@ -8,9 +8,6 @@ from typing import Dict, Optional
 
 
 class AudioTranscriber:
-    """
-    使用本地 Whisper 进行语音识别
-    """
 
     def __init__(self):
         self.local_model = None
@@ -18,20 +15,15 @@ class AudioTranscriber:
 
     @staticmethod
     def _print_exception(prefix: str, exc: Exception) -> None:
-        """完整输出异常信息与堆栈，方便定位问题"""
         print(f"{prefix}: {exc}")
         tb = traceback.format_exc().rstrip()
         if tb and tb != "NoneType: None":
             print(tb)
 
     def _init_local_model(self):
-        """初始化本地 Whisper 模型"""
         try:
-            # 进到需要转写的页面才导入，省掉整轮只播放的练习里的启动开销
             import whisper
             print("       加载 Whisper 本地模型 (base)...")
-            # 可选: tiny, base, small, medium, large
-            # base 是速度与准确率的平衡选择
             self.local_model = whisper.load_model("base")
             print("       本地模型加载完成")
         except ImportError:
@@ -42,7 +34,6 @@ class AudioTranscriber:
             raise
 
     def _ensure_local_model(self) -> bool:
-        """真要转写时才加载模型。"""
         if self.local_model is not None:
             return True
         try:
@@ -52,7 +43,6 @@ class AudioTranscriber:
         return self.local_model is not None
 
     def release_local_model(self) -> None:
-        """释放本地模型，下次要转写时再加载。"""
         if self.local_model is None:
             return
         self.local_model = None
@@ -60,17 +50,6 @@ class AudioTranscriber:
         print("       已释放 Whisper 模型")
 
     def transcribe(self, audio_url: str, language: str = "en") -> str:
-        """
-        下载音频并转录为文字
-
-        Args:
-            audio_url: 音频文件URL
-            language: 语言代码，默认英语 en，中文 zh
-
-        Returns:
-            识别出的文字
-        """
-        # 检查缓存
         if audio_url in self._transcript_cache:
             print(f"       使用缓存的识别结果")
             return self._transcript_cache[audio_url]
@@ -110,7 +89,6 @@ class AudioTranscriber:
                     pass
 
     def _transcribe_local(self, audio_path: str, language: str) -> Optional[str]:
-        """使用本地 Whisper 模型识别"""
         if self.local_model is None:
             print("       本地模型未加载")
             return None
@@ -118,7 +96,7 @@ class AudioTranscriber:
         result = self.local_model.transcribe(
             audio_path,
             language=language,
-            fp16=False  # CPU 运行设为 False
+            fp16=False
         )
 
         return result["text"].strip() if result else None

@@ -33,7 +33,6 @@ ApplicationWindow {
     function finishProcessingNavigation() {
         if (!returnToTasksWhenIdle || !appState || appState.busy) return
         returnToTasksWhenIdle = false
-        // Leave stopped or failed runs available for inspection in the log.
         if (appState.status === "就绪" && !appState.error) currentPage = 0
     }
     onAppStateChanged: finishProcessingNavigation()
@@ -42,7 +41,6 @@ ApplicationWindow {
         if (!workbench.start(action)) return
         returnToTasksWhenIdle = true
         currentPage = 1
-        // A fast operation may have finished before start() returned.
         finishProcessingNavigation()
     }
 

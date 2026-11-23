@@ -2,7 +2,6 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    // The supplied reference uses a permanent charcoal appearance.
     readonly property bool dark: true
     readonly property string fontFamily: Qt.application.font.family
     readonly property color canvas: "#151517"

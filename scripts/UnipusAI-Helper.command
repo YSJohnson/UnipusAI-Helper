@@ -1,7 +1,4 @@
 #!/bin/bash
-# 双击即可启动（访达 / 桌面）。
-# 这里刻意不用 set -e：程序出错退出后还要停下来显示状态码，
-# 否则终端窗口会瞬间关闭，用户根本看不到报错。
 
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 

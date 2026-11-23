@@ -1,4 +1,3 @@
-"""Resolve application files independently of the working directory."""
 from pathlib import Path
 import sys
 

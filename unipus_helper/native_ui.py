@@ -1,4 +1,3 @@
-"""Qt Quick workbench. No web server or browser engine is used by this UI."""
 from __future__ import annotations
 
 import logging
@@ -34,12 +33,10 @@ DEFAULT_CONFIG = {
     "record_score_threshold": 70,
     "score_threshold": 80,
     "debug_mode": False,
-    # 录音题（Exercise 2 这类主观题）没有原声，需要 TTS 生成语音
     "tts_engine": "auto",
     "tts_voice": "",
     "tts_proxy": "",
     "browser": "edge",
-    # 题目截图一并发给支持识图的模型（qwen-vl、gpt-4o 等），默认关闭
     "screenshot": False,
 }
 
@@ -147,8 +144,6 @@ def setup_first_run():
 
 def configure_ui_font(app):
     families = set(QFontDatabase.families())
-    # Prefer the platform's UI face rather than a document font with light
-    # named subfamilies. Keep explicit fallbacks for macOS and Linux.
     preferred = (("Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", "Source Han Sans SC")
                  if sys.platform == "win32" else
                  ("PingFang SC", "Noto Sans SC", "Source Han Sans SC", "Microsoft YaHei UI"))
@@ -160,7 +155,6 @@ def configure_ui_font(app):
 
 
 class TaskListModel(QAbstractListModel):
-    """Keep delegates and scroll position when only selection/status changes."""
     fields = ("taskId", "title", "isRequired", "status", "chosen", "scored", "statusName",
               "sectionHeader", "selectable", "scoreText", "scoreAbnormal")
     roles = {Qt.UserRole + i + 1: name.encode() for i, name in enumerate(fields)}
@@ -182,7 +176,6 @@ class TaskListModel(QAbstractListModel):
         return self.rows[index.row()].get(name.decode()) if name else None
 
     def update(self, rows):
-        # Notify insertions/removals explicitly for empty search transitions.
         if self.rows and not rows:
             self.beginRemoveRows(QModelIndex(), 0, len(self.rows) - 1)
             self.rows = []
@@ -208,7 +201,6 @@ class TaskListModel(QAbstractListModel):
 
 
 def task_section_label(section, title):
-    """Keep task names in rows rather than repeating them in section headings."""
     parts = []
     for part in section.split("/"):
         part = part.strip()
@@ -428,7 +420,6 @@ class NativeModernGUI(WorkbenchController):
         engine.rootContext().setContextProperty("configEditor", config_editor)
         engine.rootContext().setContextProperty("workbench", bridge)
         engine.rootContext().setContextProperty("taskModel", bridge.task_model)
-        # Python signal handlers run whenever Qt returns to this timer's callback.
         pulse = QTimer()
         pulse.timeout.connect(lambda: None)
         pulse.start(100)
@@ -451,8 +442,6 @@ class NativeModernGUI(WorkbenchController):
             engine.load(QUrl.fromLocalFile(str(QML_DIR / "Main.qml")))
             if not engine.rootObjects():
                 raise RuntimeError(f"QML 界面加载失败，诊断日志：{log_path}")
-            # Visible rows are lightweight. Finish their creation synchronously
-            # so rapid filtering cannot cancel delegates with obsolete indices.
             engine.setIncubationController(None)
             window = engine.rootObjects()[0]
             if screenshot:
@@ -475,7 +464,6 @@ class NativeModernGUI(WorkbenchController):
             for sig, previous in previous_signals.items():
                 signal.signal(sig, previous)
             self.close()
-            # Destroy QML bindings while their Python objects still exist.
             delete_qt_object(engine)
             delete_qt_object(bridge)
             qInstallMessageHandler(previous_handler)
