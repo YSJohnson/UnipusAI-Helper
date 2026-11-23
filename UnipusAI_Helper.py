@@ -10263,6 +10263,56 @@ class AISolver:
         except Exception:
             return None
 
+    def _fill_from_response(self, questions: List[Question], response: str,
+                            directions: str = "", spoilers: Optional[set] = None):
+        """按题型从 AI 回复里取答案并逐题填写，返回 (成功数, 失败题列表)。
+
+        预取路径与分批路径共用这一份逻辑；spoilers 为 None 时按整页现算。
+        """
+        spoilers = self._plan_spoilers(questions) if spoilers is None else spoilers
+        success = 0
+        failed: List[Question] = []
+        for q in questions:
+            if self._should_stop():
+                break
+            if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
+                            QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
+                            QuestionType.VOCABULARY_TEST]:
+                ans = self._extract_single_answer(response, q.number)
+            elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
+                              QuestionType.DROPDOWN_SELECT]:
+                if q.q_type == QuestionType.FILL_IN and len(q.inputs or []) <= 1:
+                    ans = self._extract_single_answer(response, q.number)
+                else:
+                    ans = response
+            elif q.q_type == QuestionType.SORTING and len(questions) > 1:
+                ans = self._extract_single_answer(response, q.number)
+            else:
+                ans = response
+
+            if ans:
+                ans = self._apply_target_accuracy(q, ans, spoilers)
+                if q.q_type == QuestionType.SORTING:
+                    letters = [opt.letter for opt in q.options]
+                    order = self.executor._parse_sorting_order(ans, letters)
+                    corrected = self._reorder_sorting_by_transcript(q, order)
+                    if corrected and corrected != order:
+                        ans = ' '.join(corrected)
+                if self.executor.execute(q, ans):
+                    success += 1
+                else:
+                    failed.append(q)
+            else:
+                print(f"    题目 {q.number} 无答案")
+                failed.append(q)
+
+        if self.executor.suspicious:
+            for question in self.executor.suspicious:
+                if question not in failed:
+                    failed.append(question)
+            self.executor.suspicious.clear()
+        return success, failed
+
     def _apply_target_accuracy(self, q: Question, answer: str, spoilers: set) -> str:
         if not spoilers or q.number not in spoilers:
             return answer
@@ -10294,6 +10344,7 @@ class AISolver:
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
         course_home_url = course_home_url or self.driver.current_url
 
+        processed = 0
         for task_idx, tab in enumerate(selected_tabs):
             if self._should_stop():
                 print("  已请求停止，批量处理提前结束")
@@ -10378,6 +10429,7 @@ class AISolver:
                             on_task_done(tab)
                         except Exception as exc:
                             print(f"  完成回调异常: {str(exc)[:60]}")
+                    processed = task_idx + 1
             elif status == 'error':
                 print("  已中断批量处理；剩余勾选保持原样，可直接从这里继续")
                 break
@@ -10388,7 +10440,12 @@ class AISolver:
         self._release_transcriber()
 
         print(f"\n{'=' * 60}")
-        print("批量处理已停止" if self._should_stop() else f"全部 {len(selected_tabs)} 个任务处理完毕")
+        if self._should_stop():
+            print("批量处理已停止")
+        elif processed < len(selected_tabs):
+            print(f"已中止：处理了 {processed}/{len(selected_tabs)} 个任务，剩余勾选保持原样")
+        else:
+            print(f"全部 {len(selected_tabs)} 个任务处理完毕")
         print(f"{'=' * 60}")
 
     def _score_is_abnormal(self, score: float) -> bool:
@@ -11452,16 +11509,29 @@ class AISolver:
                                      (m['role'], m['content']) for m in self.ai_client.material_messages))
                 if used_prefetch:
                     print(f"    等待播放期间的 AI 预取答案（已运行 {prefetch.elapsed:.1f}s）...")
-                    ai_response = prefetch.wait(timeout=180)
+                    try:
+                        ai_response = prefetch.wait(timeout=180)
+                    except Exception as exc:
+                        # 预取线程异常不能拖垮整页，退回同步分批请求
+                        print(f"    预取异常，改为同步请求：{str(exc)[:60]}")
+                        ai_response = None
                     if ai_response:
                         print(f"    预取答案已就绪（总耗时 {prefetch.elapsed:.1f}s）")
                     else:
                         print("    预取未返回，改为同步请求")
-                if not ai_response:
+                # 每页只规划一次正确率；分批时按 chunk 过滤，避免每批各算一次口径漂移
+                spoilers = self._plan_spoilers(normal_questions)
+                failed_questions = []
+                if ai_response:
+                    # 预取成功：必须直接进入逐题填写（这里以前什么都不做，必然 0/N 中止）
+                    filled, failed = self._fill_from_response(
+                        normal_questions, ai_response, directions, spoilers)
+                    success_count += filled
+                    failed_questions.extend(failed)
+                else:
                     chunk_size = max(1, int(getattr(self.config, "request_batch_size", 20) or 20))
                     chunks = [normal_questions[i:i + chunk_size]
                               for i in range(0, len(normal_questions), chunk_size)]
-                    failed_questions = []
                     # 流水线：第 N 批的答案还在写页面时，第 N+1 批的请求已经在路上。
                     # 只开一个 worker，保证请求本身仍是串行的，避免打爆网关。
                     from concurrent.futures import ThreadPoolExecutor
@@ -11496,54 +11566,21 @@ class AISolver:
                             failed_questions.extend(chunk)
                             continue
                         ai_response = ai_response or response
-                        spoilers = self._plan_spoilers(chunk)
-                        for q in chunk:
-                            if self._should_stop():
-                                return False
-                            if q.q_type in [QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
-                                            QuestionType.VIDEO_CHOICE, QuestionType.MULTIPLE_CHOICE,
-                                            QuestionType.VOCABULARY_TEST]:
-                                ans = self._extract_single_answer(response, q.number)
-                            elif q.q_type in [QuestionType.BANKED_CLOZE, QuestionType.FILL_IN,
-                                              QuestionType.DROPDOWN_SELECT]:
-                                if q.q_type == QuestionType.FILL_IN and len(q.inputs or []) <= 1:
-                                    ans = self._extract_single_answer(response, q.number)
-                                else:
-                                    ans = response
-                            elif q.q_type == QuestionType.SORTING and len(chunk) > 1:
-                                ans = self._extract_single_answer(response, q.number)
-                            else:
-                                ans = response
-
-                            if ans:
-                                ans = self._apply_target_accuracy(q, ans, spoilers)
-                                if q.q_type == QuestionType.SORTING:
-                                    letters = [opt.letter for opt in q.options]
-                                    order = self.executor._parse_sorting_order(ans, letters)
-                                    corrected = self._reorder_sorting_by_transcript(q, order)
-                                    if corrected and corrected != order:
-                                        ans = ' '.join(corrected)
-                                if self.executor.execute(q, ans):
-                                    success_count += 1
-                                else:
-                                    failed_questions.append(q)
-                            else:
-                                print(f"    题目 {q.number} 无答案")
-                                failed_questions.append(q)
-
-                    if self.executor.suspicious:
-                        for question in self.executor.suspicious:
-                            if question not in failed_questions:
-                                failed_questions.append(question)
-                        self.executor.suspicious.clear()
+                        chunk_spoilers = {number for number in spoilers
+                                          if any(q.number == number for q in chunk)}
+                        filled, failed = self._fill_from_response(
+                            chunk, response, directions, chunk_spoilers)
+                        success_count += filled
+                        failed_questions.extend(failed)
                     try:
                         pool.shutdown(wait=False)
                     except Exception:
                         pass
-                    if failed_questions:
-                        repaired = self._repair_questions(failed_questions, directions)
-                        success_count += repaired
-                        print(f"    二次修正成功 {repaired}/{len(failed_questions)} 题")
+
+                if failed_questions:
+                    repaired = self._repair_questions(failed_questions, directions)
+                    success_count += repaired
+                    print(f"    二次修正成功 {repaired}/{len(failed_questions)} 题")
 
                 total_answered += success_count
                 print(f"    本页成功填写 {success_count}/{total_questions} 题")

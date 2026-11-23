@@ -266,7 +266,12 @@ class WorkbenchController(CourseCatalogMixin):
                                       if t.get("can_answer") and t.get("status") != "done"}
                 self._add_log(f"扫描完成，共发现 {len(tasks)} 项作业。", "success")
             elif action.startswith("scan"):
-                tasks = self.scan_tasks(current_unit_only=action == "scan_unit")
+                try:
+                    tasks = self.scan_tasks(current_unit_only=action == "scan_unit")
+                except Exception as exc:
+                    # 驱动/页面状态异常时不能说成「没有任务」
+                    raise RuntimeError(
+                        f"页面状态异常（{str(exc)[:60]}），已尝试切回主窗口，请重试") from exc
                 if not tasks:
                     raise RuntimeError("没有找到课程任务。请先在浏览器中打开课程目录，再重新扫描。")
                 with self._lock:
