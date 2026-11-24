@@ -89,7 +89,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.13"
+APP_VERSION = "3.9.14"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -3258,26 +3258,33 @@ class FillInStrategy(QuestionParserStrategy):
 
         blanks = []
         segments = MatchingStrategy._container_segments(driver, container)
+        given_initials = bool(re.search(r'\b(?:first|initial)\s+letters?\b', directions, re.I))
         for index, inp in enumerate(inputs):
             context = MatchingStrategy._text_before_blank(driver, container, inp, segments)
             context = re.sub(r'\s+', ' ', context).strip()
             if not context:
                 context = MatchingStrategy._statement_for(inp)
             context = context[-180:] if len(context) > 180 else context
+            hint = MatchingStrategy._hint_before(inp)
+            if given_initials:
+                prefix = re.search(r'\b([A-Za-z]{1,4})$', context)
+                hint = prefix.group(1) if prefix else ''
             blanks.append({
                 'index': index,
                 'context': context,
                 'right_context': (
                     MatchingStrategy._leading_text(inp).get('trailing') or ''
                 ).strip(),
-                'hint': MatchingStrategy._hint_before(inp),
+                'hint': hint,
                 'input': inp,
             })
 
         header = f"填空题（共{len(inputs)}个空）"
-        material = self._page_material(container)
+        material = self._page_material(container, inputs=inputs)
         if material:
             header += f"\n【题面/词库】{material}"
+        if scoops:
+            header += "\n按题面【空N】的编号逐空作答，每个输入框单独给出答案，不要把多个空合并为一个短语答案。"
         if directions:
             header = f"【题目要求】{directions}\n{header}"
 
@@ -3292,14 +3299,23 @@ class FillInStrategy(QuestionParserStrategy):
         )
 
     @staticmethod
-    def _page_material(container, limit: int = 6000) -> str:
+    def _page_material(container, limit: int = 6000, inputs=None) -> str:
         try:
             text = container.parent.execute_script("""
                 const root = arguments[0];
                 const clone = root.cloneNode(true);
+                const originals = [...root.querySelectorAll('input, textarea')];
+                const copies = [...clone.querySelectorAll('input, textarea')];
+                arguments[1].forEach((input, i) => {
+                    const copy = copies[originals.indexOf(input)];
+                    if (copy) {
+                        const blank = copy.closest('.fe-scoop') || copy;
+                        blank.replaceWith(document.createTextNode('【空' + (i + 1) + '】'));
+                    }
+                });
                 for (const el of clone.querySelectorAll('input, textarea, .fe-scoop')) { el.remove(); }
                 return (clone.textContent || '').replace(/\\s+/g, ' ').trim();
-            """, container) or ""
+            """, container, inputs or []) or ""
         except Exception:
             text = ""
         return text[:limit] if len(text) > limit else text
@@ -4450,7 +4466,7 @@ class PromptBuilder:
 
         if hints:
             lines.append("   已给出的字母（题干已印在输入框外面，答案请给完整单词，程序会自动去掉这部分）:")
-            lines.append("   优先使用上下文里 Learning 页出现的搭配原词，不要换成同前缀的其它词。")
+            lines.append("   优先使用上下文里 Learning 页出现的搭配词汇，不要换成同前缀的其它词；按当前句子语法调整单复数、时态等词形。")
             for item in hints:
                 line = f"     空{item['index'] + 1}: 已给出 {item['hint']}"
                 candidates = item.get('candidates') or []
@@ -9772,7 +9788,7 @@ class AISolver:
             return False
 
         try:
-            self.driver.execute_script("arguments[0].click();", learning)
+            learning.click()
         except Exception:
             return False
         time.sleep(5)
@@ -9791,7 +9807,7 @@ class AISolver:
 
         if practicing is not None:
             try:
-                self.driver.execute_script("arguments[0].click();", practicing)
+                practicing.click()
             except Exception:
                 pass
             time.sleep(4)

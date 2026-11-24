@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">  
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.13-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.14-2561C7">
   <img alt="GUI" src="https://img.shields.io/badge/gui-Qt_Quick-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Selenium-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
@@ -199,6 +199,17 @@ U校园涉及的教材比较多，不同课程和题型的适配仍在完善中�
 
 <details>
 <summary><b>点击展开完整更新日志</b></summary>
+
+<details>
+<summary><b>v3.9.14（2026-11-24）</b>：修复搭配填空错位与学习材料读取（issue #68）</summary>
+
+- **空位对应**：按实际输入框为题面逐空编号，支持一个搭配包含多个空的题目，使答案与输入位置一一对应。
+- **字母前缀**：按题目要求识别已给出的首字母，填写时自动扣除输入框外的前缀。
+- **学习材料**：正确切换 Learning / Practicing 标签，读取教材搭配词汇作为作答上下文，并提示按句子语法调整单复数、时态等词形。
+- **致谢**：感谢 [@cmby666](https://github.com/cmby666) 反馈问题并提供测试账号和密码，帮助复现问题和验证修复。
+
+
+</details>
 
 <details>
 <summary><b>v3.9.13（2026-11-23）</b>：支持配置自动重做达标分（issue #67）</summary>
