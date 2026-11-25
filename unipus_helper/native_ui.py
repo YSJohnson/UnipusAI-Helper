@@ -15,7 +15,9 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from shiboken6 import delete as delete_qt_object
 
+from .accuracy_control import parse_target_accuracy
 from .paths import PROJECT_ROOT, QML_DIR
+from .record_skip import normalize_skip_record_mode
 from .task_grading import score_text
 from .workbench_controller import WorkbenchController
 
@@ -32,6 +34,8 @@ DEFAULT_CONFIG = {
     "temperature": 0.3,
     "record_score_threshold": 70,
     "score_threshold": 80,
+    "target_accuracy": 100,
+    "skip_record_mode": "off",
     "debug_mode": False,
     "tts_engine": "auto",
     "tts_voice": "",
@@ -117,6 +121,20 @@ class ConfigEditor(QObject):
             except (ValueError, TypeError):
                 self.saved.emit(f"{label}必须是 0–100 之间的分数", False)
                 return
+        try:
+            acc_low, acc_high, acc_text = parse_target_accuracy(data.get("target_accuracy", 100))
+            if acc_low == acc_high:
+                data["target_accuracy"] = int(acc_low) if acc_low.is_integer() else acc_low
+            else:
+                data["target_accuracy"] = acc_text
+        except ValueError as exc:
+            self.saved.emit(str(exc), False)
+            return
+        try:
+            data["skip_record_mode"] = normalize_skip_record_mode(data.get("skip_record_mode", "off"))
+        except ValueError as exc:
+            self.saved.emit(str(exc), False)
+            return
         try:
             save_config(self.path, data)
         except Exception as exc:

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.15-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.16-2561C7">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3776AB">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-555555">
   <img alt="GUI" src="https://img.shields.io/badge/gui-PySide6%20%2F%20QML-2561C7">
@@ -35,7 +35,7 @@
 - **原生桌面工作台**：基于 PySide6 / Qt Quick（QML），集中查看课程进度、任务状态、得分与运行日志，内置配置编辑器、API 连通性检测与一键重启浏览器。
 - **双代播放器适配**：同时兼容旧版（`course-v2`）与新版 ipublish（`course-v3`）教材页面，支持自动提交与低于达标分自动重做。
 - **音视频转写与口语录音**：通过本地 Whisper 转写听力与视频材料作为答题上下文；跟读题借用题目原声虚拟麦克风注入，主观口语题支持 AI 写稿 + TTS 合成语音作答；可选开启识图模式处理带图题目。
-- **灵活调度与任务筛选**：支持扫描全部单元、扫描当前单元或直接处理当前页面；默认勾选未完成必修，支持关键词搜索、状态筛选与排除不计分任务。
+- **灵活调度与任务筛选**：支持扫描全部单元、扫描当前单元或直接处理当前页面；默认勾选未完成必修，支持关键词搜索、状态筛选与排除不计分任务，并提供实验性的三档跟读/录音自动跳过与客观题目标正确率控制。
 - **断点续跑**：每完成一项自动取消勾选并更新状态；手动停止后保留剩余选择，再次开始即可继续处理。
 
 ---
@@ -161,6 +161,8 @@ git pull
   "temperature": 0.3,
   "record_score_threshold": 70,
   "score_threshold": 80,
+  "target_accuracy": 100,
+  "skip_record_mode": "off",
   "token_full": "",
   "debug_mode": false,
   "tts_engine": "auto",
@@ -191,6 +193,8 @@ git pull
 | `temperature` | `0.3` | 生成温度（`0–2`），保持默认即可 |
 | `record_score_threshold` | `70` | 录音、朗读及 My Voice 题型的自动重做达标分（`0–100`）；低于该分数时自动重做 |
 | `score_threshold` | `80` | 其余题型的自动重做达标分（`0–100`）；低于该分数时自动重做 |
+| `target_accuracy` | `100` | **[实验性]** 客观题目标正确率：`100` 表示关闭；可填单值（如 `85`）或区间（如 `"80-90"`）。开启后 AI 正常求解并按题组配额对客观题做后处理控分，同时自动联动放宽重做下限并对新版播放器守住 60% 最低提交线 |
+| `skip_record_mode` | `"off"` | **[实验性]** 自动跳过跟读/录音任务：`off`（不跳过）/ `follow_aloud`（仅跳过词汇/句子/段落跟读、角色扮演与配音，保留自由口语）/ `all`（跳过全部录音题）；跳过的任务取消本次勾选并保留未完成状态 |
 | `browser` | `"edge"` | 浏览器后端：`edge` / `chrome`。环境检查、driver 启动与缓存目录均跟随此值；Chrome 仅检测提示，需自行安装 |
 | `screenshot` | `false` | 是否将题目截图发送给模型；带图口语 / 听力题需开启并搭配支持识图的模型（会增加 token 消耗） |
 | `tts_engine` | `"auto"` | 主观录音题语音合成后端：`auto`（默认，优先 `edge` 失败回退 `sapi`）/ `edge` / `sapi`（Windows 离线）/ `off` |
@@ -239,6 +243,14 @@ U 校园覆盖的教材版本较多，不同课程的页面结构与题型差异
 
 部分题目强依赖前文、图片或听力材料等上下文；若某本教材尚未完全适配，可能存在上下文未完整提取的情况，模型只能仅凭题干作答。你可以先检查是否需要开启 `screenshot`（带图题）或调整 `score_threshold` / `record_score_threshold`，也可以在 Issue 中附上教材名称、单元任务点、题型截图和运行日志，方便定位修复。
 
+**如何控制客观题正确率，以及自动跳过跟读任务？（实验性功能）**
+
+> [!NOTE]
+> 以下两项配置目前为**实验性功能**（默认关闭，尚未覆盖所有教材实机验证），如在具体课程中遇到异常或误判，欢迎携带日志提交 Issue 反馈。
+
+- **目标正确率（`target_accuracy`）**：默认 `100`（关闭），可在「配置」窗口或 `config.json` 中设为单值（如 `85`）或区间（如 `80-90`）。该功能**不是**让大模型自己故意答错，而是让 AI 正常求出最优答案后，程序在填写前按当前页面/题组的客观小题数抽样配额，将抽中题目的答案改为合法的错误项（覆盖单选、多选、判断、排序、各类匹配以及下拉/选词/普通填空；主观写作、自评量表与录音题不扰动）。开启后会自动联动放宽客观题重做下限（`min(score_threshold, 目标下限 - 10)`），避免控分后又被低分重做刷回 100%；对新版播放器（`course-v3`）目标下限 ≥ 60 时会自动守住 60% 最低提交线。
+- **自动跳过跟读/录音（`skip_record_mode`）**：默认 `off`（不跳过），可设为 `follow_aloud`（仅跳过词汇/句子/段落跟读、角色扮演与视频配音，保留自由口语录音）或 `all`（跳过全部口语/录音题）。纯跟读任务跳过后会取消本次勾选并保留“未完成”状态，继续处理剩余任务；混合页面会跳过其中的跟读小题并继续提交其他题型。
+
 **带图口语题或听力图片题答不出来怎么办？**
 
 请在配置中将 `screenshot` 设为 `true`（或在「配置」窗口勾选“识图模式”），并换用支持视觉理解的多模态模型，保存后重启程序。注意开启识图会发送页面截图，token 消耗会相应增加。
@@ -274,10 +286,12 @@ UnipusAI-Helper/
 ├── CHANGELOG.md                # 完整更新日志
 ├── LICENSE                     # AGPLv3 协议
 ├── unipus_helper/              # 业务模块与原生界面
+│   ├── accuracy_control.py     # 客观题目标正确率配额与后处理扰动
 │   ├── audio_recognizer.py     # 本地 Whisper 音频转写
 │   ├── browser.py              # Edge / Chrome 后端检测与启动
 │   ├── environment_checker.py  # 运行环境与 FFmpeg 检查
 │   ├── course_catalog.py       # 课程目录扫描
+│   ├── record_skip.py          # 跟读/录音任务三档跳过策略
 │   ├── task_grading.py         # 计分状态识别与筛选
 │   ├── workbench_controller.py # 任务状态、调度与日志管理
 │   ├── native_ui.py            # Python / QML 桥接与配置保存
@@ -293,9 +307,9 @@ UnipusAI-Helper/
 
 近期版本摘要：
 
+- **v3.9.16（2026-11-25）**：新增客观题目标正确率控制（`target_accuracy`）与三档自动跳过跟读/录音任务（`skip_record_mode`）两项实验性功能（issue #66）。
 - **v3.9.15（2026-11-25）**：修复示例页跳过与批量中断、自提交录音页无提交按钮误判、提交确认超时及视频弹窗续播与模型硬编码问题（issue #71）。
 - **v3.9.14（2026-11-24）**：修复搭配填空空位错位、首字母前缀扣除与 Learning / Practicing 学习材料读取（issue #68）。
-- **v3.9.13（2026-11-23）**：新增 `record_score_threshold` 与 `score_threshold`，支持自定义自动重做达标分（issue #67）。
 
 ---
 
@@ -303,6 +317,7 @@ UnipusAI-Helper/
 
 - 感谢开源社区提供的优秀工具与生态。
 - 感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者 [Zzj-klwgxdz](https://github.com/Zzj-klwgxdz)，本项目早期借鉴了其解析器框架思路与登录认证状态处理机制。
+- 感谢 [TG 小树屋](https://t.me/xiaoshuwu/9057) 对本项目的推荐。
 - 感谢所有提交 Pull Request、反馈未适配教材与协助复现验证的社区贡献者。
 
 <a href="https://github.com/YSJohnson/UnipusAI-Helper/graphs/contributors">

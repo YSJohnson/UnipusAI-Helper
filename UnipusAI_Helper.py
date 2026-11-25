@@ -71,10 +71,15 @@ def ensure_writable_temp_dir() -> str:
 # 系统 temp 不可写时 torch 的 DLL 初始化会直接抛出 WinError 1114。
 ensure_writable_temp_dir()
 
+from unipus_helper.accuracy_control import (AccuracyController, effective_score_threshold,
+                                            parse_target_accuracy)
 from unipus_helper.audio_recognizer import AudioTranscriber
 from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser, quit_driver
 from unipus_helper.environment_checker import EnvironmentChecker
 from unipus_helper.course_catalog import select_course_unit
+from unipus_helper.record_skip import (normalize_skip_record_mode,
+                                       should_skip_publish_group_fast,
+                                       should_skip_record_question)
 from openai import OpenAI
 from selenium.common.exceptions import (InvalidSessionIdException, NoSuchDriverException,
                                         NoSuchElementException, TimeoutException,
@@ -90,7 +95,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.15"
+APP_VERSION = "3.9.16"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -188,6 +193,10 @@ class Config:
     browser: str = DEFAULT_BROWSER
     record_score_threshold: float = 70
     score_threshold: float = 80
+    target_accuracy: str = "100"
+    target_accuracy_min: float = 100.0
+    target_accuracy_max: float = 100.0
+    skip_record_mode: str = "off"
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -200,6 +209,8 @@ class Config:
                     raise ValueError
             except (ValueError, TypeError):
                 raise ValueError(f"{key} 必须是 0–100 之间的分数") from None
+        acc_low, acc_high, acc_text = parse_target_accuracy(data.get("target_accuracy", 100))
+        skip_record_mode = normalize_skip_record_mode(data.get("skip_record_mode", "off"))
         global DEBUG_MODE
         DEBUG_MODE = data.get("debug_mode", False)
         return cls(
@@ -219,6 +230,10 @@ class Config:
             browser=normalize_browser(data.get("browser")),
             record_score_threshold=data["record_score_threshold"],
             score_threshold=data["score_threshold"],
+            target_accuracy=acc_text,
+            target_accuracy_min=acc_low,
+            target_accuracy_max=acc_high,
+            skip_record_mode=skip_record_mode,
         )
 
 
@@ -313,6 +328,7 @@ class Question:
     blank_count: int = 0
     record_items: List[Dict] = field(default_factory=list)
     link_items: List[Dict] = field(default_factory=list)
+    is_evaluation: bool = False
 
     @property
     def answer_count(self) -> int:
@@ -7071,6 +7087,8 @@ class PublishQuestionParser:
                 element=node,
                 options=options,
                 group=group,
+                is_evaluation=(group_type == 'evaluation_group'
+                               or self._question_type(node) == 'evaluation'),
             ))
         return questions
 
@@ -7099,7 +7117,8 @@ class PublishQuestionParser:
                 q_type=QuestionType.RECORD, element=node, group=group,
                 record_items=[{'url': url or '', 'element': buttons[0],
                                'text': '' if group_type == 'oral_sentence_scoop_group' and not url else text,
-                               'sample': samples[0] if samples else None}],
+                               'sample': samples[0] if samples else None,
+                               'group_type': group_type}],
             ))
         return questions
 
@@ -9434,6 +9453,40 @@ class AISolver:
         self._retry_hint: str = ''
         self._last_question_types: set = set()
         self._last_tab_outcome: str = ''
+        self.accuracy_controller = AccuracyController(
+            getattr(config, 'target_accuracy_min', 100.0),
+            getattr(config, 'target_accuracy_max', 100.0),
+        )
+
+    def _skip_record_mode(self) -> str:
+        config = getattr(self, 'config', None)
+        try:
+            return normalize_skip_record_mode(getattr(config, 'skip_record_mode', 'off'))
+        except ValueError:
+            return 'off'
+
+    def _accuracy_controller(self) -> AccuracyController:
+        controller = getattr(self, 'accuracy_controller', None)
+        if controller is None:
+            config = getattr(self, 'config', None)
+            if config is not None and hasattr(config, 'target_accuracy_min'):
+                low = getattr(config, 'target_accuracy_min', 100.0)
+                high = getattr(config, 'target_accuracy_max', 100.0)
+                controller = AccuracyController(low, high)
+            elif config is not None and hasattr(config, 'target_accuracy'):
+                controller = AccuracyController.from_config_value(getattr(config, 'target_accuracy', 100))
+            else:
+                controller = AccuracyController(100.0, 100.0)
+            self.accuracy_controller = controller
+        return controller
+
+    def _tab_failure_status(self) -> str:
+        outcome = getattr(self, '_last_tab_outcome', '')
+        if outcome == 'skipped_record':
+            return 'skipped_record'
+        if outcome == 'skipped':
+            return 'skipped_no_answer'
+        return 'error'
 
     def request_stop(self):
         self.stop_requested.set()
@@ -9470,6 +9523,7 @@ class AISolver:
         self.ai_client.start_new_chapter(chapter_name)
         self.processed_hashes.clear()
         self._publish_processed_groups = set()
+        self._accuracy_controller().reset()
 
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
         course_home_url = course_home_url or self.driver.current_url
@@ -9575,8 +9629,18 @@ class AISolver:
                         except Exception as exc:
                             print(f"  完成回调异常: {str(exc)[:60]}")
             elif status == 'skipped_no_answer':
+                tab['skip_reason'] = 'no_answer'
                 skipped_tasks.append(task_label)
                 print("  已跳过无需作答页面并取消勾选，继续处理剩余任务")
+                if on_task_skipped:
+                    try:
+                        on_task_skipped(tab)
+                    except Exception as exc:
+                        print(f"  跳过回调异常: {str(exc)[:60]}")
+            elif status == 'skipped_record':
+                tab['skip_reason'] = 'record'
+                skipped_tasks.append(task_label)
+                print("  已跳过跟读/录音任务并取消本次勾选（保留未完成状态），继续处理剩余任务")
                 if on_task_skipped:
                     try:
                         on_task_skipped(tab)
@@ -9616,8 +9680,13 @@ class AISolver:
         types = getattr(self, '_last_question_types', set())
         record_types = {QuestionType.RECORD, QuestionType.ORAL_ALOUD,
                         QuestionType.MY_VOICE_TEXT}
-        threshold = (self.config.record_score_threshold if types & record_types
-                     else self.config.score_threshold)
+        controller = self._accuracy_controller()
+        threshold = effective_score_threshold(
+            self.config.score_threshold,
+            controller.target_range,
+            is_record_or_subjective=bool(types & record_types),
+            record_score_threshold=self.config.record_score_threshold,
+        )
         return score < threshold
 
     def _read_answer_analysis(self) -> str:
@@ -9740,7 +9809,7 @@ class AISolver:
                 return 'stopped'
             if success:
                 return 'done'
-            return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
+            return self._tab_failure_status()
 
         l1_idx = tab.get('l1_idx', 0)
         l2_idx = tab.get('l2_idx', -1)
@@ -9766,7 +9835,7 @@ class AISolver:
                 return 'stopped'
             if success:
                 return 'done'
-            return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
+            return self._tab_failure_status()
 
         level2_tabs = self._get_level2_tabs()
         if l2_idx >= len(level2_tabs):
@@ -9789,7 +9858,7 @@ class AISolver:
             return 'stopped'
         if success:
             return 'done'
-        return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
+        return self._tab_failure_status()
 
     def _answer_chunked_fill(self, q: Question, directions: str = "", chunk_size: int = 8) -> bool:
         total = len(q.inputs)
@@ -9862,17 +9931,34 @@ class AISolver:
                     continue
 
             mapping = self._parse_numbered_map(response)
-            for offset, inp in enumerate(sub.inputs):
+            chunk_answers = []
+            chunk_hints = []
+            for offset in range(len(sub.inputs)):
                 global_no = start + offset + 1
                 ans = mapping.get(global_no) or mapping.get(offset + 1) or ""
+                hint = sub_blanks[offset].get('hint', '') if offset < len(sub_blanks) else ''
+                chunk_answers.append(ans)
+                chunk_hints.append(hint)
+            original_answers = list(chunk_answers)
+            adjusted_answers, _ = self._accuracy_controller().apply_to_blank_list(
+                chunk_answers,
+                hints=chunk_hints,
+                banked_options=q.banked_options,
+                enforce_submit_floor=False,
+            )
+            for offset, inp in enumerate(sub.inputs):
+                global_no = start + offset + 1
+                ans = adjusted_answers[offset]
+                orig_ans = original_answers[offset]
                 if not ans:
                     continue
-                hint = sub_blanks[offset].get('hint', '') if offset < len(sub_blanks) else ''
+                hint = chunk_hints[offset]
                 ans = self.executor._strip_given_prefix(hint, ans)
+                orig_clean = self.executor._strip_given_prefix(hint, orig_ans) if orig_ans else ans
                 try:
                     if self.executor._fill_text_input_verified(inp, ans):
                         filled += 1
-                        used_answers.append(ans)
+                        used_answers.append(orig_clean)
                 except Exception as exc:
                     print(f"    空{global_no} 写入失败: {str(exc)[:50]}")
             print(f"    第 {start + 1}-{end} 空已处理（累计 {filled}/{total}）")
@@ -10325,12 +10411,28 @@ class AISolver:
                 print(f"    修正题目 {q.number} 失败: {str(exc)[:60]}")
         return repaired
 
+    def _is_skipped_record_only_page(self) -> bool:
+        mode = self._skip_record_mode()
+        if mode == 'off':
+            return False
+        try:
+            questions, _ = self.parser.parse_all()
+        except Exception:
+            return False
+        if not questions or self.parser.incomplete:
+            return False
+        return all(should_skip_record_question(q, mode) for q in questions)
+
     def _process_tab_with_accumulation(self, tab_name: str, l1_idx: int, l2_idx: int) -> bool:
 
         if self._should_stop():
             return False
         if self._is_publish_page():
             print("    检测到新版 ipublish 播放器，跳过旧版音视频预处理")
+            return self._process_current_tab_content(
+                self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
+            )
+        if self._is_skipped_record_only_page():
             return self._process_current_tab_content(
                 self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
             )
@@ -10507,6 +10609,7 @@ class AISolver:
 
         page_num = 1
         total_answered = 0
+        total_record_skipped = 0
         last_questions_signature = ""
 
         while True:
@@ -10514,17 +10617,18 @@ class AISolver:
                 print("    已请求停止，当前任务提前结束")
                 return False
 
-            skip_asr = self._skip_transcription(tab_name)
-            if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
-                                                   skip_transcription=skip_asr):
-                return False
-            if self._should_stop():
-                return False
-            if not self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx,
-                                                   skip_transcription=skip_asr):
-                return False
-            if self._should_stop():
-                return False
+            if not self._is_skipped_record_only_page():
+                skip_asr = self._skip_transcription(tab_name)
+                if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
+                                                       skip_transcription=skip_asr):
+                    return False
+                if self._should_stop():
+                    return False
+                if not self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx,
+                                                       skip_transcription=skip_asr):
+                    return False
+                if self._should_stop():
+                    return False
             questions, directions = self.parser.parse_all()
             if self.parser.incomplete:
                 print("    本页有交互题未能解析，停止当前任务")
@@ -10597,19 +10701,28 @@ class AISolver:
                 QuestionType.DISCUSSION_BOARD
             ]]
 
-            total_questions = len(normal_questions)
-
+            skip_mode = self._skip_record_mode()
             record_questions = [q for q in normal_questions
                                 if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD)]
+            skipped_records = [q for q in record_questions
+                               if should_skip_record_question(q, skip_mode)]
+            active_records = [q for q in record_questions if q not in skipped_records]
+            if skipped_records:
+                total_record_skipped += len(skipped_records)
+                print(f"    本页 {len(skipped_records)} 道跟读/录音题，已按配置（{skip_mode}）自动跳过")
+                normal_questions = [q for q in normal_questions if q not in skipped_records]
+
+            total_questions = len(normal_questions)
+
             all_self_submitting = (
-                bool(record_questions)
-                and len(record_questions) == total_questions
-                and all(q.is_self_submitting_record for q in record_questions)
+                bool(active_records)
+                and len(active_records) == total_questions
+                and all(q.is_self_submitting_record for q in active_records)
             )
             record_answered = 0
-            if record_questions:
-                print(f"    本页 {len(record_questions)} 道录音题，开始逐条录音...")
-                for q in record_questions:
+            if active_records:
+                print(f"    本页 {len(active_records)} 道录音题，开始逐条录音...")
+                for q in active_records:
                     if self._should_stop():
                         return False
                     needs_tts = q.needs_speech_script or q.q_type == QuestionType.ORAL_ALOUD
@@ -10623,8 +10736,8 @@ class AISolver:
                             continue
                     if self.executor.execute(q, script):
                         record_answered += 1
-                print(f"    录音题完成 {record_answered}/{len(record_questions)}")
-                if record_answered < len(record_questions):
+                print(f"    录音题完成 {record_answered}/{len(active_records)}")
+                if record_answered < len(active_records):
                     print("    录音题未完成，停止当前页")
                     return False
                 normal_questions = [q for q in normal_questions
@@ -10677,6 +10790,7 @@ class AISolver:
                     return False
                 if ai_response:
                     failed_questions = []
+                    prepared_items = []
 
                     for q in normal_questions:
                         if self._should_stop():
@@ -10693,13 +10807,22 @@ class AISolver:
                         else:
                             ans = ai_response
 
+                        if ans and q.q_type == QuestionType.SORTING:
+                            letters = [opt.letter for opt in q.options]
+                            order = self.executor._parse_sorting_order(ans, letters)
+                            corrected = self._reorder_sorting_by_transcript(q, order)
+                            if corrected and corrected != order:
+                                ans = ' '.join(corrected)
+                        prepared_items.append((q, ans or ""))
+
+                    adjusted_answers, _ = self._accuracy_controller().apply_to_items(
+                        prepared_items, enforce_submit_floor=False
+                    )
+
+                    for (q, _), ans in zip(prepared_items, adjusted_answers):
+                        if self._should_stop():
+                            return False
                         if ans:
-                            if q.q_type == QuestionType.SORTING:
-                                letters = [opt.letter for opt in q.options]
-                                order = self.executor._parse_sorting_order(ans, letters)
-                                corrected = self._reorder_sorting_by_transcript(q, order)
-                                if corrected and corrected != order:
-                                    ans = ' '.join(corrected)
                             if self.executor.execute(q, ans):
                                 success_count += 1
                             else:
@@ -10775,6 +10898,13 @@ class AISolver:
                 self._last_tab_outcome = 'error'
                 return False
             elif not special_handled:
+                if total_record_skipped > 0 and total_answered == 0:
+                    print("    本任务为跟读/录音任务，已按配置自动跳过")
+                    self._last_tab_outcome = 'skipped_record'
+                    return False
+                if total_record_skipped > 0 and total_answered > 0:
+                    print("    本页跟读/录音题已按配置跳过，其余页面已完成")
+                    break
                 non_answer = getattr(self.parser, 'non_answer_containers', 0)
                 if (isinstance(non_answer, int) and non_answer > 0
                         and not self.parser.incomplete and not self._page_needs_answer()):
@@ -10818,6 +10948,7 @@ class AISolver:
 
         handled = 0
         skipped = 0
+        record_skipped = 0
         rejected = 0
         idle_reveals = 0
         while not self._should_stop():
@@ -10830,6 +10961,10 @@ class AISolver:
                 if handled >= 80:
                     print("    已处理 80 个题目组，停止当前任务")
                     break
+                continue
+            if result == 'skipped_record':
+                record_skipped += 1
+                idle_reveals = 0
                 continue
             if result == 'skipped':
                 skipped += 1
@@ -10848,16 +10983,21 @@ class AISolver:
 
         if handled:
             print(f"    新版播放器共提交 {handled} 个题目组")
+        if record_skipped:
+            print(f"    另有 {record_skipped} 个跟读/录音题目组已按配置自动跳过")
         if rejected:
             print(f"    另有 {rejected} 个题目组因正确率不足 60% 被平台拒绝提交")
         if skipped:
             print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
-        if not handled and not skipped and not rejected:
+        if record_skipped and not skipped and not rejected:
+            self._last_tab_outcome = 'skipped_record'
+            return False
+        if not handled and not skipped and not rejected and not record_skipped:
             if not videos and not reading:
                 print("    当前任务没有可处理的题目或视频，请检查课程目录中的实际进度")
                 return False
             print("    本任务正文已浏览，请以课程目录显示的进度为准")
-        return not self._should_stop() and not skipped and not rejected
+        return not self._should_stop() and not skipped and not rejected and not record_skipped
 
     def _publish_read_task(self):
         with PublishFrameContext(self.driver) as context:
@@ -10976,8 +11116,14 @@ class AISolver:
                     response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
                     if not response or self._should_stop():
                         return False
-                    for question in questions:
-                        answer = self._publish_answer_text(question, response, 0)
+                    prepared_items = [
+                        (question, self._publish_answer_text(question, response, 0))
+                        for question in questions
+                    ]
+                    adjusted_answers, _ = self._accuracy_controller().apply_to_items(
+                        prepared_items, enforce_submit_floor=False
+                    )
+                    for (question, _), answer in zip(prepared_items, adjusted_answers):
                         if not answer or not self.publish_executor.execute(question, answer):
                             print('    测试未完整填写，保留当前进度')
                             return False
@@ -11115,6 +11261,12 @@ class AISolver:
                     print('    AI 口语对话需要在平台内完成')
                     self._publish_processed_groups.add(key)
                     return 'skipped'
+                if state['kind'] == 'record':
+                    fast_skip = should_skip_publish_group_fast(state['type'], self._skip_record_mode())
+                    if fast_skip is True:
+                        print(f"    已按配置（{self._skip_record_mode()}）跳过跟读/录音题目组: {state['type']}")
+                        self._publish_processed_groups.add(key)
+                        return 'skipped_record'
                 pending = (state, key)
                 break
 
@@ -11127,6 +11279,8 @@ class AISolver:
                 return 'answered'
             if outcome == 'rejected':
                 return 'rejected'
+            if outcome == 'skipped_record':
+                return 'skipped_record'
             if outcome == 'skipped':
                 return 'skipped'
             return 'error'
@@ -11166,6 +11320,13 @@ class AISolver:
         if nodes and len(questions) != len(nodes):
             print("    本组有小题未能解析，不提交，请检查页面结构")
             return False
+
+        skip_mode = self._skip_record_mode()
+        if questions and all(should_skip_record_question(question, skip_mode)
+                             for question in questions):
+            print(f"    题目组 {group_type} 为跟读/录音题，已按配置（{skip_mode}）跳过")
+            self._publish_processed_groups.add(key)
+            return 'skipped_record'
 
         if not self._publish_prepare_media(group):
             return False
@@ -11212,16 +11373,25 @@ class AISolver:
                 print("    AI 未返回答案")
                 return False
             blank_offset = 0
+            prepared_items = []
             for question in questions:
                 if self._should_stop() or not self._publish_group_in_scope(group):
                     return False
                 answer = self._publish_answer_text(question, ai_response, blank_offset)
                 if question.q_type == QuestionType.FILL_IN:
                     answer = self._normalize_fill_answer_capitalization(question, answer)
-                if answer and self.publish_executor.execute(question, answer):
-                    filled += 1
+                prepared_items.append((question, answer or ''))
                 if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
                     blank_offset += question.answer_count or 1
+
+            adjusted_answers, _ = self._accuracy_controller().apply_to_items(
+                prepared_items, enforce_submit_floor=True
+            )
+            for (question, _), answer in zip(prepared_items, adjusted_answers):
+                if self._should_stop() or not self._publish_group_in_scope(group):
+                    return False
+                if answer and self.publish_executor.execute(question, answer):
+                    filled += 1
         print(f"    本组填写 {filled}/{len(questions)} 题")
 
         if filled != len(questions):
@@ -11408,14 +11578,24 @@ class AISolver:
         offset = 0
         for question in questions:
             blanks = self.publish_executor._dropdown_blanks(question)
-            for index, blank in enumerate(blanks, offset + 1):
+            collected_blanks = []
+            for local_index, blank in enumerate(blanks):
+                index = offset + local_index + 1
                 try:
                     options = self.publish_executor.collect_dropdown_options(blank)
                 except Exception:
                     options = []
+                collected_blanks.append({'index': local_index, 'options': list(options)})
                 print(f"    空{index} 候选抓取: {len(options)} 个")
                 if options:
                     lines.append(f"   空{index} 候选: {' / '.join(options)}")
+            if collected_blanks:
+                question.banked_blanks = collected_blanks
+                all_opts = list(dict.fromkeys(
+                    opt for b in collected_blanks for opt in b['options'] if opt
+                ))
+                if all_opts and not question.banked_options:
+                    question.banked_options = all_opts
             offset += question.answer_count or len(blanks) or 1
         if not lines:
             return ''
@@ -11640,6 +11820,7 @@ class AISolver:
         self._publish_processed_groups = set()
         self._inline_learning_tried = False
         self._reading_ctx_tried = False
+        self._accuracy_controller().reset()
 
         quick_tab_name = f"quick_current_page_{int(time.time())}"
         self.ai_client.force_reset(f"{chapter_name}_{quick_tab_name}")

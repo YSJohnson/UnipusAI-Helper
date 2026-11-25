@@ -9,6 +9,8 @@
   "temperature": 0.3,
   "record_score_threshold": 70,
   "score_threshold": 80,
+  "target_accuracy": 100,
+  "skip_record_mode": "off",
   "token_full": "",
   "debug_mode": false,
   "tts_engine": "auto",

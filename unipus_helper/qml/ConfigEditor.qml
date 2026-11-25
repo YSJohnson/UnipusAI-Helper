@@ -21,7 +21,8 @@ ApplicationWindow {
 
     function saveSettings() {
         let values = {"token_full": tokenInput.text, "debug_mode": debugCheck.checked,
-                      "screenshot": screenshotCheck.checked}
+                      "screenshot": screenshotCheck.checked,
+                      "skip_record_mode": skipRecordCombo.currentValue || "off"}
         for (let i = 0; i < fields.count; ++i) {
             let row = fields.itemAt(i)
             values[row.fieldKey] = row.value
@@ -78,6 +79,7 @@ ApplicationWindow {
                                 { key: "temperature", label: "温度（0–2）", hint: "0.3" },
                                 { key: "record_score_threshold", label: "录音、朗读达标分", hint: "70（0–100）" },
                                 { key: "score_threshold", label: "其余题型达标分", hint: "80（0–100）" },
+                                { key: "target_accuracy", label: "目标正确率（实验性）", hint: "100（关闭），或填 85 / 80-90" },
                                 { key: "tts_engine", label: "录音题 TTS 引擎", hint: "auto / edge / sapi / off" },
                                 { key: "tts_voice", label: "TTS 音色", hint: "留空使用默认英语音色" },
                                 { key: "tts_proxy", label: "TTS 代理", hint: "可选，例如 http://127.0.0.1:7890" },
@@ -111,6 +113,76 @@ ApplicationWindow {
                                         border.color: input.activeFocus ? Theme.accent : Theme.line
                                     }
                                 }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; Layout.alignment: Qt.AlignTop
+                            spacing: 16
+                            UiText { Layout.preferredWidth: 150; Layout.alignment: Qt.AlignTop; Layout.topMargin: 8; text: "跟读跳过（实验性）"; color: Theme.secondary; font.pixelSize: 13 }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 4
+                                ComboBox {
+                                    id: skipRecordCombo
+                                    objectName: "field_skip_record_mode"
+                                    Layout.fillWidth: true
+                                    implicitHeight: 38
+                                    textRole: "label"
+                                    valueRole: "value"
+                                    model: [
+                                        { value: "off", label: "不跳过（正常作答）" },
+                                        { value: "follow_aloud", label: "仅跳过跟读与朗读（保留自由口语）" },
+                                        { value: "all", label: "跳过全部录音题（含自由口语）" }
+                                    ]
+                                    currentIndex: Math.max(0, indexOfValue(String(configEditor.values.skip_record_mode || "off")))
+                                    font.family: Theme.fontFamily; font.pixelSize: 14
+                                    Accessible.name: "跟读/录音跳过"
+                                    contentItem: UiText {
+                                        leftPadding: 12; rightPadding: skipRecordCombo.indicator.width + 12
+                                        text: skipRecordCombo.displayText
+                                        font: skipRecordCombo.font
+                                        color: Theme.ink
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    indicator: UiText {
+                                        x: skipRecordCombo.width - width - 12
+                                        y: skipRecordCombo.topPadding + (skipRecordCombo.availableHeight - height) / 2
+                                        text: "▾"
+                                        color: Theme.muted
+                                        font.pixelSize: 13
+                                    }
+                                    background: Rectangle {
+                                        radius: 7; color: Theme.canvas
+                                        border.color: skipRecordCombo.activeFocus || skipRecordCombo.popup.visible ? Theme.accent : Theme.line
+                                    }
+                                    delegate: ItemDelegate {
+                                        width: skipRecordCombo.width
+                                        highlighted: skipRecordCombo.highlightedIndex === index
+                                        contentItem: UiText {
+                                            text: modelData.label
+                                            color: Theme.ink
+                                            font.pixelSize: 14
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        background: Rectangle {
+                                            color: highlighted ? Theme.hover : Theme.surface
+                                        }
+                                    }
+                                    popup: Popup {
+                                        y: skipRecordCombo.height + 4
+                                        width: skipRecordCombo.width
+                                        padding: 4
+                                        contentItem: ListView {
+                                            clip: true
+                                            implicitHeight: contentHeight
+                                            model: skipRecordCombo.popup.visible ? skipRecordCombo.delegateModel : null
+                                            currentIndex: skipRecordCombo.highlightedIndex
+                                        }
+                                        background: Rectangle {
+                                            radius: 8; color: Theme.surface; border.color: Theme.line
+                                        }
+                                    }
+                                }
+                                UiText { text: "实验性功能（默认关闭，尚未覆盖所有教材实测）：目标正确率仅作用于客观题，开启后自动联动放宽重做下限并守住新版 60% 最低提交线；开启跟读跳过后纯跟读任务将保留未完成状态。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             }
                         }
                         RowLayout {
