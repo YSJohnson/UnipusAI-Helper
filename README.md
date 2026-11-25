@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.14-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.15-2561C7">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3776AB">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-555555">
   <img alt="GUI" src="https://img.shields.io/badge/gui-PySide6%20%2F%20QML-2561C7">
@@ -293,9 +293,9 @@ UnipusAI-Helper/
 
 近期版本摘要：
 
+- **v3.9.15（2026-11-25）**：修复示例页跳过与批量中断、自提交录音页无提交按钮误判、提交确认超时及视频弹窗续播与模型硬编码问题（issue #71）。
 - **v3.9.14（2026-11-24）**：修复搭配填空空位错位、首字母前缀扣除与 Learning / Practicing 学习材料读取（issue #68）。
 - **v3.9.13（2026-11-23）**：新增 `record_score_threshold` 与 `score_threshold`，支持自定义自动重做达标分（issue #67）。
-- **v3.9.12（2026-11-22）**：兼容旧播放器 `.sequence-view` 排序组件，修复排序题自动作答（issue #62）。
 
 ---
 

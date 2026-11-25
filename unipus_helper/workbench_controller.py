@@ -153,7 +153,7 @@ class WorkbenchController(CourseCatalogMixin):
             username = str(getattr(config, "username", ""))
             account = f"{username[:3]}••••{username[-4:]}" if len(username) > 7 else "已连接账号" if username else "未连接账号"
             return copy.deepcopy({
-                "version": self._globals.get("APP_VERSION", "3.9.14"),
+                "version": self._globals.get("APP_VERSION", "3.9.15"),
                 "ready": self._ready, "busy": self._operation is not None, "operation": self._operation,
                 "status": self._status, "error": self._error,
                 "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),
@@ -237,7 +237,8 @@ class WorkbenchController(CourseCatalogMixin):
                 if action == "run":
                     with self._lock:
                         selected = [t for t in self._tasks if t["id"] in self._selected]
-                    self.solver.process_selected_tabs(selected, on_task_done=self._task_done)
+                    self.solver.process_selected_tabs(
+                        selected, on_task_done=self._task_done, on_task_skipped=self._task_skipped)
                 else:
                     self.solver.processed_hashes.clear()
                     if not self.solver.solve_current_page() and not self.solver._should_stop():
@@ -266,6 +267,12 @@ class WorkbenchController(CourseCatalogMixin):
         score = task.get("session_score")
         suffix = f"，得分 {score:g}" if isinstance(score, (int, float)) else "，本次未读到成绩"
         self._add_log(f"已完成：{task.get('l1_title', '')}{suffix}", "success")
+
+    def _task_skipped(self, task):
+        with self._lock:
+            self._selected.discard(task["id"])
+            self._completed += 1
+        self._add_log(f"已跳过（无需作答）：{task.get('l1_title', '')}", "info")
 
     def stop(self):
         self._stop_requested.set()

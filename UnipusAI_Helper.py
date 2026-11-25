@@ -76,8 +76,9 @@ from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normali
 from unipus_helper.environment_checker import EnvironmentChecker
 from unipus_helper.course_catalog import select_course_unit
 from openai import OpenAI
-from selenium.common.exceptions import (NoSuchDriverException, NoSuchElementException,
-                                        TimeoutException, StaleElementReferenceException,
+from selenium.common.exceptions import (InvalidSessionIdException, NoSuchDriverException,
+                                        NoSuchElementException, TimeoutException,
+                                        StaleElementReferenceException,
                                         SessionNotCreatedException, WebDriverException)
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -89,7 +90,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.14"
+APP_VERSION = "3.9.15"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -341,6 +342,15 @@ class Question:
             return False
         return any(not (item.get('url') or '').strip()
                    and not (item.get('text') or '').strip() for item in items)
+
+    @property
+    def is_self_submitting_record(self) -> bool:
+        if self.q_type == QuestionType.ORAL_ALOUD:
+            return True
+        if self.q_type == QuestionType.RECORD:
+            items = self.record_items or []
+            return bool(items) and (bool(items[0].get('vocab')) or bool(items[0].get('role_play')))
+        return False
 
 
 CJK_HINT_PATTERN = re.compile(r'[（(]\s*([\u4e00-\u9fa5][^（）()]{0,40}?)\s*[）)]')
@@ -945,6 +955,8 @@ class QuestionParser:
 
     def __init__(self, driver):
         self.driver = driver
+        self.incomplete = False
+        self.non_answer_containers = 0
         self.strategies: List[QuestionParserStrategy] = [
             RolePlayStrategy(),
             ParagraphMatchingStrategy(),
@@ -1066,6 +1078,7 @@ class QuestionParser:
 
     def _parse_all_once(self) -> Tuple[List[Question], str]:
         self.incomplete = False
+        self.non_answer_containers = 0
         if self._is_discussion_board_page():
             print("     检测到讨论板页面，交给发帖处理器")
             try:
@@ -1104,10 +1117,14 @@ class QuestionParser:
                         print(f"      题目 {idx} 非交互类型: {question.q_type.name}")
                         if self._has_answer_widgets(container):
                             self.incomplete = True
+                        else:
+                            self.non_answer_containers += 1
                 else:
                     print(f"      容器 {idx} 解析为None")
                     if self._has_answer_widgets(container):
                         self.incomplete = True
+                    else:
+                        self.non_answer_containers += 1
 
             except StaleElementReferenceException:
                 raise
@@ -6031,6 +6048,8 @@ class AnswerExecutor:
         text = cls._button_text(element)
         if cls._is_navigation_button(element):
             return False
+        if any(k in text for k in ['已提交', '已完成', '提交成功', '保存成功', 'submitted']):
+            return False
         if any(k in text for k in ['提交', '确认提交', '完成', 'submit', 'done', 'finish']):
             return True
         tag_name = (element.tag_name or '').lower()
@@ -8615,6 +8634,7 @@ class VideoHandler(ContentHandler):
         self.current_video_url = ""
         self.skip_transcription = False
         self._transcript_lock = threading.Lock()
+        self._handling_popup = threading.Event()
 
     def _play_video_and_handle_popups(self, on_transcript: Optional[Callable[[str], None]] = None):
         if self.stop_requested.is_set():
@@ -8642,6 +8662,9 @@ class VideoHandler(ContentHandler):
             except Exception as exc:
                 print(f"      预取答案启动失败: {str(exc)[:60]}")
         self.stop_monitoring.clear()
+        handling_popup = getattr(self, '_handling_popup', None)
+        if handling_popup is not None:
+            handling_popup.clear()
         self.popup_monitor_thread = threading.Thread(
             target=self._monitor_popup_questions,
             daemon=True
@@ -8782,33 +8805,45 @@ class VideoHandler(ContentHandler):
                         continue
 
                     print("      [监视器]  检测到新弹窗题目！")
-                    question_data = self._parse_popup_question(popup)
+                    handling_popup = getattr(self, '_handling_popup', None)
+                    if handling_popup is not None:
+                        handling_popup.set()
+                    try:
+                        question_data = self._parse_popup_question(popup)
 
-                    if not question_data:
-                        print("      [监视器]  未能解析题目")
-                        continue
+                        if not question_data:
+                            print("      [监视器]  未能解析题目")
+                            continue
 
-                    if question_data['options'] and not self.video_transcript:
-                        self.ensure_transcript()
-                    if self.video_transcript and question_data['options']:
-                        answer = self._intelligent_select_answer(question_data)
-                    else:
-                        answer = self._random_select(question_data)
-                        print(f"      [监视器]  随机选择: {answer}")
+                        if question_data['options'] and not self.video_transcript:
+                            self.ensure_transcript()
+                        if self.video_transcript and question_data['options']:
+                            answer = self._intelligent_select_answer(question_data)
+                        else:
+                            answer = self._random_select(question_data)
+                            print(f"      [监视器]  随机选择: {answer}")
 
-                    if self.stop_requested.is_set() or self.stop_monitoring.is_set():
-                        break
-                    success = self._click_option(popup, answer)
-
-                    if success:
-                        print(f"      [监视器]  已选择: {answer}")
-                        processed_popups.add(popup_id)
-                        if self.stop_requested.wait(0.5) or self.stop_monitoring.is_set():
+                        if self.stop_requested.is_set() or self.stop_monitoring.is_set():
                             break
-                        self._click_submit_if_exists(popup)
-                        self.stop_requested.wait(1.0)
-                    else:
-                        print(f"      [监视器]  点击失败: {answer}")
+                        success = self._click_option(popup, answer)
+
+                        if success:
+                            print(f"      [监视器]  已选择: {answer}")
+                            processed_popups.add(popup_id)
+                            if self.stop_requested.wait(0.5) or self.stop_monitoring.is_set():
+                                break
+                            self._click_submit_if_exists(popup)
+                            self.stop_requested.wait(1.0)
+                            if not self.stop_requested.is_set() and not self.stop_monitoring.is_set():
+                                remaining = self._find_popup_question()
+                                if not (remaining and remaining.is_displayed()):
+                                    if self._resume_video_if_paused():
+                                        print("      [监视器]  弹窗处理后已恢复视频播放")
+                        else:
+                            print(f"      [监视器]  点击失败: {answer}")
+                    finally:
+                        if handling_popup is not None:
+                            handling_popup.clear()
 
             except Exception as e:
                 pass
@@ -8913,6 +8948,26 @@ class VideoHandler(ContentHandler):
             print(f"      [监视器] 解析失败: {str(e)[:50]}")
             return None
 
+    @staticmethod
+    def _extract_popup_answer(answer_text: str, valid_letters: List[str]) -> Optional[str]:
+        valid = [letter.upper() for letter in valid_letters if letter]
+        if not valid:
+            return None
+        text = (answer_text or "").strip().upper()
+        if not text:
+            return None
+        cleaned = re.sub(r'^[\s*`"\'()（）\[\]【】]+|[\s*`"\'()（）\[\]【】.。,:：!！]+$', '', text)
+        if cleaned in valid:
+            return cleaned
+        for pattern in (
+            r'(?:答案|选项|选择|CORRECT\s+ANSWER|FINAL\s+ANSWER|ANSWER)\s*(?:IS|为|是)?\s*[:：]?\s*[\(\[（【*]?\s*([A-H])\b',
+            r'\b([A-H])\b',
+        ):
+            matches = [m for m in re.findall(pattern, text) if m in valid]
+            if matches:
+                return matches[-1]
+        return None
+
     def _intelligent_select_answer(self, question_data: Dict) -> str:
         question = question_data['question']
         options = question_data['options']
@@ -8920,9 +8975,17 @@ class VideoHandler(ContentHandler):
         print(f"      [监视器]  分析问题: {question[:50]}...")
         prompt = self._build_analysis_prompt(question, options)
 
+        configured_model = getattr(self.config, 'model', '') or 'kimi-k2-turbo-preview'
+        configured_temp = getattr(self.config, 'temperature', 0.1)
+        try:
+            configured_max = int(getattr(self.config, 'max_tokens', 2048) or 2048)
+        except (TypeError, ValueError):
+            configured_max = 2048
+        popup_max_tokens = min(max(configured_max, 512), 2048) if configured_max > 0 else 1024
+
         try:
             response = self.analyzer_client.chat.completions.create(
-                model="kimi-k2-turbo-preview",
+                model=configured_model,
                 messages=[
                     {
                         "role": "system",
@@ -8930,17 +8993,17 @@ class VideoHandler(ContentHandler):
                     },
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
-                max_tokens=5
+                temperature=configured_temp,
+                max_tokens=popup_max_tokens
             )
 
-            answer_text = response.choices[0].message.content.strip().upper()
+            answer_text = (response.choices[0].message.content or "").strip().upper()
 
             valid_letters = [opt['letter'] for opt in options]
-            for letter in valid_letters:
-                if letter in answer_text:
-                    print(f"      [监视器]  AI选择: {letter}")
-                    return letter
+            letter = self._extract_popup_answer(answer_text, valid_letters)
+            if letter:
+                print(f"      [监视器]  AI选择: {letter}")
+                return letter
 
             return self._keyword_match(question, options)
 
@@ -9080,12 +9143,52 @@ class VideoHandler(ContentHandler):
                 continue
         return False
 
+    def _resume_video_if_paused(self, video=None) -> bool:
+        try:
+            target = video if video is not None else self.driver.find_element(By.TAG_NAME, 'video')
+            resumed = self.driver.execute_script("""
+                const v = arguments[0];
+                if (!v || v.ended || !v.paused) return false;
+                v.playbackRate = 2.0;
+                v.muted = true;
+                const p = v.play();
+                if (p && typeof p.catch === 'function') p.catch(() => {});
+                return true;
+            """, target)
+            return bool(resumed)
+        except Exception:
+            return False
+
     def _wait_for_video_complete(self, video, duration: float):
-        max_wait = duration / 2 + 30
+        max_wait = (duration / 2 + 30) if duration and duration > 0 else 60
         start_time = time.time()
         last_progress = 0
+        last_current = None
+        stall_since = None
+        popup_paused_total = 0.0
+        max_popup_wait = 300.0
+        popup_pause_start = None
+        handling_popup = getattr(self, '_handling_popup', None)
 
-        while time.time() - start_time < max_wait:
+        while True:
+            now = time.time()
+            if handling_popup is not None and handling_popup.is_set():
+                if popup_pause_start is None:
+                    popup_pause_start = now
+                if popup_paused_total + (now - popup_pause_start) < max_popup_wait:
+                    if self.stop_requested.is_set() or self.stop_monitoring.is_set():
+                        break
+                    if self.stop_requested.wait(0.5):
+                        break
+                    continue
+            elif popup_pause_start is not None:
+                popup_paused_total += min(now - popup_pause_start, max(0.0, max_popup_wait - popup_paused_total))
+                popup_pause_start = None
+                stall_since = now
+
+            if now - start_time - popup_paused_total >= max_wait:
+                break
+
             try:
                 if self.stop_requested.is_set() or self.stop_monitoring.is_set():
                     break
@@ -9097,7 +9200,31 @@ class VideoHandler(ContentHandler):
                     print(f"       视频播放完成")
                     return True
 
-                elapsed = int(time.time() - start_time)
+                if not duration or duration <= 0:
+                    try:
+                        detected = self.driver.execute_script("return arguments[0].duration;", video)
+                        if isinstance(detected, (int, float)) and detected > 0:
+                            duration = float(detected)
+                            max_wait = duration / 2 + 30
+                    except Exception:
+                        pass
+
+                if last_current is None or current != last_current:
+                    last_current = current
+                    stall_since = now
+                elif stall_since is not None and now - stall_since >= 3:
+                    if handling_popup is None or not handling_popup.is_set():
+                        popup = None
+                        try:
+                            popup = self._find_popup_question()
+                        except Exception:
+                            popup = None
+                        if not (popup and popup.is_displayed()):
+                            if self._resume_video_if_paused(video):
+                                print("      检测到视频已暂停，已尝试恢复播放")
+                    stall_since = now
+
+                elapsed = int(time.time() - start_time - popup_paused_total)
                 if elapsed - last_progress >= 5:
                     print(f"      播放进度: {int(current)}/{int(duration)} 秒")
                     last_progress = elapsed
@@ -9306,6 +9433,7 @@ class AISolver:
         self._publish_scope_url: str = ''
         self._retry_hint: str = ''
         self._last_question_types: set = set()
+        self._last_tab_outcome: str = ''
 
     def request_stop(self):
         self.stop_requested.set()
@@ -9316,8 +9444,22 @@ class AISolver:
     def _should_stop(self) -> bool:
         return self.stop_requested.is_set()
 
+    @staticmethod
+    def _is_fatal_driver_error(exc: Exception) -> bool:
+        if isinstance(exc, InvalidSessionIdException):
+            return True
+        if isinstance(exc, WebDriverException):
+            msg = str(exc).lower()
+            return any(token in msg for token in (
+                'invalid session id', 'no such window', 'target window already closed',
+                'disconnected', 'not connected to devtools', 'chrome not reachable',
+                'unable to connect', 'connection refused', 'session deleted',
+            ))
+        return False
+
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = "",
-                              on_task_done: Optional[Callable[[Dict], None]] = None):
+                              on_task_done: Optional[Callable[[Dict], None]] = None,
+                              on_task_skipped: Optional[Callable[[Dict], None]] = None):
         if not chapter_name:
             chapter_name = "selected_chapter"
 
@@ -9332,16 +9474,27 @@ class AISolver:
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
         course_home_url = course_home_url or self.driver.current_url
 
+        done_count = 0
+        skipped_tasks: List[str] = []
+        failed_tasks: List[str] = []
+        aborted = False
+
         for task_idx, tab in enumerate(selected_tabs):
             if self._should_stop():
                 print("  已请求停止，批量处理提前结束")
                 break
 
-            print(f"\n  [{task_idx + 1}/{len(selected_tabs)}] {tab.get('display') or tab.get('l1_title', '')}")
+            task_label = tab.get('display') or tab.get('l1_title', '')
+            print(f"\n  [{task_idx + 1}/{len(selected_tabs)}] {task_label}")
             try:
                 status = self._process_selected_tab(tab, task_idx, len(selected_tabs), chapter_name, course_home_url)
             except Exception as exc:
-                print(f"  该任务处理异常，已保留勾选，下次会从这里继续: {str(exc)[:120]}")
+                if AISolver._is_fatal_driver_error(exc):
+                    print(f"  浏览器连接异常，已中断批量处理；剩余勾选保持原样: {str(exc)[:120]}")
+                    logger.error(f"浏览器连接中断: {exc}", exc_info=True)
+                    aborted = True
+                    break
+                print(f"  该任务处理异常，已保留勾选，继续处理剩余任务: {str(exc)[:120]}")
                 logger.error(f"任务处理异常: {exc}", exc_info=True)
                 status = 'error'
 
@@ -9376,6 +9529,10 @@ class AISolver:
                             tab, task_idx, len(selected_tabs), chapter_name, course_home_url)
                     except Exception as exc:
                         logger.error(f"重做任务异常: {exc}", exc_info=True)
+                        if AISolver._is_fatal_driver_error(exc):
+                            aborted = True
+                            retry_status = 'error'
+                            break
                         retry_status = 'error'
                     if retry_status != 'done':
                         break
@@ -9385,13 +9542,20 @@ class AISolver:
                     print(f"  重做未完成（{retry_status}），保留任务状态，不标记完成")
                     logger.warning("分数异常重做未完成 %s: status=%s",
                                    tab.get('display'), retry_status)
+                    if aborted:
+                        print("  浏览器连接异常，已中断批量处理；剩余勾选保持原样")
+                        break
+                    if retry_status == 'stopped':
+                        break
                     if retry_status == 'error':
                         self._retry_hint = ''
                         tab['status'] = 'error'
                         tab['status_text'] = '重做失败'
                         tab['score_abnormal'] = True
-                        break
+                        failed_tasks.append(task_label)
+                        print("  重做未完成，已保留勾选，继续处理剩余任务")
                 else:
+                    done_count += 1
                     tab['status'] = 'done'
                     tab['status_text'] = '已完成'
                     tab['session_score'] = score
@@ -9410,9 +9574,22 @@ class AISolver:
                             on_task_done(tab)
                         except Exception as exc:
                             print(f"  完成回调异常: {str(exc)[:60]}")
-            elif status == 'error':
-                print("  已中断批量处理；剩余勾选保持原样，可直接从这里继续")
+            elif status == 'skipped_no_answer':
+                skipped_tasks.append(task_label)
+                print("  已跳过无需作答页面并取消勾选，继续处理剩余任务")
+                if on_task_skipped:
+                    try:
+                        on_task_skipped(tab)
+                    except Exception as exc:
+                        print(f"  跳过回调异常: {str(exc)[:60]}")
+            elif status == 'skipped':
+                skipped_tasks.append(task_label)
+                print("  已跳过当前任务，继续处理剩余任务")
+            elif status == 'stopped':
                 break
+            elif status == 'error':
+                failed_tasks.append(task_label)
+                print("  该任务未确认完成，已保留勾选，继续处理剩余任务")
 
             if self.stop_requested.wait(0.5):
                 break
@@ -9420,7 +9597,19 @@ class AISolver:
         self._release_transcriber()
 
         print(f"\n{'=' * 60}")
-        print("批量处理已停止" if self._should_stop() else f"全部 {len(selected_tabs)} 个任务处理完毕")
+        if self._should_stop():
+            print("批量处理已停止")
+        elif aborted:
+            print("已中断批量处理；剩余勾选保持原样，可直接从这里继续")
+        else:
+            print(f"全部 {len(selected_tabs)} 个任务处理完毕"
+                  f"（完成 {done_count} / 跳过 {len(skipped_tasks)} / 未确认 {len(failed_tasks)}）")
+        if skipped_tasks:
+            print(f"  已跳过 {len(skipped_tasks)} 项: {'；'.join(skipped_tasks[:8])}"
+                  f"{' …' if len(skipped_tasks) > 8 else ''}")
+        if failed_tasks:
+            print(f"  未确认完成 {len(failed_tasks)} 项（已保留勾选）: {'；'.join(failed_tasks[:8])}"
+                  f"{' …' if len(failed_tasks) > 8 else ''}")
         print(f"{'=' * 60}")
 
     def _score_is_abnormal(self, score: float) -> bool:
@@ -9547,7 +9736,11 @@ class AISolver:
             if self.stop_requested.wait(3):
                 return 'stopped'
             success = self._process_tab_with_accumulation(tab_name, task_idx, 0)
-            return 'stopped' if self._should_stop() else ('done' if success else 'error')
+            if self._should_stop():
+                return 'stopped'
+            if success:
+                return 'done'
+            return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
 
         l1_idx = tab.get('l1_idx', 0)
         l2_idx = tab.get('l2_idx', -1)
@@ -9569,7 +9762,11 @@ class AISolver:
             return 'stopped'
         if l2_idx < 0:
             success = self._process_tab_with_accumulation(l1_tab['title'], l1_idx, 0)
-            return 'stopped' if self._should_stop() else ('done' if success else 'error')
+            if self._should_stop():
+                return 'stopped'
+            if success:
+                return 'done'
+            return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
 
         level2_tabs = self._get_level2_tabs()
         if l2_idx >= len(level2_tabs):
@@ -9588,7 +9785,11 @@ class AISolver:
             return 'stopped'
         combined_name = f"{l1_tab['title']}_{l2_tab['title']}"
         success = self._process_tab_with_accumulation(combined_name, l1_idx, l2_idx)
-        return 'stopped' if self._should_stop() else ('done' if success else 'error')
+        if self._should_stop():
+            return 'stopped'
+        if success:
+            return 'done'
+        return 'skipped_no_answer' if getattr(self, '_last_tab_outcome', '') == 'skipped' else 'error'
 
     def _answer_chunked_fill(self, q: Question, directions: str = "", chunk_size: int = 8) -> bool:
         total = len(q.inputs)
@@ -10283,6 +10484,7 @@ class AISolver:
     def _process_current_tab_content(self, chapter_name: str, tab_name: str, l1_idx: int, l2_idx: int,
                                      prefetch: Optional[AnswerPrefetch] = None,
                                      prefetch_signature: str = "") -> bool:
+        self._last_tab_outcome = ''
         if self._should_stop():
             return False
         direction_part = self._generate_content_hash_from_direction()
@@ -10399,6 +10601,11 @@ class AISolver:
 
             record_questions = [q for q in normal_questions
                                 if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD)]
+            all_self_submitting = (
+                bool(record_questions)
+                and len(record_questions) == total_questions
+                and all(q.is_self_submitting_record for q in record_questions)
+            )
             record_answered = 0
             if record_questions:
                 print(f"    本页 {len(record_questions)} 道录音题，开始逐条录音...")
@@ -10556,20 +10763,32 @@ class AISolver:
                 return False
             if total_questions and self.executor.submit():
                 if not self._wait_for_submit_complete():
+                    self._last_tab_outcome = 'error'
                     return False
                 if self._should_stop():
                     return False
                 print(f"    已自动提交")
+            elif total_questions and all_self_submitting:
+                print(f"    本页录音已逐条上传/评分，无需点击页面提交按钮")
             elif total_questions:
                 print(f"    没找到可点击的提交按钮，请手动提交")
+                self._last_tab_outcome = 'error'
                 return False
             elif not special_handled:
+                non_answer = getattr(self.parser, 'non_answer_containers', 0)
+                if (isinstance(non_answer, int) and non_answer > 0
+                        and not self.parser.incomplete and not self._page_needs_answer()):
+                    print("    该页无需作答（未检测到作答控件），跳过并继续")
+                    self._last_tab_outcome = 'skipped'
+                    return False
                 print("    未确认有可处理内容，保留任务为未完成")
+                self._last_tab_outcome = 'error'
                 return False
             print(f"    没有更多题目了")
             break
         print(f"    总共回答 {total_answered} 题")
         self.processed_hashes.add(content_hash)
+        self._last_tab_outcome = 'done'
         return True
 
     def _is_publish_page(self) -> bool:
@@ -11970,7 +12189,7 @@ class AISolver:
         except Exception:
             return False
 
-    def _wait_for_submit_complete(self, timeout: int = 8) -> bool:
+    def _wait_for_submit_complete(self, timeout: int = 18) -> bool:
         if self.stop_requested.wait(1.5):
             return False
         start = time.time()
@@ -11984,7 +12203,7 @@ class AISolver:
                     print(f"   提交按钮已消失，提交完成")
                     return True
 
-                body_text = self.driver.find_element(By.TAG_NAME, 'body').text[:500].lower()
+                body_text = (self.driver.find_element(By.TAG_NAME, 'body').text or '').lower()
                 if re.search(r'(?<!未)(?:提交成功|保存成功|已提交)|'
                              r'\b(?:successfully\s+(?:submitted|saved)|'
                              r'(?:submitted|saved)\s+successfully)\b', body_text):
