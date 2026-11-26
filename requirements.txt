@@ -3,5 +3,7 @@ openai>=1.10.0
 openai-whisper>=20231117
 # 录音题（Exercise 2 主观题）TTS 主后端；没装会回退到 Windows 自带 System.Speech
 edge-tts>=7.3.1
+# 官方答案接口的答案解密（缺依赖时该功能自动降级为 AI 作答）
+pycryptodome>=3.20
 # Native Qt Quick interface. Essentials includes QML/Quick/Controls without WebEngine.
 PySide6-Essentials>=6.8,<7

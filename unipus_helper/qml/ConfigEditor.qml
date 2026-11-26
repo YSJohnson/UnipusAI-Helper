@@ -22,6 +22,7 @@ ApplicationWindow {
     function saveSettings() {
         let values = {"token_full": tokenInput.text, "debug_mode": debugCheck.checked,
                       "screenshot": screenshotCheck.checked,
+                      "answer_api_enabled": answerApiCheck.checked,
                       "skip_record_mode": skipRecordCombo.currentValue || "off"}
         for (let i = 0; i < fields.count; ++i) {
             let row = fields.itemAt(i)
@@ -45,7 +46,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             spacing: 5
             UiText { text: "配置"; font.pixelSize: 26; font.weight: Font.DemiBold }
-            UiText { text: configEditor.firstRun ? "请先填写账号和模型必填项" : "设置账号、模型和浏览器，保存后重新启动生效"; color: Theme.muted; font.pixelSize: 13 }
+            UiText { text: configEditor.firstRun ? "请先填写账号和密码（大模型接口为可选项）" : "设置账号、模型和浏览器，保存后重新启动生效"; color: Theme.muted; font.pixelSize: 13 }
         }
         ScrollView {
             id: scroll
@@ -72,9 +73,9 @@ ApplicationWindow {
                                 { key: "username", label: "账号 *", hint: "输入 U校园AI版账号" },
                                 { key: "password", label: "密码 *", hint: "输入 U校园AI版密码" },
                                 { key: "url", label: "登录地址", hint: "U校园登录地址" },
-                                { key: "api_key", label: "API Key *", hint: "输入 API Key" },
-                                { key: "base_url", label: "API 地址 *", hint: "兼容 OpenAI 的接口地址" },
-                                { key: "model", label: "模型名称 *", hint: "输入模型名称" },
+                                { key: "api_key", label: "API Key", hint: "可选，留空时仅用官方答案（需 AI 的题将跳过）" },
+                                { key: "base_url", label: "API 地址", hint: "可选，兼容 OpenAI 的接口地址" },
+                                { key: "model", label: "模型名称", hint: "可选，对应接口的模型名称" },
                                 { key: "max_tokens", label: "最大 Token 数", hint: "32768" },
                                 { key: "temperature", label: "温度（0–2）", hint: "0.3" },
                                 { key: "record_score_threshold", label: "录音、朗读达标分", hint: "70（0–100）" },
@@ -218,6 +219,15 @@ ApplicationWindow {
                                 Layout.fillWidth: true; spacing: 4
                                 UiCheck { id: screenshotCheck; objectName: "field_screenshot"; text: "题目截图发给模型（需支持识图）"; checked: !!configEditor.values.screenshot; Layout.fillWidth: true }
                                 UiText { text: "开启后发送练习截图，消耗较多 token。依赖图片的口语题需要使用支持识图的模型。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 16
+                            UiText { Layout.preferredWidth: 150; text: "官方答案接口"; color: Theme.secondary; font.pixelSize: 13 }
+                            ColumnLayout {
+                                Layout.fillWidth: true; spacing: 4
+                                UiCheck { id: answerApiCheck; objectName: "field_answer_api_enabled"; text: "启用官方答案接口（实验性）"; checked: configEditor.values.answer_api_enabled !== false; Layout.fillWidth: true }
+                                UiText { text: "默认开启。客观题优先使用平台官方答案，主观题仍由 AI 作答，未命中或异常时自动回落。可与「目标正确率」配合使用，控分更准确。"; color: Theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                             }
                         }
                     }

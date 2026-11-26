@@ -42,7 +42,22 @@ DEFAULT_CONFIG = {
     "tts_proxy": "",
     "browser": "edge",
     "screenshot": False,
+    "answer_api_enabled": True,
 }
+
+
+def config_bool(value, default=False):
+    """布尔配置归一化：兼容 JSON 布尔、0/1 与 "false"/"off" 这类字符串。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("", "none", "null"):
+        return default
+    return text not in ("0", "false", "no", "off", "disabled", "disable")
 
 
 def load_config(path):
@@ -94,16 +109,23 @@ class ConfigEditor(QObject):
         data = dict(self.cfg)
         data.update(values)
         for key in DEFAULT_CONFIG:
-            if key in ("debug_mode", "screenshot"):
+            if key in ("debug_mode", "screenshot", "answer_api_enabled"):
                 continue
             if key in data:
                 data[key] = str(data[key]).strip()
-        missing = [label for key, label in (("username", "账号"), ("password", "密码"), ("api_key", "API Key"), ("base_url", "API 地址"), ("model", "模型名称")) if not data.get(key)]
+        missing = [label for key, label in (("username", "账号"), ("password", "密码")) if not data.get(key)]
         if missing:
             self.saved.emit("请填写必填项：" + "、".join(missing), False)
             return
+        ai_fields = (("api_key", "API Key"), ("base_url", "API 地址"), ("model", "模型名称"))
+        filled_ai = [key for key, _ in ai_fields if data.get(key)]
+        if 0 < len(filled_ai) < len(ai_fields):
+            missing_ai = [label for key, label in ai_fields if not data.get(key)]
+            self.saved.emit("如需启用 AI，请补全：" + "、".join(missing_ai) + "（或全部留空仅用官方答案）", False)
+            return
         data["debug_mode"] = bool(data.get("debug_mode", False))
         data["screenshot"] = bool(data.get("screenshot", False))
+        data["answer_api_enabled"] = config_bool(data.get("answer_api_enabled", True), True)
         try:
             data["max_tokens"] = int(data["max_tokens"])
         except (ValueError, TypeError):
@@ -342,6 +364,10 @@ class NativeBridge(QObject):
     @Slot()
     def restartBrowser(self):
         self._result(self.controller.restart_browser())
+
+    @Slot()
+    def testApi(self):
+        self._result(self.controller.test_api())
 
     @Slot()
     def copyLogs(self):

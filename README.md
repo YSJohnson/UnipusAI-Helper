@@ -9,10 +9,9 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.16-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.17-2561C7">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3776AB">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-555555">
-  <img alt="GUI" src="https://img.shields.io/badge/gui-PySide6%20%2F%20QML-2561C7">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Edge%20%7C%20Chrome-43B02A">
   <img alt="AI" src="https://img.shields.io/badge/api-OpenAI%20Compatible-111111">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPLv3-blue.svg"></a>
@@ -32,8 +31,9 @@
 
 ## 特性
 
-- **原生桌面工作台**：基于 PySide6 / Qt Quick（QML），集中查看课程进度、任务状态、得分与运行日志，内置配置编辑器、API 连通性检测与一键重启浏览器。
+- **原生桌面工作台**：基于 PySide6 / Qt Quick（QML），集中查看课程进度、任务状态、得分与运行日志，内置配置编辑器、手动 API 连通性检测与一键重启浏览器。
 - **双代播放器适配**：同时兼容旧版（`course-v2`）与新版 ipublish（`course-v3`）教材页面，支持自动提交与低于达标分自动重做。
+- **官方答案接口（实验性）**：默认开启。客观题优先获取并填写平台官方答案，命中时跳过原文读取、音频转写与 AI 调用，速度更快且支持零 AI 配置运行；主观题及未命中题目自动回落到 AI（未配置 AI 时自动跳过，不中断整批）。
 - **音视频转写与口语录音**：通过本地 Whisper 转写听力与视频材料作为答题上下文；跟读题借用题目原声虚拟麦克风注入，主观口语题支持 AI 写稿 + TTS 合成语音作答；可选开启识图模式处理带图题目。
 - **灵活调度与任务筛选**：支持扫描全部单元、扫描当前单元或直接处理当前页面；默认勾选未完成必修，支持关键词搜索、状态筛选与排除不计分任务，并提供实验性的三档跟读/录音自动跳过与客观题目标正确率控制。
 - **断点续跑**：每完成一项自动取消勾选并更新状态；手动停止后保留剩余选择，再次开始即可继续处理。
@@ -63,7 +63,7 @@
 - **Python**：3.9 及以上（推荐 3.10–3.13）。
 - **浏览器**：Microsoft Edge 或 Google Chrome。
 - **FFmpeg**：用于本地音频转写。Windows 首次运行环境检查时可自动下载安装（约 130 MB）；macOS 需通过 Homebrew 安装。
-- **大模型 API**：任意 OpenAI 兼容接口。
+- **大模型 API（可选）**：任意 OpenAI 兼容接口；留空时仍可通过官方答案接口完成客观题，需要 AI 的主观题或未命中题目会自动跳过。
 
 
 ### Windows
@@ -144,7 +144,7 @@ git pull
 
 项目使用根目录下的 `config.json` 保存本地配置（已加入 `.gitignore`，请勿泄露或提交到公共仓库）。
 
-- **首次启动**：若不存在 `config.json`，程序会自动弹出图形化配置窗口。填写 5 个必填项并保存后继续启动；关闭窗口则退出。
+- **首次启动**：若不存在 `config.json`，程序会自动弹出图形化配置窗口。填写账号和密码并保存后即可启动（大模型接口可按需选填）；关闭窗口则退出。
 - **后续修改**：在工作台左侧栏点击 **「配置」** 即可随时修改，保存后**重新启动程序生效**。
 
 完整配置模板：
@@ -169,16 +169,24 @@ git pull
   "tts_voice": "",
   "tts_proxy": "",
   "screenshot": false,
+  "answer_api_enabled": true,
   "browser": "edge"
 }
 ```
 
-### 必填配置（5 项）
+### 必填配置（2 项）
 
 | 字段 | 说明 |
 | --- | --- |
 | `username` | U 校园 AI 版账号，用于自动登录 |
 | `password` | U 校园 AI 版密码，用于自动登录 |
+
+### 大模型 API 配置（可选）
+
+仅完成官方答案接口覆盖的客观题时可全部留空；若需作答主观题、口语写稿或在官方答案未命中时自动回落 AI，请完整填写以下 3 项：
+
+| 字段 | 说明 |
+| --- | --- |
 | `api_key` | 大模型接口密钥 |
 | `base_url` | OpenAI 兼容接口地址，例如 `https://api.deepseek.com/v1`、`https://api.siliconflow.cn/v1`、`https://api.moonshot.cn/v1` |
 | `model` | 对应接口支持的模型名称 |
@@ -193,7 +201,7 @@ git pull
 | `temperature` | `0.3` | 生成温度（`0–2`），保持默认即可 |
 | `record_score_threshold` | `70` | 录音、朗读及 My Voice 题型的自动重做达标分（`0–100`）；低于该分数时自动重做 |
 | `score_threshold` | `80` | 其余题型的自动重做达标分（`0–100`）；低于该分数时自动重做 |
-| `target_accuracy` | `100` | **[实验性]** 客观题目标正确率：`100` 表示关闭；可填单值（如 `85`）或区间（如 `"80-90"`）。开启后 AI 正常求解并按题组配额对客观题做后处理控分，同时自动联动放宽重做下限并对新版播放器守住 60% 最低提交线 |
+| `target_accuracy` | `100` | **[实验性]** 客观题目标正确率：`100` 表示关闭；可填单值（如 `85`）或区间（如 `"80-90"`）。开启后以官方答案或 AI 解为基准按题组配额做后处理控分，同时自动联动放宽重做下限并对新版播放器守住 60% 最低提交线 |
 | `skip_record_mode` | `"off"` | **[实验性]** 自动跳过跟读/录音任务：`off`（不跳过）/ `follow_aloud`（仅跳过词汇/句子/段落跟读、角色扮演与配音，保留自由口语）/ `all`（跳过全部录音题）；跳过的任务取消本次勾选并保留未完成状态 |
 | `browser` | `"edge"` | 浏览器后端：`edge` / `chrome`。环境检查、driver 启动与缓存目录均跟随此值；Chrome 仅检测提示，需自行安装 |
 | `screenshot` | `false` | 是否将题目截图发送给模型；带图口语 / 听力题需开启并搭配支持识图的模型（会增加 token 消耗） |
@@ -201,6 +209,7 @@ git pull
 | `tts_voice` | `""` | TTS 音色名称；留空使用默认英语音色（`en-US-AriaNeural` 或系统英语语音） |
 | `tts_proxy` | `""` | `edge-tts` 需要代理时填写，例如 `http://127.0.0.1:7890`；离线 `sapi` 无需配置 |
 | `token_full` | `""` | 认证兜底；支持旧版完整 `__token` JSON 或 U 校园 5.0 的 JWT，正常登录时留空 |
+| `answer_api_enabled` | `true` | **[实验性]** 是否启用官方答案接口；命中时客观题直接使用平台答案，置为 `false` 即纯 AI 作答 |
 | `debug_mode` | `false` | 是否开启调试日志 |
 
 </details>
@@ -211,7 +220,7 @@ git pull
 
 1. 完成基础配置并启动主程序，等待环境检查通过。
 2. 程序会自动拉起浏览器并执行登录流程；如遇到验证码或人机验证，请在浏览器中手动完成。
-3. 工作台右上角显示 **「就绪」**（同时展示模型 API 连通状态）即表示登录成功。
+3. 工作台右上角显示 **「就绪」** 即表示登录成功；若配置了大模型接口，可在右上角手动点击 **「测试接口」** 检查连通性。
 
 ![工作台就绪状态](docs/images/2.png)
 
@@ -239,7 +248,7 @@ git pull
 
 U 校园覆盖的教材版本较多，不同课程的页面结构与题型差异较大，适配仍在持续完善中。遇到跳过、填不进去、提交失败或程序报错时，欢迎通过 Issue 反馈，也欢迎提交 PR 一起完善。
 
-**为什么个别题目分数偏低？**
+**为什么 AI 做的个别题目分数偏低？**
 
 部分题目强依赖前文、图片或听力材料等上下文；若某本教材尚未完全适配，可能存在上下文未完整提取的情况，模型只能仅凭题干作答。你可以先检查是否需要开启 `screenshot`（带图题）或调整 `score_threshold` / `record_score_threshold`，也可以在 Issue 中附上教材名称、单元任务点、题型截图和运行日志，方便定位修复。
 
@@ -248,8 +257,12 @@ U 校园覆盖的教材版本较多，不同课程的页面结构与题型差异
 > [!NOTE]
 > 以下两项配置目前为**实验性功能**（默认关闭，尚未覆盖所有教材实机验证），如在具体课程中遇到异常或误判，欢迎携带日志提交 Issue 反馈。
 
-- **目标正确率（`target_accuracy`）**：默认 `100`（关闭），可在「配置」窗口或 `config.json` 中设为单值（如 `85`）或区间（如 `80-90`）。该功能**不是**让大模型自己故意答错，而是让 AI 正常求出最优答案后，程序在填写前按当前页面/题组的客观小题数抽样配额，将抽中题目的答案改为合法的错误项（覆盖单选、多选、判断、排序、各类匹配以及下拉/选词/普通填空；主观写作、自评量表与录音题不扰动）。开启后会自动联动放宽客观题重做下限（`min(score_threshold, 目标下限 - 10)`），避免控分后又被低分重做刷回 100%；对新版播放器（`course-v3`）目标下限 ≥ 60 时会自动守住 60% 最低提交线。
+- **目标正确率（`target_accuracy`）**：默认 `100`（关闭），可在「配置」窗口或 `config.json` 中设为单值（如 `85`）或区间（如 `80-90`）。该功能**不是**让大模型自己故意答错，而是先通过官方答案接口或 AI 获取正确解后，程序在填写前按当前页面/题组的客观小题数抽样配额，将抽中题目的答案改为合法的错误项（覆盖单选、多选、判断、排序、各类匹配以及下拉/选词/普通填空；主观写作、自评量表与录音题不扰动）。开启后会自动联动放宽客观题重做下限（`min(score_threshold, 目标下限 - 10)`），避免控分后又被低分重做刷回 100%；对新版播放器（`course-v3`）目标下限 ≥ 60 时会自动守住 60% 最低提交线。与官方答案接口配合使用时，以平台官方答案为基准抽样，正确率控制更准确。
 - **自动跳过跟读/录音（`skip_record_mode`）**：默认 `off`（不跳过），可设为 `follow_aloud`（仅跳过词汇/句子/段落跟读、角色扮演与视频配音，保留自由口语录音）或 `all`（跳过全部口语/录音题）。纯跟读任务跳过后会取消本次勾选并保留“未完成”状态，继续处理剩余任务；混合页面会跳过其中的跟读小题并继续提交其他题型。
+
+**官方答案接口取不到答案、不配置大模型 API，或者想只用大模型作答怎么办？**
+
+接口仅覆盖客观题（选择、判断、填空、排序、匹配、下拉），主观题仍需 AI。遇到未命中、网络异常或缺少 `pycryptodome` 依赖时：已配置大模型会自动回落到 AI 作答；未配置大模型则自动跳过该任务（保留未完成状态）并继续处理后续任务，不会中断整批。如需完全使用纯 AI 作答，在「配置」窗口取消勾选 **「启用官方答案接口（实验性）」**，或在 `config.json` 中将 `answer_api_enabled` 设为 `false` 后重启即可。
 
 **带图口语题或听力图片题答不出来怎么办？**
 
@@ -287,6 +300,7 @@ UnipusAI-Helper/
 ├── LICENSE                     # AGPLv3 协议
 ├── unipus_helper/              # 业务模块与原生界面
 │   ├── accuracy_control.py     # 客观题目标正确率配额与后处理扰动
+│   ├── answer_api.py           # 官方答案接口获取与本地缓存
 │   ├── audio_recognizer.py     # 本地 Whisper 音频转写
 │   ├── browser.py              # Edge / Chrome 后端检测与启动
 │   ├── environment_checker.py  # 运行环境与 FFmpeg 检查
@@ -305,8 +319,9 @@ UnipusAI-Helper/
 
 ## 更新日志
 
-近期版本摘要：
+近期版本摘要（完整记录见 [CHANGELOG.md](CHANGELOG.md)）：
 
+- **v3.9.17（2026-11-26）**：新增实验性官方答案接口（`answer_api_enabled`，默认开启），客观题优先直填平台答案并跳过不必要的原文读取与音频转写、支持与 `target_accuracy` 配合控分；大模型 API 改为可选（未配置时需 AI 任务自动跳过），右上角模型检测改为手动触发。
 - **v3.9.16（2026-11-25）**：新增客观题目标正确率控制（`target_accuracy`）与三档自动跳过跟读/录音任务（`skip_record_mode`）两项实验性功能（issue #66）。
 - **v3.9.15（2026-11-25）**：修复示例页跳过与批量中断、自提交录音页无提交按钮误判、提交确认超时及视频弹窗续播与模型硬编码问题（issue #71）。
 - **v3.9.14（2026-11-24）**：修复搭配填空空位错位、首字母前缀扣除与 Learning / Practicing 学习材料读取（issue #68）。
@@ -317,6 +332,7 @@ UnipusAI-Helper/
 
 - 感谢开源社区提供的优秀工具与生态。
 - 感谢 [UnipusAI](https://github.com/Zzj-klwgxdz/UnipusAI) 项目作者 [Zzj-klwgxdz](https://github.com/Zzj-klwgxdz)，本项目早期借鉴了其解析器框架思路与登录认证状态处理机制。
+- 感谢 [MyUserScripts](https://github.com/SSmJaE/MyUserScripts)（[SSmJaE](https://github.com/SSmJaE)）与 [UnipusHelperPro](https://github.com/Duster-Cule/UnipusHelperPro)（[Duster-Cule](https://github.com/Duster-Cule)，MIT License © 2025 Duster-Cule），本项目官方答案接口的解密与认证方案参考了上述开源项目的公开思路。
 - 感谢 [TG 小树屋](https://t.me/xiaoshuwu/9057) 对本项目的推荐。
 - 感谢所有提交 Pull Request、反馈未适配教材与协助复现验证的社区贡献者。
 

@@ -54,10 +54,34 @@ class WorkbenchController(CourseCatalogMixin):
         self._exclude_ungraded = False
         self._completed = 0
         self._total = 0
-        self._api_status, self._api_ok, self._api_fail = "正在检测接口", False, False
+        self._api_testing = False
+        self._api_status, self._api_ok, self._api_fail = (
+            ("未检测", False, False) if self._has_ai_config() else ("未配置 API", False, False)
+        )
         self._log_worker = threading.Thread(target=self._collect_logs, daemon=True, name="workbench-logs")
         self._log_worker.start()
-        threading.Thread(target=self._probe_api, daemon=True, name="workbench-api").start()
+
+    def _has_ai_config(self):
+        config = getattr(self.bot, "config", None)
+        base = str(getattr(config, "base_url", "") or "").strip()
+        key = str(getattr(config, "api_key", "") or "").strip()
+        model = str(getattr(config, "model", "") or "").strip()
+        return bool(base and key and model)
+
+    def test_api(self):
+        with self._lock:
+            if self._closed.is_set():
+                return {"ok": False, "error": "工作台已关闭。"}
+            if self._api_testing:
+                return {"ok": False, "error": "正在检测接口，请稍候。"}
+            if not self._has_ai_config():
+                self._api_status, self._api_ok, self._api_fail = "未配置 API", False, False
+                self._add_log("模型接口检测：未配置 API，跳过检测。", "info")
+                return {"ok": True}
+            self._api_testing = True
+            self._api_status, self._api_ok, self._api_fail = "检测中…", False, False
+            threading.Thread(target=self._probe_api, daemon=True, name="workbench-api").start()
+        return {"ok": True}
 
     def _api_request(self, config):
         base = str(getattr(config, "base_url", "") or "").rstrip("/")
@@ -76,25 +100,27 @@ class WorkbenchController(CourseCatalogMixin):
         return (time.monotonic() - started) * 1000
 
     def _probe_api(self):
-        config = getattr(self.bot, "config", None)
-        base = str(getattr(config, "base_url", "") or "").strip()
-        key = str(getattr(config, "api_key", "") or "").strip()
-        if not base or not key:
-            status, ok, fail = "未配置 API", False, False
-        else:
-            probe = getattr(self, "_api_request", None)
-            try:
-                elapsed = probe(config) if probe else 0
-                status, ok, fail = "接口正常 · %.1f s" % (elapsed / 1000), True, False
-            except urllib.error.HTTPError as exc:
-                hidden = exc.code in (401, 403)
-                status, ok, fail = ("API Key 无效 · %d" % exc.code if hidden
-                                    else "接口异常 · %d" % exc.code), False, True
-            except Exception as exc:  # noqa: BLE001
-                status, ok, fail = "接口连不上 · %s" % type(exc).__name__, False, True
-        with self._lock:
-            self._api_status, self._api_ok, self._api_fail = status, ok, fail
-            self._add_log("模型接口检测：%s" % status, "success" if ok else "warning" if fail else "info")
+        try:
+            config = getattr(self.bot, "config", None)
+            if not self._has_ai_config():
+                status, ok, fail = "未配置 API", False, False
+            else:
+                probe = getattr(self, "_api_request", None)
+                try:
+                    elapsed = probe(config) if probe else 0
+                    status, ok, fail = "接口正常 · %.1f s" % (elapsed / 1000), True, False
+                except urllib.error.HTTPError as exc:
+                    hidden = exc.code in (401, 403)
+                    status, ok, fail = ("API Key 无效 · %d" % exc.code if hidden
+                                        else "接口异常 · %d" % exc.code), False, True
+                except Exception as exc:  # noqa: BLE001
+                    status, ok, fail = "接口连不上 · %s" % type(exc).__name__, False, True
+            with self._lock:
+                self._api_status, self._api_ok, self._api_fail = status, ok, fail
+                self._add_log("模型接口检测：%s" % status, "success" if ok else "warning" if fail else "info")
+        finally:
+            with self._lock:
+                self._api_testing = False
 
     @staticmethod
     def after(ms, callback):
@@ -159,6 +185,8 @@ class WorkbenchController(CourseCatalogMixin):
                 "excludeUngraded": self._exclude_ungraded, "debug": bool(self._globals.get("DEBUG_MODE")),
                 "tasks": tasks, "logs": self._logs, "account": account,
                 "model": getattr(config, "model", "") or "未配置",
+                "apiConfigured": self._has_ai_config(),
+                "apiTesting": self._api_testing,
                 "apiStatus": self._api_status, "apiOk": self._api_ok, "apiFail": self._api_fail,
                 "progress": {"completed": self._completed, "total": self._total},
             })
@@ -274,6 +302,8 @@ class WorkbenchController(CourseCatalogMixin):
             self._completed += 1
         if task.get("skip_reason") == "record":
             self._add_log(f"已跳过（跟读/录音任务，保留未完成）：{task.get('l1_title', '')}", "warning")
+        elif task.get("skip_reason") == "no_ai":
+            self._add_log(f"已跳过（未配置 AI 接口，保留未完成）：{task.get('l1_title', '')}", "warning")
         else:
             self._add_log(f"已跳过（无需作答）：{task.get('l1_title', '')}", "info")
 

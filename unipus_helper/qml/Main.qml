@@ -178,8 +178,10 @@ ApplicationWindow {
                     objectName: "accountDetails"; Layout.fillWidth: false; Layout.preferredWidth: window.width < 1100 ? 296 : 352
                     Layout.minimumWidth: 296; Layout.maximumWidth: Layout.preferredWidth
                     account: window.appState.account; model: window.appState.model; status: window.appState.status
+                    apiConfigured: !!window.appState.apiConfigured; apiTesting: !!window.appState.apiTesting
                     apiStatus: window.appState.apiStatus || ""; apiOk: !!window.appState.apiOk; apiFail: !!window.appState.apiFail
                     busy: window.busy; ready: !!window.appState.ready; hasError: !!window.appState.error
+                    onTestApiRequested: workbench.testApi()
                 }
             }
             CourseOverview {

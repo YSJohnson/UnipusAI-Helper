@@ -73,6 +73,7 @@ ensure_writable_temp_dir()
 
 from unipus_helper.accuracy_control import (AccuracyController, effective_score_threshold,
                                             parse_target_accuracy)
+from unipus_helper.answer_api import OfficialAnswerProvider
 from unipus_helper.audio_recognizer import AudioTranscriber
 from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser, quit_driver
 from unipus_helper.environment_checker import EnvironmentChecker
@@ -95,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.16"
+APP_VERSION = "3.9.17"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -175,6 +176,20 @@ def setup_logging():
     return logger
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """兼容 JSON 布尔与字符串布尔的开关解析。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("", "none", "null"):
+        return default
+    return text not in ("0", "false", "no", "off", "disabled", "disable")
+
+
 @dataclass(frozen=True)
 class Config:
     url: str
@@ -197,6 +212,20 @@ class Config:
     target_accuracy_min: float = 100.0
     target_accuracy_max: float = 100.0
     skip_record_mode: str = "off"
+    answer_api_enabled: bool = True
+    answer_api_cache: bool = True
+    answer_api_open_id: str = ""
+    answer_api_secret: str = ""
+    answer_api_host: str = ""
+    answer_api_timeout: float = 30.0
+
+    @property
+    def ai_configured(self) -> bool:
+        return bool(
+            (self.api_key or "").strip()
+            and (self.base_url or "").strip()
+            and (self.model or "").strip()
+        )
 
     @classmethod
     def from_json(cls, path: str = "config.json") -> "Config":
@@ -211,16 +240,21 @@ class Config:
                 raise ValueError(f"{key} 必须是 0–100 之间的分数") from None
         acc_low, acc_high, acc_text = parse_target_accuracy(data.get("target_accuracy", 100))
         skip_record_mode = normalize_skip_record_mode(data.get("skip_record_mode", "off"))
+        try:
+            answer_api_timeout = float(data.get("answer_api_timeout") or 30)
+        except (ValueError, TypeError):
+            answer_api_timeout = 30.0
+        answer_api_timeout = min(120.0, max(5.0, answer_api_timeout))
         global DEBUG_MODE
         DEBUG_MODE = data.get("debug_mode", False)
         return cls(
             url=data.get("url") or DEFAULT_LOGIN_URL,
-            username=data.get("username"),
-            password=data.get("password"),
+            username=(data.get("username") or "").strip(),
+            password=data.get("password") or "",
             token_full=data.get("token_full") or "",
-            api_key=data.get("api_key"),
-            base_url=data.get("base_url", "https://api.moonshot.cn/v1"),
-            model=data.get("model", "kimi-k2-turbo-preview"),
+            api_key=(data.get("api_key") or "").strip(),
+            base_url=(data.get("base_url") or "").strip(),
+            model=(data.get("model") or "").strip(),
             temperature=data.get("temperature", 0.3),
             max_tokens=data.get("max_tokens", 32768),
             tts_engine=(data.get("tts_engine") or "auto").strip(),
@@ -234,6 +268,12 @@ class Config:
             target_accuracy_min=acc_low,
             target_accuracy_max=acc_high,
             skip_record_mode=skip_record_mode,
+            answer_api_enabled=_as_bool(data.get("answer_api_enabled"), True),
+            answer_api_cache=_as_bool(data.get("answer_api_cache"), True),
+            answer_api_open_id=(data.get("answer_api_open_id") or "").strip(),
+            answer_api_secret=(data.get("answer_api_secret") or "").strip(),
+            answer_api_host=(data.get("answer_api_host") or "").strip(),
+            answer_api_timeout=answer_api_timeout,
         )
 
 
@@ -721,7 +761,12 @@ class OpenAICompatibleClient:
 
     def __init__(self, config: Config):
         self.config = config
-        self.client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+        self.enabled = bool(
+            (getattr(config, 'api_key', '') or '').strip()
+            and (getattr(config, 'base_url', '') or '').strip()
+            and (getattr(config, 'model', '') or '').strip()
+        )
+        self.client = OpenAI(api_key=config.api_key, base_url=config.base_url) if self.enabled else None
         self.conversation_history: List[Dict] = []
         self.material_messages: List[Dict] = []
         self.current_chapter_id: Optional[str] = None
@@ -787,6 +832,9 @@ class OpenAICompatibleClient:
     def ask(self, prompt: str, retry_count: int = 3, stop_requested: Optional[threading.Event] = None,
             screenshot: Optional[bytes] = None, remember: bool = True,
             require_image: bool = False) -> Optional[str]:
+        if not getattr(self, 'enabled', True) or self.client is None:
+            print("    未配置 AI 接口，无法调用大模型作答")
+            return None
         if require_image and not screenshot:
             print("   需要题目图片上下文但截图不可用，停止作答")
             return None
@@ -4954,12 +5002,13 @@ class AnswerExecutor:
                 try:
                     clean_word = word.strip()
                     clean_word = self._strip_given_prefix(blank.get('hint', ''), clean_word)
-                    matched = self._match_to_option(
-                        clean_word, q.banked_options, is_phrase_mode,
-                        allow_rewrite=not is_expression_bank_question(q))
-                    if matched:
-                        clean_word = matched
-                        print(f"        匹配到选项: {clean_word}")
+                    if not getattr(self, '_exact_official_mode', False):
+                        matched = self._match_to_option(
+                            clean_word, q.banked_options, is_phrase_mode,
+                            allow_rewrite=not is_expression_bank_question(q))
+                        if matched:
+                            clean_word = matched
+                            print(f"        匹配到选项: {clean_word}")
 
                     self.driver.execute_script(
                         "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
@@ -6382,7 +6431,13 @@ class AnswerExecutor:
         for i, (blank_info, ans) in enumerate(zip(q.banked_blanks, answers)):
             if ans and blank_info['input']:
                 original_ans = ans
-                ans = self._normalize_listening_blank_answer(blank_info, ans)
+                if getattr(self, '_exact_official_mode', False):
+                    ans = re.sub(r'\s+', ' ', ans).strip()
+                    hint = blank_info.get('hint') or ''
+                    if hint:
+                        ans = self._strip_given_prefix(hint, ans)
+                else:
+                    ans = self._normalize_listening_blank_answer(blank_info, ans)
                 if ans != original_ans:
                     print(f"\t空{i + 1}: {original_ans} -> {ans}")
                 else:
@@ -8644,10 +8699,15 @@ class VideoHandler(ContentHandler):
 
         self.transcriber = AudioTranscriber()
 
+        ai_ready = bool(
+            (getattr(config, 'api_key', '') or '').strip()
+            and (getattr(config, 'base_url', '') or '').strip()
+            and (getattr(config, 'model', '') or '').strip()
+        )
         self.analyzer_client = OpenAI(
             api_key=config.api_key,
             base_url=config.base_url
-        )
+        ) if ai_ready else None
 
         self.video_transcript = ""
         self.current_video_url = ""
@@ -8990,6 +9050,10 @@ class VideoHandler(ContentHandler):
     def _intelligent_select_answer(self, question_data: Dict) -> str:
         question = question_data['question']
         options = question_data['options']
+
+        if self.analyzer_client is None:
+            print("      [监视器] 未配置 AI 接口，使用关键词匹配")
+            return self._keyword_match(question, options)
 
         print(f"      [监视器]  分析问题: {question[:50]}...")
         prompt = self._build_analysis_prompt(question, options)
@@ -9457,6 +9521,8 @@ class AISolver:
             getattr(config, 'target_accuracy_min', 100.0),
             getattr(config, 'target_accuracy_max', 100.0),
         )
+        # 官方答案接口：命中则客观题直接用平台真值，未命中/失败一律回落 AI。
+        self.answer_api = OfficialAnswerProvider(config, log=print)
 
     def _skip_record_mode(self) -> str:
         config = getattr(self, 'config', None)
@@ -9480,10 +9546,25 @@ class AISolver:
             self.accuracy_controller = controller
         return controller
 
+    def _ai_available(self) -> bool:
+        ai_client = getattr(self, 'ai_client', None)
+        if ai_client is not None and hasattr(ai_client, 'enabled'):
+            return bool(ai_client.enabled)
+        config = getattr(self, 'config', None)
+        if config is None:
+            return True
+        return bool(
+            (getattr(config, 'api_key', '') or '').strip()
+            and (getattr(config, 'base_url', '') or '').strip()
+            and (getattr(config, 'model', '') or '').strip()
+        )
+
     def _tab_failure_status(self) -> str:
         outcome = getattr(self, '_last_tab_outcome', '')
         if outcome == 'skipped_record':
             return 'skipped_record'
+        if outcome == 'skipped_no_ai':
+            return 'skipped_no_ai'
         if outcome == 'skipped':
             return 'skipped_no_answer'
         return 'error'
@@ -9646,6 +9727,15 @@ class AISolver:
                         on_task_skipped(tab)
                     except Exception as exc:
                         print(f"  跳过回调异常: {str(exc)[:60]}")
+            elif status == 'skipped_no_ai':
+                tab['skip_reason'] = 'no_ai'
+                skipped_tasks.append(task_label)
+                print("  未配置 AI 接口，已跳过需 AI 作答的任务并取消本次勾选（保留未完成状态），继续处理剩余任务")
+                if on_task_skipped:
+                    try:
+                        on_task_skipped(tab)
+                    except Exception as exc:
+                        print(f"  跳过回调异常: {str(exc)[:60]}")
             elif status == 'skipped':
                 skipped_tasks.append(task_label)
                 print("  已跳过当前任务，继续处理剩余任务")
@@ -9720,6 +9810,8 @@ class AISolver:
             return 'stopped'
 
         self._inline_learning_tried = False
+        self._reading_ctx_tried = False
+        self._pending_reading_context = None
 
         if '_element' in tab and tab['_element'] is not None:
             if task_idx > 0 or self.driver.current_url != course_home_url:
@@ -9734,10 +9826,13 @@ class AISolver:
             str(tab.get('display') or ''),
         ]).lower()
         if 'collocation' in section_text and tab.get('_unit_idx') is not None:
-            self._load_reading_context(course_home_url, tab.get('_unit_idx'),
-                                      section_filter=str(tab.get('section') or tab.get('l2_title') or ''))
-            if self._should_stop():
-                return 'stopped'
+            # 延后到官方答案未命中、确实需要 AI 作答时再读取隔壁原文/Learning 页
+            self._pending_reading_context = {
+                'mode': 'directory',
+                'directory_url': course_home_url,
+                'unit_idx': tab.get('_unit_idx'),
+                'section_filter': str(tab.get('section') or tab.get('l2_title') or ''),
+            }
 
         if '_element' in tab and tab['_element'] is not None:
             if '_unit_idx' in tab:
@@ -10059,6 +10154,31 @@ class AISolver:
             print(f"    搭配学习页：侧栏单元标题没对上（{unit_title or '无面包屑'}），候选: {items[:6]}")
         return ""
 
+    def _ensure_reading_context_for_ai(self) -> bool:
+        """按需加载隔壁 Reading / Learning 上下文；仅在未命中官方答案、准备走 AI 时触发。
+
+        返回 True 表示在当前页内切换过 Learning/Practicing 标签，调用方需重新解析题目元素。
+        """
+        pending = getattr(self, '_pending_reading_context', None)
+        if not pending:
+            return False
+        self._pending_reading_context = None
+        self._inline_learning_switched = False
+        mode = pending.get('mode')
+        if mode == 'current_page':
+            self._load_reading_context_for_current_page()
+        elif mode == 'directory':
+            try:
+                self._context_reference_text = self.driver.find_element(By.TAG_NAME, 'body').text or ""
+            except Exception:
+                self._context_reference_text = ""
+            self._load_reading_context(
+                pending.get('directory_url') or '',
+                pending.get('unit_idx'),
+                section_filter=pending.get('section_filter') or '',
+            )
+        return bool(getattr(self, '_inline_learning_switched', False))
+
     def _load_learning_inline(self) -> bool:
         if getattr(self, '_inline_learning_tried', False):
             return False
@@ -10078,6 +10198,7 @@ class AISolver:
             learning.click()
         except Exception:
             return False
+        self._inline_learning_switched = True
         time.sleep(5)
 
         text = ""
@@ -10436,6 +10557,24 @@ class AISolver:
             return self._process_current_tab_content(
                 self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx
             )
+
+        # 客观题优先尝试官方答案接口：命中或未配置 AI 时跳过音频转写、视频转写与 AI 后台预取
+        self._answer_api_reset_tab()
+        official_covers = self._answer_api_covers_current_page()
+        if official_covers or not self._ai_available():
+            if official_covers and (self._has_video_on_page() or self._has_audio_on_page()):
+                print("    本页客观题已命中官方答案，跳过音视频转写与 AI 预取")
+            if self._has_video_on_page():
+                if not self._preprocess_video_if_needed(
+                        tab_name, l1_idx, l2_idx, skip_transcription=True):
+                    return False
+                if self._should_stop():
+                    return False
+            return self._process_current_tab_content(
+                self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx,
+                api_prepared=True,
+            )
+
         skip_asr = self._skip_transcription(tab_name)
         prefetch_holder = {}
         prefetch_signature = ""
@@ -10476,6 +10615,7 @@ class AISolver:
             self.ai_client.current_chapter_id or "unknown", tab_name, l1_idx, l2_idx,
             prefetch=prefetch_holder.get('answer'),
             prefetch_signature=prefetch_signature,
+            api_prepared=True,
         )
 
     def _prepare_media_prefetch(self, skip_asr: bool = False):
@@ -10583,9 +10723,374 @@ class AISolver:
             result[letter] = best_idx
         return result
 
+    # ------------------------------------------------------------------ #
+    # 官方答案接口（客观题真值）
+    # ------------------------------------------------------------------ #
+    ANSWER_API_SINGLE_CHOICE_TYPES = frozenset({
+        QuestionType.SINGLE_CHOICE, QuestionType.LISTENING_CHOICE,
+        QuestionType.VIDEO_CHOICE, QuestionType.VOCABULARY_TEST,
+    })
+    ANSWER_API_FILL_TYPES = frozenset({
+        QuestionType.FILL_IN, QuestionType.BANKED_CLOZE,
+        QuestionType.LISTENING_FILL_IN, QuestionType.DROPDOWN_SELECT,
+    })
+    ANSWER_API_SUPPORTED_TYPES = (ANSWER_API_SINGLE_CHOICE_TYPES
+                                  | ANSWER_API_FILL_TYPES
+                                  | frozenset({QuestionType.MULTIPLE_CHOICE,
+                                               QuestionType.TRUE_FALSE,
+                                               QuestionType.SORTING,
+                                               QuestionType.LINK_MATCH,
+                                               QuestionType.MATCHING,
+                                               QuestionType.PARAGRAPH_MATCH,
+                                               QuestionType.TEXT}))
+    ANSWER_API_ITEM_KINDS = frozenset({'choice', 'true_false', 'fill', 'dropdown',
+                                       'sorting', 'link_match', 'text'})
+
+    def _answer_api_provider(self):
+        """返回可用的答案接口门面；未启用/未命中/已停用时返回 None。"""
+        provider = getattr(self, 'answer_api', None)
+        if provider is None:
+            return None
+        if not getattr(provider, 'enabled', False) or not getattr(provider, 'active', False):
+            return None
+        if getattr(provider, 'abandoned', False):
+            return None
+        return provider
+
+    def _answer_api_url_candidates(self) -> List[str]:
+        """候选地址：当前窗口 + ipublish 内容 iframe（新版外壳地址常缺 taskId）。"""
+        urls: List[str] = []
+        try:
+            urls.append(self.driver.current_url or '')
+        except Exception:
+            pass
+        if self._is_publish_page():
+            try:
+                frame = PublishPlayer.find_frame(self.driver)
+                if frame is not None:
+                    urls.append(frame.get_attribute('src') or '')
+            except Exception:
+                pass
+        return [url for url in urls if url]
+
+    def _answer_api_prepare(self, task_label: str = '') -> bool:
+        """按当前播放器地址准备答案；失败只记原因，绝不抛异常打断任务。"""
+        provider = getattr(self, 'answer_api', None)
+        if provider is None or not getattr(provider, 'enabled', False):
+            return False
+        stats = getattr(provider, 'stats', None)
+        if isinstance(stats, dict):
+            stats['used'] = 0
+            stats['fallback'] = 0
+        try:
+            ready = provider.prepare(driver=self.driver,
+                                     candidates=self._answer_api_url_candidates())
+        except Exception as exc:
+            print(f"    官方答案接口准备失败：{str(exc)[:80]}，继续使用 AI")
+            return False
+        if ready:
+            return True
+        reason = str(getattr(provider, 'reason', '') or '')
+        if task_label and reason and '未能从当前地址解析任务' not in reason:
+            print(f"    {task_label}：官方答案接口未命中（{reason}），继续使用 AI")
+        return False
+
+    def _answer_api_choice_letter(self, question: Question, value: str) -> str:
+        valid = [option.letter.upper() for option in question.options if option.letter]
+        if not valid:
+            valid = [chr(65 + index) for index in range(len(question.options or []))]
+        text = (value or '').strip()
+        compact = re.sub(r'^[\d\s.、):：\]]+', '', text).upper()
+        if compact and compact in valid:
+            return compact
+        match = re.search(r'(?<![A-Z])([A-Z])(?![A-Z])', compact)
+        if match and match.group(1) in valid:
+            return match.group(1)
+        for option in question.options:
+            if (option.text or '').strip().casefold() == text.casefold():
+                return (option.letter or '').upper()
+        return ''
+
+    def _answer_api_choice_letters(self, question: Question, values: List[str]) -> List[str]:
+        valid = [option.letter.upper() for option in question.options if option.letter]
+        if not valid:
+            valid = [chr(65 + index) for index in range(len(question.options or []))]
+        letters: List[str] = []
+        for value in values:
+            text = (value or '').strip().upper()
+            if text in valid:
+                if text not in letters:
+                    letters.append(text)
+                continue
+            for char in re.findall(r'[A-Z]', text):
+                if char in valid and char not in letters:
+                    letters.append(char)
+        return letters if letters and all(letter in valid for letter in letters) else []
+
+    def _answer_api_fill_answer(self, question: Question, values: List[str]) -> str:
+        count = question.answer_count or 1
+        hints = [str(blank.get('hint') or '') for blank in (question.banked_blanks or [])]
+        if count == 1:
+            answer = (values[0] if values else '').strip()
+            if hints and hints[0]:
+                answer = self.executor._strip_given_prefix(hints[0], answer)
+            return answer
+        if len(values) != count:
+            return ''
+        parts: List[str] = []
+        for index, value in enumerate(values):
+            hint = hints[index] if index < len(hints) else ''
+            value = self.executor._strip_given_prefix(hint, value) if hint else value
+            value = (value or '').strip()
+            if not value:
+                return ''
+            parts.append(f'{index + 1}.{value}')
+        return '\n'.join(parts)
+
+    def _answer_api_link_answer(self, values: List[str]) -> str:
+        pairs: List[str] = []
+        for position, value in enumerate(values, 1):
+            match = re.fullmatch(r'\s*\d*\s*[.\-:：)）]?\s*([A-Za-z])\s*', value or '')
+            if not match:
+                return ''
+            pairs.append(f'{position}.{match.group(1).upper()}')
+        return ' '.join(pairs)
+
+    def _answer_api_letter_sequence_answer(self, question: Question,
+                                           values: List[str]) -> str:
+        """人物匹配 / 段落匹配：按空位顺序产出 ``1.A 2.B`` 形式的字母序列。"""
+        count = question.answer_count or len(values)
+        if not count or len(values) != count:
+            return ''
+        letters: List[str] = []
+        for value in values:
+            match = re.fullmatch(r'\s*\d*\s*[.\-:：)）]?\s*([A-Za-z])\s*', value or '')
+            if not match:
+                return ''
+            letters.append(match.group(1).upper())
+        if count == 1:
+            return letters[0]
+        return ' '.join(f'{index}.{letter}' for index, letter in enumerate(letters, 1))
+
+    def _answer_api_question_answer(self, question: Question, values: List[str]) -> str:
+        cleaned = [str(value).strip() for value in (values or []) if str(value).strip()]
+        if not cleaned:
+            return ''
+        q_type = question.q_type
+        if q_type in self.ANSWER_API_SINGLE_CHOICE_TYPES:
+            return self._answer_api_choice_letter(question, cleaned[0])
+        if q_type == QuestionType.MULTIPLE_CHOICE:
+            return ' '.join(self._answer_api_choice_letters(question, cleaned))
+        if q_type == QuestionType.TRUE_FALSE:
+            for value in cleaned:
+                letter = PublishAnswerExecutor.normalize_true_false(value)
+                if letter:
+                    return letter
+            return ''
+        if q_type == QuestionType.SORTING:
+            letters = [value.strip().upper() for value in cleaned]
+            valid = [option.letter.upper() for option in question.options if option.letter]
+            if not valid or len(letters) != len(valid):
+                return ''
+            if any(letter not in valid for letter in letters):
+                return ''
+            return ' '.join(letters)
+        if q_type == QuestionType.LINK_MATCH:
+            return self._answer_api_link_answer(cleaned)
+        if q_type in (QuestionType.MATCHING, QuestionType.PARAGRAPH_MATCH):
+            return self._answer_api_letter_sequence_answer(question, cleaned)
+        if q_type in self.ANSWER_API_FILL_TYPES or q_type == QuestionType.TEXT:
+            return self._answer_api_fill_answer(question, cleaned)
+        return ''
+
+    @staticmethod
+    def _answer_api_question_slots(question: Question) -> int:
+        """计算一道 Question 在官方答案接口 children 中对应的子项数。"""
+        q_type = question.q_type
+        if q_type == QuestionType.SORTING:
+            return len(getattr(question, 'options', None) or []) or 1
+        if q_type == QuestionType.LINK_MATCH:
+            link_items = getattr(question, 'link_items', None) or []
+            prompts = [item for item in link_items if isinstance(item, dict) and item.get('side') == 'right']
+            if prompts:
+                return len(prompts)
+        if q_type in (QuestionType.FILL_IN, QuestionType.BANKED_CLOZE,
+                      QuestionType.LISTENING_FILL_IN, QuestionType.DROPDOWN_SELECT,
+                      QuestionType.MATCHING, QuestionType.PARAGRAPH_MATCH, QuestionType.TEXT):
+            count = (getattr(question, 'answer_count', 0)
+                     or len(getattr(question, 'inputs', None) or [])
+                     or len(getattr(question, 'banked_blanks', None) or []))
+            if count > 0:
+                return count
+        return 1
+
+    def _answer_api_convert(self, questions: List[Question],
+                            values: List[List[str]]) -> Optional[List[str]]:
+        """把接口答案转成本项目 executor 认识的答案格式；有一题不合法就整组放弃。"""
+        if not questions or not values:
+            return None
+        slot_counts = [self._answer_api_question_slots(q) for q in questions]
+        if len(values) != len(questions):
+            # 选词填空 / 多空填空 / 排序 / 匹配等题型，页面合并成 1（或少量）道 Question，
+            # 而接口按空/子项逐条返回 children；按每题子项数切分并取每空首个可接受答案。
+            if sum(slot_counts) == len(values):
+                grouped: List[List[str]] = []
+                offset = 0
+                for slots in slot_counts:
+                    chunk = values[offset:offset + slots]
+                    offset += slots
+                    if any(not item for item in chunk):
+                        return None
+                    grouped.append([item[0] for item in chunk])
+                values = grouped
+            else:
+                return None
+        elif len(questions) == 1 and slot_counts[0] > 1 and len(values[0]) != slot_counts[0]:
+            return None
+        converted: List[str] = []
+        for question, raw in zip(questions, values):
+            answer = self._answer_api_question_answer(question, list(raw or []))
+            if not answer:
+                return None
+            converted.append(answer)
+        return converted
+
+    def _answer_api_align(self, provider: Any, questions: List[Question],
+                          group_index: Optional[int] = None,
+                          ) -> Optional[Tuple[int, List[str]]]:
+        """在接口大题列表中对齐并转换答案：优先按总空/子项数对齐，再回退按题数对齐。"""
+        if provider is None or not questions:
+            return None
+        q_count = len(questions)
+        slot_count = sum(self._answer_api_question_slots(q) for q in questions)
+        counts = [slot_count] if slot_count == q_count else [slot_count, q_count]
+        seen = set()
+        for count in counts:
+            if count <= 0 or count in seen:
+                continue
+            seen.add(count)
+            aligned = (provider.answers_for(group_index, count)
+                       if group_index is not None
+                       else provider.peek_aligned(count))
+            if not aligned:
+                continue
+            index, values = aligned
+            converted = self._answer_api_convert(questions, values)
+            if converted is not None:
+                return index, converted
+        return None
+
+    def _answer_api_reset_tab(self) -> None:
+        api_provider = getattr(self, 'answer_api', None)
+        if api_provider is not None and getattr(api_provider, 'enabled', False):
+            api_provider.reset()
+        self._answer_api_tab_prepared = False
+
+    def _answer_api_ensure_prepared(self) -> Optional[Any]:
+        provider = getattr(self, 'answer_api', None)
+        if provider is None or not getattr(provider, 'enabled', False):
+            return None
+        if not getattr(provider, 'active', False):
+            if not getattr(self, '_answer_api_tab_prepared', False):
+                self._answer_api_tab_prepared = True
+                self._answer_api_prepare('')
+        return self._answer_api_provider()
+
+    def _answer_api_covers_current_page(self) -> bool:
+        """只读预判当前页客观题是否可直接由官方答案接口覆盖（不推进游标、不放弃）。"""
+        provider = getattr(self, 'answer_api', None)
+        if provider is None or not getattr(provider, 'enabled', False) \
+                or getattr(provider, 'abandoned', False):
+            return False
+        try:
+            questions, _ = self.parser.parse_all()
+        except Exception:
+            return False
+        if not questions or getattr(self.parser, 'incomplete', False):
+            return False
+        special = {
+            QuestionType.VOCABULARY_FLASHCARD,
+            QuestionType.VIDEO,
+            QuestionType.AUDIO,
+            QuestionType.SELF_CHECK,
+            QuestionType.DISCUSSION_BOARD,
+        }
+        normal = [q for q in questions if q.q_type not in special]
+        skip_mode = self._skip_record_mode()
+        active_records = [
+            q for q in normal
+            if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD)
+            and not should_skip_record_question(q, skip_mode)
+        ]
+        if active_records:
+            return False
+        normal = [q for q in normal
+                  if q.q_type not in (QuestionType.RECORD, QuestionType.ORAL_ALOUD)]
+        if not normal:
+            return False
+        if any(q.q_type not in self.ANSWER_API_SUPPORTED_TYPES for q in normal):
+            return False
+        provider = self._answer_api_ensure_prepared()
+        if provider is None:
+            return False
+        return self._answer_api_align(provider, normal) is not None
+
+    def _answer_api_page_answers(self, questions: List[Question]) -> Optional[List[str]]:
+        """老播放器：按「本页空位/小题数」在接口答案里对齐取用。
+
+        只有本页真的出现题目时才去请求答案（每个任务最多尝试一次），
+        避免纯音视频 / 阅读任务白跑一次接口。
+        """
+        provider = getattr(self, 'answer_api', None)
+        if provider is None or not getattr(provider, 'enabled', False) or not questions:
+            return None
+        provider = self._answer_api_ensure_prepared()
+        if provider is None:
+            return None
+        if any(question.q_type not in self.ANSWER_API_SUPPORTED_TYPES for question in questions):
+            provider.abandon('本页含接口未覆盖的题型')
+            return None
+        matched = self._answer_api_align(provider, questions)
+        if matched is None:
+            provider.mark_fallback()
+            provider.abandon('本页题目无可用官方答案（主观题或结构不匹配）')
+            return None
+        index, answers = matched
+        provider.consume(index)
+        return answers
+
+    def _answer_api_publish_answers(self, questions: List[Question],
+                                    group_index: Optional[int] = None,
+                                    ) -> Optional[List[str]]:
+        """新版播放器：优先按题目组序号取答案，序号对不上再按空位/小题数对齐。"""
+        provider = self._answer_api_provider()
+        if provider is None or not questions:
+            return None
+        if any(question.q_type not in self.ANSWER_API_SUPPORTED_TYPES for question in questions):
+            provider.mark_fallback()
+            return None
+        matched = self._answer_api_align(provider, questions, group_index=group_index)
+        if matched is None:
+            provider.mark_fallback()
+            return None
+        index, answers = matched
+        provider.consume(index)
+        return answers
+
+    def _answer_api_report(self) -> None:
+        provider = getattr(self, 'answer_api', None)
+        stats = getattr(provider, 'stats', None)
+        if not isinstance(stats, dict):
+            return
+        used = int(stats.get('used', 0) or 0)
+        fallback = int(stats.get('fallback', 0) or 0)
+        if used or fallback:
+            print(f"    官方答案接口：直接作答 {used} 个大题，回落 AI {fallback} 次")
+
     def _process_current_tab_content(self, chapter_name: str, tab_name: str, l1_idx: int, l2_idx: int,
                                      prefetch: Optional[AnswerPrefetch] = None,
-                                     prefetch_signature: str = "") -> bool:
+                                     prefetch_signature: str = "",
+                                     api_prepared: bool = False) -> bool:
         self._last_tab_outcome = ''
         if self._should_stop():
             return False
@@ -10607,6 +11112,10 @@ class AISolver:
                 self.processed_hashes.add(content_hash)
             return success
 
+        # 老播放器：切到新任务后清空上一题的答案状态（若外层已预查则复用）
+        if not api_prepared:
+            self._answer_api_reset_tab()
+
         page_num = 1
         total_answered = 0
         total_record_skipped = 0
@@ -10618,17 +11127,26 @@ class AISolver:
                 return False
 
             if not self._is_skipped_record_only_page():
-                skip_asr = self._skip_transcription(tab_name)
-                if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
-                                                       skip_transcription=skip_asr):
-                    return False
-                if self._should_stop():
-                    return False
-                if not self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx,
-                                                       skip_transcription=skip_asr):
-                    return False
-                if self._should_stop():
-                    return False
+                official_covers = self._answer_api_covers_current_page()
+                if official_covers or not self._ai_available():
+                    if self._has_video_on_page():
+                        if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
+                                                               skip_transcription=True):
+                            return False
+                        if self._should_stop():
+                            return False
+                else:
+                    skip_asr = self._skip_transcription(tab_name)
+                    if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
+                                                           skip_transcription=skip_asr):
+                        return False
+                    if self._should_stop():
+                        return False
+                    if not self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx,
+                                                           skip_transcription=skip_asr):
+                        return False
+                    if self._should_stop():
+                        return False
             questions, directions = self.parser.parse_all()
             if self.parser.incomplete:
                 print("    本页有交互题未能解析，停止当前任务")
@@ -10636,20 +11154,6 @@ class AISolver:
             if self._should_stop():
                 return False
             self._harvest_vocabulary()
-            if page_num == 1 and not len(self._vocab()) and self._needs_vocabulary(questions):
-                switched = self._harvest_from_vocabulary_tab()
-                if switched is None:
-                    return False
-                if switched:
-                    questions, directions = self.parser.parse_all()
-                    if self.parser.incomplete:
-                        print("    本页有交互题未能解析，停止当前任务")
-                        return False
-                    if self._should_stop():
-                        return False
-                    if prefetch is not None:
-                        print("    词汇页切换后，放弃预取答案")
-                        prefetch = None
             self._last_question_types = {q.q_type for q in questions}
             print(f"\n    处理第 {page_num} 页题目...")
             print(f"    找到 {len(questions)} 个可见题目")
@@ -10671,6 +11175,10 @@ class AISolver:
                     if self._should_stop():
                         return False
                     if handler.can_handle(q):
+                        if q.q_type == QuestionType.DISCUSSION_BOARD and not self._ai_available():
+                            print("    讨论区发帖需要 AI 作答，但未配置 AI 接口，跳过该任务")
+                            self._last_tab_outcome = 'skipped_no_ai'
+                            return False
                         print(f"     使用 {handler.__class__.__name__} 处理")
                         handled = handler.handle(q)
                         if not handled or self._should_stop():
@@ -10721,6 +11229,29 @@ class AISolver:
             )
             record_answered = 0
             if active_records:
+                if page_num == 1 and not len(self._vocab()) and self._needs_vocabulary(active_records):
+                    switched = self._harvest_from_vocabulary_tab()
+                    if switched is None:
+                        return False
+                    if switched:
+                        questions, directions = self.parser.parse_all()
+                        if self.parser.incomplete or self._should_stop():
+                            return False
+                        normal_questions = [q for q in questions if q.q_type not in [
+                            QuestionType.VOCABULARY_FLASHCARD,
+                            QuestionType.VIDEO,
+                            QuestionType.AUDIO,
+                            QuestionType.SELF_CHECK,
+                            QuestionType.DISCUSSION_BOARD
+                        ]]
+                        record_questions = [q for q in normal_questions
+                                            if q.q_type in (QuestionType.RECORD, QuestionType.ORAL_ALOUD)]
+                        skipped_records = [q for q in record_questions
+                                           if should_skip_record_question(q, skip_mode)]
+                        active_records = [q for q in record_questions if q not in skipped_records]
+                        normal_questions = [q for q in normal_questions if q not in skipped_records]
+                        total_questions = len(normal_questions)
+                        prefetch = None
                 print(f"    本页 {len(active_records)} 道录音题，开始逐条录音...")
                 for q in active_records:
                     if self._should_stop():
@@ -10731,6 +11262,10 @@ class AISolver:
                         continue
                     script = ""
                     if q.q_type == QuestionType.RECORD and q.needs_speech_script:
+                        if not self._ai_available():
+                            print("    主观口语题需要 AI 写稿，但未配置 AI 接口，跳过该任务")
+                            self._last_tab_outcome = 'skipped_no_ai'
+                            return False
                         script = self._speaking_script_for(q, directions)
                         if not script:
                             continue
@@ -10750,6 +11285,88 @@ class AISolver:
             if normal_questions:
                 print(f"    共 {total_questions} 道题目需要回答")
                 success_count = record_answered
+
+                # 官方答案接口命中时跳过 AI，并接入目标正确率控分（以官方答案为基准）
+                official_answers = None
+                api_provider = getattr(self, 'answer_api', None)
+                if api_provider is not None and getattr(api_provider, 'enabled', False) \
+                        and not getattr(api_provider, 'abandoned', False):
+                    official_answers = self._answer_api_page_answers(normal_questions)
+                if official_answers is not None:
+                    adjusted_official, _ = self._accuracy_controller().apply_to_items(
+                        list(zip(normal_questions, official_answers)),
+                        enforce_submit_floor=False,
+                    )
+                    filled_official = 0
+                    self.executor._exact_official_mode = True
+                    try:
+                        for question, answer in zip(normal_questions, adjusted_official):
+                            if self._should_stop():
+                                return False
+                            if answer and self.executor.execute(question, answer):
+                                filled_official += 1
+                    finally:
+                        self.executor._exact_official_mode = False
+                    if filled_official == len(normal_questions):
+                        print(f"    本页 {filled_official} 题已使用官方答案填写，跳过 AI")
+                        success_count += filled_official
+                        normal_questions = []
+                        prefetch = None
+                    else:
+                        print(f"    官方答案仅写入 {filled_official}/{len(normal_questions)} 题，"
+                              f"本页改回 AI 流程")
+
+                # 仅在未命中官方答案、确实要走 AI 流程时，才补抓隔壁原文 / 词汇表 / 音视频转写
+                if normal_questions:
+                    if not self._ai_available():
+                        print("    本页未能通过官方答案完成且未配置 AI 接口，跳过该任务")
+                        self._last_tab_outcome = 'skipped_no_ai'
+                        return False
+                    dom_refreshed = False
+                    if self._ensure_reading_context_for_ai():
+                        dom_refreshed = True
+                    if self._should_stop():
+                        return False
+                    if page_num == 1 and not len(self._vocab()) and self._needs_vocabulary(normal_questions):
+                        switched = self._harvest_from_vocabulary_tab()
+                        if switched is None:
+                            return False
+                        if switched:
+                            dom_refreshed = True
+                    if dom_refreshed:
+                        questions, directions = self.parser.parse_all()
+                        if self.parser.incomplete:
+                            print("    本页有交互题未能解析，停止当前任务")
+                            return False
+                        if self._should_stop():
+                            return False
+                        normal_questions = [q for q in questions if q.q_type not in [
+                            QuestionType.VOCABULARY_FLASHCARD,
+                            QuestionType.VIDEO,
+                            QuestionType.AUDIO,
+                            QuestionType.SELF_CHECK,
+                            QuestionType.DISCUSSION_BOARD,
+                            QuestionType.RECORD,
+                            QuestionType.ORAL_ALOUD,
+                        ]]
+                        if prefetch is not None:
+                            print("    上下文页面切换后，放弃预取答案")
+                            prefetch = None
+                    if self._has_video_on_page():
+                        if not self._preprocess_video_if_needed(tab_name, l1_idx, l2_idx,
+                                                               skip_transcription=False):
+                            return False
+                        if self._should_stop():
+                            return False
+                    if self._has_audio_on_page():
+                        if not self._preprocess_audio_if_needed(tab_name, l1_idx, l2_idx,
+                                                               skip_transcription=False):
+                            return False
+                        if self._should_stop():
+                            return False
+                    fallback_passage = self._extract_passage()
+                    if fallback_passage:
+                        self.ai_client.add_passage_if_new(fallback_passage)
 
                 large_fills = [q for q in normal_questions
                                if q.q_type in (QuestionType.FILL_IN, QuestionType.BANKED_CLOZE)
@@ -10917,6 +11534,7 @@ class AISolver:
             print(f"    没有更多题目了")
             break
         print(f"    总共回答 {total_answered} 题")
+        self._answer_api_report()
         self.processed_hashes.add(content_hash)
         self._last_tab_outcome = 'done'
         return True
@@ -10935,6 +11553,24 @@ class AISolver:
         self.publish_executor.dismiss_rules_popup()
         if not self._publish_prepare_scope(task_name):
             return False
+        # 新版播放器：优先请求官方答案接口；仅当本任务需要且已配置 AI 时才读取隔壁原文
+        api_ready = self._answer_api_prepare(task_name)
+        if getattr(self, '_pending_reading_context', None):
+            if not self._ai_available():
+                self._pending_reading_context = None
+            else:
+                from unipus_helper.answer_api import child_answers, is_objective_answers
+                provider = self._answer_api_provider() if api_ready else None
+                all_objective = bool(
+                    provider and provider.items
+                    and all(is_objective_answers(child_answers(it)) for it in provider.items)
+                )
+                if not all_objective:
+                    self._ensure_reading_context_for_ai()
+                    if self._should_stop():
+                        return False
+                else:
+                    self._pending_reading_context = None
 
         quiz_result = self._publish_process_quiz()
         if quiz_result is not None:
@@ -10949,6 +11585,7 @@ class AISolver:
         handled = 0
         skipped = 0
         record_skipped = 0
+        ai_skipped = 0
         rejected = 0
         idle_reveals = 0
         while not self._should_stop():
@@ -10964,6 +11601,10 @@ class AISolver:
                 continue
             if result == 'skipped_record':
                 record_skipped += 1
+                idle_reveals = 0
+                continue
+            if result == 'skipped_no_ai':
+                ai_skipped += 1
                 idle_reveals = 0
                 continue
             if result == 'skipped':
@@ -10985,19 +11626,25 @@ class AISolver:
             print(f"    新版播放器共提交 {handled} 个题目组")
         if record_skipped:
             print(f"    另有 {record_skipped} 个跟读/录音题目组已按配置自动跳过")
+        if ai_skipped:
+            print(f"    另有 {ai_skipped} 个题目组需 AI 作答但未配置 AI 接口，已跳过")
         if rejected:
             print(f"    另有 {rejected} 个题目组因正确率不足 60% 被平台拒绝提交")
         if skipped:
             print(f"    另有 {skipped} 个题目组题型暂不支持或未渲染，已跳过")
+        self._answer_api_report()
+        if ai_skipped and not skipped and not rejected:
+            self._last_tab_outcome = 'skipped_no_ai'
+            return False
         if record_skipped and not skipped and not rejected:
             self._last_tab_outcome = 'skipped_record'
             return False
-        if not handled and not skipped and not rejected and not record_skipped:
+        if not handled and not skipped and not rejected and not record_skipped and not ai_skipped:
             if not videos and not reading:
                 print("    当前任务没有可处理的题目或视频，请检查课程目录中的实际进度")
                 return False
             print("    本任务正文已浏览，请以课程目录显示的进度为准")
-        return not self._should_stop() and not skipped and not rejected and not record_skipped
+        return not self._should_stop() and not skipped and not rejected and not record_skipped and not ai_skipped
 
     def _publish_read_task(self):
         with PublishFrameContext(self.driver) as context:
@@ -11245,7 +11892,10 @@ class AISolver:
                 self.ai_client.add_passage_if_new(passage)
 
             pending = None
+            answer_index = -1
             for state in scoped_groups:
+                if state['kind'] in self.ANSWER_API_ITEM_KINDS:
+                    answer_index += 1
                 if state['kind'] == 'skip':
                     continue
                 if parser.group_submitted(state['element']):
@@ -11267,25 +11917,29 @@ class AISolver:
                         print(f"    已按配置（{self._skip_record_mode()}）跳过跟读/录音题目组: {state['type']}")
                         self._publish_processed_groups.add(key)
                         return 'skipped_record'
-                pending = (state, key)
+                pending = (state, key, answer_index)
                 break
 
             if pending is None:
                 return 'done'
 
-            state, key = pending
-            outcome = self._publish_answer_group(state['element'], state['type'], key)
+            state, key, answer_index = pending
+            outcome = self._publish_answer_group(state['element'], state['type'], key,
+                                                 answer_index=answer_index)
             if outcome == 'submitted':
                 return 'answered'
             if outcome == 'rejected':
                 return 'rejected'
             if outcome == 'skipped_record':
                 return 'skipped_record'
+            if outcome == 'skipped_no_ai':
+                return 'skipped_no_ai'
             if outcome == 'skipped':
                 return 'skipped'
             return 'error'
 
-    def _publish_answer_group(self, group, group_type: str, key: str):
+    def _publish_answer_group(self, group, group_type: str, key: str,
+                              answer_index: Optional[int] = None):
         parser = self.publish_parser
         if not self._publish_group_in_scope(group):
             print("    题目组不在当前勾选任务内，不作答")
@@ -11328,10 +11982,14 @@ class AISolver:
             self._publish_processed_groups.add(key)
             return 'skipped_record'
 
-        if not self._publish_prepare_media(group):
-            return False
         filled = 0
         if all(question.q_type == QuestionType.RECORD for question in questions):
+            if any(question.needs_speech_script for question in questions) and not self._ai_available():
+                print(f"    题目组 {group_type} 含主观口语题但未配置 AI 接口，跳过该组")
+                self._publish_processed_groups.add(key)
+                return 'skipped_no_ai'
+            if not self._publish_prepare_media(group):
+                return False
             for question in questions:
                 if self._should_stop() or not self._publish_group_in_scope(group):
                     return False
@@ -11359,39 +12017,68 @@ class AISolver:
                 if self.publish_executor.execute(question, answer):
                     filled += 1
         else:
-            prompt = self.prompt_builder.build(questions, direction)
-            prompt += self._publish_fill_format_hint(questions)
-            if group_type == 'fill_blanks_dropdown_group':
-                prompt += self._publish_dropdown_options_prompt(questions)
-            ai_response = self.ai_client.ask(
-                prompt, stop_requested=self.stop_requested,
-                screenshot=self._question_screenshot(questions),
-                require_image=self._requires_image_context(questions))
-            if self._should_stop():
-                return False
-            if not ai_response:
-                print("    AI 未返回答案")
-                return False
-            blank_offset = 0
-            prepared_items = []
-            for question in questions:
-                if self._should_stop() or not self._publish_group_in_scope(group):
+            official_answers = None
+            api_provider = getattr(self, 'answer_api', None)
+            if api_provider is not None and getattr(api_provider, 'active', False) \
+                    and not getattr(api_provider, 'abandoned', False):
+                official_answers = self._answer_api_publish_answers(questions, answer_index)
+            if official_answers is not None:
+                if not self._publish_prepare_media(group, skip_transcription=True):
                     return False
-                answer = self._publish_answer_text(question, ai_response, blank_offset)
-                if question.q_type == QuestionType.FILL_IN:
-                    answer = self._normalize_fill_answer_capitalization(question, answer)
-                prepared_items.append((question, answer or ''))
-                if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
-                    blank_offset += question.answer_count or 1
+                adjusted_official, _ = self._accuracy_controller().apply_to_items(
+                    list(zip(questions, official_answers)),
+                    enforce_submit_floor=True,
+                )
+                print(f"    本组 {len(adjusted_official)} 题已使用官方答案填写，跳过 AI")
+                self.publish_executor._exact_official_mode = True
+                try:
+                    for question, answer in zip(questions, adjusted_official):
+                        if self._should_stop() or not self._publish_group_in_scope(group):
+                            return False
+                        if answer and self.publish_executor.execute(question, answer):
+                            filled += 1
+                finally:
+                    self.publish_executor._exact_official_mode = False
+            else:
+                if not self._ai_available():
+                    print(f"    题目组 {group_type} 未能通过官方答案完成且未配置 AI 接口，跳过该组")
+                    self._publish_processed_groups.add(key)
+                    return 'skipped_no_ai'
+                if not self._publish_prepare_media(group, skip_transcription=False):
+                    return False
+                prompt = self.prompt_builder.build(questions, direction)
+                prompt += self._publish_fill_format_hint(questions)
+                if group_type == 'fill_blanks_dropdown_group':
+                    prompt += self._publish_dropdown_options_prompt(questions)
+                ai_response = self.ai_client.ask(
+                    prompt, stop_requested=self.stop_requested,
+                    screenshot=self._question_screenshot(questions),
+                    require_image=self._requires_image_context(questions))
+                if self._should_stop():
+                    return False
+                if not ai_response:
+                    print("    AI 未返回答案")
+                    return False
+                blank_offset = 0
+                prepared_items = []
+                for question in questions:
+                    if self._should_stop() or not self._publish_group_in_scope(group):
+                        return False
+                    answer = self._publish_answer_text(question, ai_response, blank_offset)
+                    if question.q_type == QuestionType.FILL_IN:
+                        answer = self._normalize_fill_answer_capitalization(question, answer)
+                    prepared_items.append((question, answer or ''))
+                    if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
+                        blank_offset += question.answer_count or 1
 
-            adjusted_answers, _ = self._accuracy_controller().apply_to_items(
-                prepared_items, enforce_submit_floor=True
-            )
-            for (question, _), answer in zip(prepared_items, adjusted_answers):
-                if self._should_stop() or not self._publish_group_in_scope(group):
-                    return False
-                if answer and self.publish_executor.execute(question, answer):
-                    filled += 1
+                adjusted_answers, _ = self._accuracy_controller().apply_to_items(
+                    prepared_items, enforce_submit_floor=True
+                )
+                for (question, _), answer in zip(prepared_items, adjusted_answers):
+                    if self._should_stop() or not self._publish_group_in_scope(group):
+                        return False
+                    if answer and self.publish_executor.execute(question, answer):
+                        filled += 1
         print(f"    本组填写 {filled}/{len(questions)} 题")
 
         if filled != len(questions):
@@ -11540,7 +12227,7 @@ class AISolver:
                 return False
         return False
 
-    def _publish_prepare_media(self, group) -> bool:
+    def _publish_prepare_media(self, group, *, skip_transcription: bool = False) -> bool:
         if self._should_stop():
             return False
         wrappers = group.find_elements(
@@ -11553,13 +12240,15 @@ class AISolver:
             if not media:
                 print("    音视频播放器未加载，不提交")
                 return False
+            if not self.publish_executor.play_material(media[0]):
+                print("    未能确认音视频播放，不提交")
+                return False
+            if skip_transcription:
+                continue
             url = (wrapper.get_attribute('data-video-url') if is_video
                    else media[0].get_attribute('src')) or ''
             if urlsplit(url).scheme not in ('http', 'https'):
                 print("    未找到可下载的音视频材料，不提交")
-                return False
-            if not self.publish_executor.play_material(media[0]):
-                print("    未能确认音视频播放，不提交")
                 return False
             transcript = self.video_handler.transcriber.transcribe(url.split('#')[0], language='en')
             if not (transcript or '').strip() or self._should_stop():
@@ -11820,6 +12509,7 @@ class AISolver:
         self._publish_processed_groups = set()
         self._inline_learning_tried = False
         self._reading_ctx_tried = False
+        self._pending_reading_context = None
         self._accuracy_controller().reset()
 
         quick_tab_name = f"quick_current_page_{int(time.time())}"
@@ -11842,7 +12532,7 @@ class AISolver:
         except Exception:
             page_text = ""
         if 'collocation' in page_text or 'from the texts' in page_text:
-            self._load_reading_context_for_current_page()
+            self._pending_reading_context = {'mode': 'current_page'}
 
         success = self._process_current_tab_content(
             chapter_name,

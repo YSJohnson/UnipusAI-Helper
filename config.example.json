@@ -17,5 +17,6 @@
   "tts_voice": "",
   "tts_proxy": "",
   "screenshot": false,
+  "answer_api_enabled": true,
   "browser": "edge"
 }
