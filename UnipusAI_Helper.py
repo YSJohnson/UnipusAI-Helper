@@ -4216,9 +4216,12 @@ class PromptBuilder:
         if QuestionType.BANKED_CLOZE in type_counts:
             lines.extend(self._banked_cloze_hints())
 
+        text_question_count = type_counts.get(QuestionType.TEXT, 0)
         for q in questions:
             if q.q_type == QuestionType.TEXT:
-                lines.extend(self._build_text(q, effective_directions))
+                lines.extend(self._build_text(
+                    q, effective_directions, multi_text=text_question_count > 1
+                ))
             else:
                 builder_method = self._get_builder_method(q.q_type)
                 lines.extend(builder_method(q))
@@ -4568,20 +4571,38 @@ class PromptBuilder:
         lines.append("")
         return lines
 
-    def _build_text(self, q: Question, directions: str = "") -> List[str]:
+    def _build_text(self, q: Question, directions: str = "", *, multi_text: bool = False) -> List[str]:
         lines = [f"{q.number}. 【简答题】{q.text}"]
         if len(q.inputs) > 1:
             lines.append(f"   （共 {len(q.inputs)} 小题）")
         combined_dir = f"{q.directions or ''}\n{directions or ''}"
-        combined_all = f"{combined_dir}\n{q.text or ''}"
-        if re.search(r'into\s+english|翻译成英[文语]|汉译英', combined_all, re.I):
-            lines.append("   （翻译题：把原文完整翻译成英文，只输出英文译文，不要保留中文原文或题号）")
-        elif (re.search(r'into\s+chinese|翻译成中[文语]|英译汉', combined_all, re.I)
-              or (re.search(r'translat|翻译', combined_dir, re.I)
-                  and not CJK_CHAR_PATTERN.search(q.text or ''))):
-            lines.append("   （翻译题：把原文完整翻译成中文，只输出译文，不要保留英文原文）")
-        elif re.search(r'translat|翻译', combined_dir, re.I):
-            lines.append("   （翻译题：请按题目指示完成翻译，只输出译文，不要保留原文或题号）")
+        q_text = q.text or ''
+        dir_to_en = bool(re.search(r'into\s+english|(?:翻?译[成为]|汉译|中译)英[文语]?', combined_dir, re.I))
+        dir_to_zh = bool(re.search(r'into\s+chinese|(?:翻?译[成为]|英译)[中汉][文语]?', combined_dir, re.I))
+
+        target_lang = ''
+        if dir_to_en and not dir_to_zh:
+            target_lang = 'en'
+        elif dir_to_zh and not dir_to_en:
+            target_lang = 'zh'
+        else:
+            if re.search(r'(?:翻?译[成为]|汉译|中译)英[文语]?', q_text):
+                target_lang = 'en'
+            elif re.search(r'(?:翻?译[成为]|英译)[中汉][文语]?', q_text):
+                target_lang = 'zh'
+            elif re.search(r'translat|翻译', combined_dir, re.I):
+                target_lang = 'zh' if not CJK_CHAR_PATTERN.search(q_text) else 'generic'
+
+        multi_item = multi_text or len(q.inputs) > 1
+        if target_lang == 'en':
+            suffix = "请按题号分别编号输出" if multi_item else "不要保留中文原文或题号"
+            lines.append(f"   （翻译题：把原文完整翻译成英文，只输出英文译文，{suffix}）")
+        elif target_lang == 'zh':
+            suffix = "请按题号分别编号输出" if multi_item else "不要保留英文原文或题号"
+            lines.append(f"   （翻译题：把原文完整翻译成中文，只输出中文译文，{suffix}）")
+        elif target_lang == 'generic':
+            suffix = "请按题号分别编号输出" if multi_item else "不要保留原文或题号"
+            lines.append(f"   （翻译题：请按题目指示完成翻译，只输出译文，{suffix}）")
         else:
             lines.append("   （请提供简洁准确的回答，如果不是翻译题，那么只用英文回答）")
         lines.append("")
@@ -12048,11 +12069,26 @@ class AISolver:
     QUIZ_SUPPORTED_KINDS = {
         'choice', 'true_false', 'fill', 'dropdown', 'text', 'sorting', 'link_match'
     }
+    QUIZ_DROPDOWN_PLACEHOLDERS = frozenset({
+        '请选择', '选择', 'select', 'choose', 'pleaseselect', 'pleasechoose',
+        'selectone', 'selectanoption', 'chooseone', 'chooseanoption',
+    })
+
+    @classmethod
+    def _normalize_dropdown_placeholder(cls, text: str) -> str:
+        cleaned = re.sub(r'\s+', '', (text or '').strip().lower())
+        return re.sub(r'^[\-—–_•·:：.…▼▾⌄<>]+|[\-—–_•·:：.…▼▾⌄<>]+$', '', cleaned)
 
     def _publish_quiz_has_existing_answer(self, questions: List[Question]) -> bool:
         for question in questions:
             if any(opt.is_selected for opt in question.options):
                 return True
+            if question.q_type == QuestionType.LINK_MATCH:
+                try:
+                    if self.publish_executor._link_edge_count(question.group or question.element) > 0:
+                        return True
+                except Exception:
+                    pass
             for inp in question.inputs:
                 try:
                     if (inp.get_attribute('value') or '').strip():
@@ -12065,10 +12101,14 @@ class AISolver:
                         for inp in blank.find_elements(By.CSS_SELECTOR, 'input, textarea'):
                             if (inp.get_attribute('value') or '').strip():
                                 return True
+                        for sel in blank.find_elements(By.CSS_SELECTOR, 'select'):
+                            val = self._normalize_dropdown_placeholder(sel.get_attribute('value') or '')
+                            if val and val not in self.QUIZ_DROPDOWN_PLACEHOLDERS:
+                                return True
                         trigger = self.publish_executor._dropdown_trigger(blank)
                         if trigger is not None:
-                            text = PublishPlayer.button_text(trigger).strip().lower()
-                            if text and text not in ('请选择', 'select', 'choose'):
+                            text = self._normalize_dropdown_placeholder(PublishPlayer.button_text(trigger))
+                            if text and text not in self.QUIZ_DROPDOWN_PLACEHOLDERS:
                                 return True
                     except Exception:
                         continue
@@ -12084,6 +12124,10 @@ class AISolver:
                 return None
             if len(scoped) != 1:
                 print('    当前任务包含多个测试，请手动处理')
+                return False
+            if not self._ai_available():
+                print('    单元测试需要 AI 作答，但未配置 AI 接口，跳过该任务')
+                self._last_tab_outcome = 'skipped_no_ai'
                 return False
             covers = scoped[0]['element'].find_elements(By.CSS_SELECTOR, '[class*="coverContainer"]')
             if not covers or not WebDriverHelper.safe_click(self.driver, covers[0]):
@@ -12103,12 +12147,21 @@ class AISolver:
                     print('    单元测试已有成绩，保留现有结果')
                     return True
                 groups = self.publish_parser.collect_groups()
-                passages = self.publish_parser.collect_passages(groups)
                 parsed = []
+                active_passages: List[str] = []
+                seen_question_since_passage = False
                 for state in groups:
                     kind = state['kind']
                     if kind == 'unknown':
                         kind = self.publish_parser._kind_from_questions(state['element'])
+                    if state['type'] == 'rich_text_read_group':
+                        chunk = self.publish_parser.collect_passages([state])
+                        if chunk:
+                            if seen_question_since_passage:
+                                active_passages = []
+                                seen_question_since_passage = False
+                            active_passages.extend(chunk)
+                        continue
                     if kind == 'skip':
                         continue
                     if kind not in self.QUIZ_SUPPORTED_KINDS:
@@ -12116,43 +12169,42 @@ class AISolver:
                         return False
                     questions = self.publish_parser.parse_group(state['element'], state['type'], 1)
                     nodes = self.publish_parser._question_nodes(state['element'])
-                    if (not questions or (nodes and len(questions) != len(nodes))
+                    mismatch_fill = any(
+                        q.q_type == QuestionType.FILL_IN and q.blank_count and q.blank_count != len(q.inputs)
+                        for q in questions
+                    )
+                    if (not questions
+                            or (kind != 'link_match' and nodes and len(questions) != len(nodes))
+                            or mismatch_fill
                             or self._publish_quiz_has_existing_answer(questions)):
                         print('    测试已有作答或题目解析失败，保留当前进度')
                         return False
-                    parsed.append((state, kind, questions))
+                    group_passages = [] if state['type'] == 'translation_group' else list(active_passages)
+                    seen_question_since_passage = True
+                    parsed.append((state, kind, questions, group_passages))
                 if not parsed:
                     return False
-                for state, kind, questions in parsed:
+                for state, kind, questions, group_passages in parsed:
                     self.ai_client.force_reset('单元测试题组')
-                    for passage in passages:
+                    for passage in group_passages:
                         self.ai_client.add_passage_if_new(passage)
                     if not self._publish_prepare_media(state['element']):
                         return False
                     direction = self.publish_parser.group_direction(state['element'])
-                    prompt = self.prompt_builder.build(questions, direction)
-                    prompt += self._publish_fill_format_hint(questions)
-                    if state['type'] == 'fill_blanks_dropdown_group' or kind == 'dropdown':
-                        prompt += self._publish_dropdown_options_prompt(questions)
-                    response = self.ai_client.ask(prompt, stop_requested=self.stop_requested)
+                    prompt = self._publish_build_group_prompt(
+                        questions, direction, group_type=state['type'], kind=kind
+                    )
+                    response = self.ai_client.ask(
+                        prompt,
+                        stop_requested=self.stop_requested,
+                        screenshot=self._question_screenshot(questions),
+                        require_image=self._requires_image_context(questions),
+                    )
                     if not response or self._should_stop():
                         return False
-                    total_blanks = sum(
-                        question.answer_count or 1
-                        for question in questions
-                        if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT)
-                    )
-                    blank_offset = 0
-                    prepared_items = []
-                    for question in questions:
-                        answer = self._publish_answer_text(
-                            question, response, blank_offset, total_blanks=total_blanks
-                        )
-                        if question.q_type == QuestionType.FILL_IN:
-                            answer = self._normalize_fill_answer_capitalization(question, answer)
-                        prepared_items.append((question, answer or ''))
-                        if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
-                            blank_offset += question.answer_count or 1
+                    prepared_items = self._publish_prepare_answers(questions, response)
+                    if prepared_items is None:
+                        return False
                     adjusted_answers, _ = self._accuracy_controller().apply_to_items(
                         prepared_items, enforce_submit_floor=False
                     )
@@ -12432,10 +12484,9 @@ class AISolver:
                     return 'skipped_no_ai'
                 if not self._publish_prepare_media(group, skip_transcription=False):
                     return False
-                prompt = self.prompt_builder.build(questions, direction)
-                prompt += self._publish_fill_format_hint(questions)
-                if group_type == 'fill_blanks_dropdown_group':
-                    prompt += self._publish_dropdown_options_prompt(questions)
+                prompt = self._publish_build_group_prompt(
+                    questions, direction, group_type=group_type
+                )
                 ai_response = self.ai_client.ask(
                     prompt, stop_requested=self.stop_requested,
                     screenshot=self._question_screenshot(questions),
@@ -12445,17 +12496,11 @@ class AISolver:
                 if not ai_response:
                     print("    AI 未返回答案")
                     return False
-                blank_offset = 0
-                prepared_items = []
-                for question in questions:
-                    if self._should_stop() or not self._publish_group_in_scope(group):
-                        return False
-                    answer = self._publish_answer_text(question, ai_response, blank_offset)
-                    if question.q_type == QuestionType.FILL_IN:
-                        answer = self._normalize_fill_answer_capitalization(question, answer)
-                    prepared_items.append((question, answer or ''))
-                    if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
-                        blank_offset += question.answer_count or 1
+                prepared_items = self._publish_prepare_answers(
+                    questions, ai_response, group=group
+                )
+                if prepared_items is None:
+                    return False
 
                 adjusted_answers, _ = self._accuracy_controller().apply_to_items(
                     prepared_items, enforce_submit_floor=True
@@ -12698,6 +12743,36 @@ class AISolver:
             "例如：1.answer1 2.answer2 3.answer3\n"
             + '\n'.join(ranges) + '\n'
         )
+
+    def _publish_build_group_prompt(self, questions: List[Question], direction: str,
+                                    group_type: str = '', kind: str = '') -> str:
+        prompt = self.prompt_builder.build(questions, direction)
+        prompt += self._publish_fill_format_hint(questions)
+        if group_type == 'fill_blanks_dropdown_group' or kind == 'dropdown':
+            prompt += self._publish_dropdown_options_prompt(questions)
+        return prompt
+
+    def _publish_prepare_answers(self, questions: List[Question], ai_response: str,
+                                 *, group=None) -> Optional[List[Tuple[Question, str]]]:
+        total_blanks = sum(
+            question.answer_count or 1
+            for question in questions
+            if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT)
+        )
+        blank_offset = 0
+        prepared_items: List[Tuple[Question, str]] = []
+        for question in questions:
+            if self._should_stop() or (group is not None and not self._publish_group_in_scope(group)):
+                return None
+            answer = self._publish_answer_text(
+                question, ai_response, blank_offset, total_blanks=total_blanks
+            )
+            if question.q_type == QuestionType.FILL_IN:
+                answer = self._normalize_fill_answer_capitalization(question, answer)
+            prepared_items.append((question, answer or ''))
+            if question.q_type in (QuestionType.FILL_IN, QuestionType.DROPDOWN_SELECT):
+                blank_offset += question.answer_count or 1
+        return prepared_items
 
     def _publish_wait_group_rendered(self, group, timeout: float = 12.0) -> bool:
         deadline = time.time() + timeout
