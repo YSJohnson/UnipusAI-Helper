@@ -10,12 +10,57 @@ from .task_grading import (READ_GRADING_JS, assign_task_records, build_record_in
                            grading_text, score_text)
 
 
-def select_course_unit(driver, target, stop_requested=None):
+def describe_directory_page_state(driver) -> dict:
+    fallback_url = ''
+    fallback_title = ''
+    try:
+        raw_url = getattr(driver, 'current_url', '')
+        if isinstance(raw_url, str):
+            fallback_url = raw_url
+        raw_title = getattr(driver, 'title', '')
+        if isinstance(raw_title, str):
+            fallback_title = raw_title
+    except Exception:
+        pass
+    try:
+        res = driver.execute_script("""
+            const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const vis = el => !!el && !!el.getClientRects().length;
+            return {
+                url: location.href || '',
+                title: document.title || '',
+                ready_state: document.readyState || '',
+                body_head: clean(document.body && document.body.innerText).slice(0, 80),
+                unit_count: document.querySelectorAll('[class*="unitTabScrollContainer"] > *').length,
+                task_count: [...document.querySelectorAll(
+                    '[class*="taskItemInnerLayout"], [class*="nodeItemInnerLayout"]')].filter(vis).length,
+                spinning: [...document.querySelectorAll('.ant-spin-spinning, [aria-busy="true"]')].some(vis)
+            };
+        """)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+    return {
+        'url': fallback_url,
+        'title': fallback_title,
+        'ready_state': '',
+        'body_head': '',
+        'unit_count': 0,
+        'task_count': 0,
+        'spinning': False,
+    }
+
+
+def select_course_unit(driver, target, stop_requested=None,
+                       timeout: float = 12.0,
+                       stable_same_signature_sec: float = 2.5):
     if stop_requested is not None and stop_requested.is_set():
         raise TimeoutException('单元切换已停止')
     state_script = """
         const tab = arguments[0];
         const visible = el => !!el && !!el.getClientRects().length;
+        const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
         const cls = String(tab.className);
         const selected = tab.getAttribute('aria-selected');
         const active = selected === 'true' || (selected !== 'false' &&
@@ -29,31 +74,63 @@ def select_course_unit(driver, target, stop_requested=None):
         const root = panel || document;
         const tasks = [...root.querySelectorAll(
             '[class*="taskItemInnerLayout"], [class*="nodeItemInnerLayout"]')].filter(visible);
+        const headers = [...root.querySelectorAll('.ant-collapse-header, [class*="unitTitle"], [class*="unitName"]')]
+            .filter(el => visible(el) && !el.closest('[class*="unitTabScrollContainer"]'))
+            .map(el => clean(el.innerText));
         const loading = [...root.querySelectorAll('.ant-spin-spinning, [aria-busy="true"]')].some(visible);
+        const taskSig = tasks.map(el => {
+            const ds = el.dataset ? JSON.stringify(el.dataset) : '';
+            return ds + '|' + el.innerHTML;
+        }).join('\\n');
         return {active, linked: !!panel, ready: (!panel || visible(panel)) && !loading && tasks.length > 0,
-                signature: tasks.map(el => el.innerHTML).join('\\n')};
+                loading, taskCount: tasks.length,
+                signature: headers.join('|') + '\\n' + taskSig};
     """
     before = driver.execute_script(state_script, target)
     previous = driver.find_elements(By.CSS_SELECTOR, CourseCatalogMixin.TASK_ITEM_SELECTOR)
     driver.execute_script("arguments[0].click();", target)
 
+    stable_since = None
+    last_state = None
+
     def ready(_):
+        nonlocal stable_since, last_state
         if stop_requested is not None and stop_requested.is_set():
             raise TimeoutException('单元切换已停止')
         state = driver.execute_script(state_script, target)
+        last_state = state
         if not state['active'] or not state['ready']:
+            stable_since = None
             return False
         if before['active'] or state['linked'] or state['signature'] != before['signature']:
             return True
+        all_gone = True
         for element in previous:
             try:
                 if element.is_displayed():
-                    return False
+                    all_gone = False
+                    break
             except StaleElementReferenceException:
                 pass
-        return True
+        if all_gone:
+            return True
+        now = time.monotonic()
+        if stable_since is None:
+            stable_since = now
+            return False
+        return (now - stable_since) >= stable_same_signature_sec
 
-    WebDriverWait(driver, 10).until(ready)
+    try:
+        WebDriverWait(driver, timeout).until(ready)
+    except TimeoutException:
+        if stop_requested is not None and stop_requested.is_set():
+            raise
+        if isinstance(last_state, dict):
+            raise TimeoutException(
+                f"切换Unit超时({timeout:g}s, active={last_state.get('active')}, "
+                f"ready={last_state.get('ready')}, tasks={last_state.get('taskCount', '?')})"
+            ) from None
+        raise
 
 
 class CourseCatalogMixin:

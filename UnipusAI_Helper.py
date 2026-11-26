@@ -77,7 +77,7 @@ from unipus_helper.answer_api import OfficialAnswerProvider
 from unipus_helper.audio_recognizer import AudioTranscriber
 from unipus_helper.browser import DEFAULT_BROWSER, driver_api, get_spec, normalize_browser, quit_driver
 from unipus_helper.environment_checker import EnvironmentChecker
-from unipus_helper.course_catalog import select_course_unit
+from unipus_helper.course_catalog import describe_directory_page_state, select_course_unit
 from unipus_helper.record_skip import (normalize_skip_record_mode,
                                        should_skip_publish_group_fast,
                                        should_skip_record_question)
@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.17"
+APP_VERSION = "3.9.18"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -5923,14 +5923,72 @@ class AnswerExecutor:
         except:
             return False
 
-    def _wait_my_voice_upload_ready(self, q: Question, timeout: int = 12) -> bool:
-        start = time.time()
-        while time.time() - start < timeout:
-            if self._my_voice_has_uploaded_file(q):
-                return True
-            time.sleep(0.5)
-        print("\tMy voice 上传后未检测到文件列表变化，继续尝试提交")
-        return True
+    def _my_voice_upload_status(self, q: Question) -> Dict[str, Any]:
+        try:
+            res = self.driver.execute_script("""
+                const container = arguments[0];
+                const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+                const vis = el => !!el && !!el.getClientRects().length;
+                const root = (container && container.querySelector('.question-multi-file-upload')) || container;
+                const mediaList = root && root.querySelector('.media-list');
+                const items = mediaList ? [...mediaList.children].filter(el => vis(el) || clean(el.innerText)) : [];
+                const mediaText = clean(mediaList && mediaList.innerText);
+                const hasItem = items.length > 0 || !!mediaText;
+                const doneItems = mediaList ? mediaList.querySelectorAll('.media-status-done').length : 0;
+                const uploadingEls = mediaList ? [...mediaList.querySelectorAll(
+                    '.media-status-uploading, .ant-progress, .ant-spin-spinning, [class*="progress"]'
+                )].filter(vis) : [];
+                const uploading = uploadingEls.length > 0 || (
+                    doneItems === 0 && /上传中|uploading|\\b\\d{1,3}%/i.test(mediaText)
+                );
+                const toasts = [...document.querySelectorAll('.ant-message-notice')].filter(vis).map(el => clean(el.innerText)).join(' ');
+                const modals = [...document.querySelectorAll('[role="dialog"], .ant-modal')].filter(vis).map(el => clean(el.innerText)).join(' ');
+                const feedback = (toasts + ' ' + modals).trim();
+                return {
+                    has_item: hasItem,
+                    uploading: uploading,
+                    toast_success: /上传成功/.test(toasts) || (doneItems > 0 && !uploading),
+                    toast_fail: /上传失败/.test(feedback),
+                    fallback: false
+                };
+            """, q.element)
+            if isinstance(res, dict):
+                return res
+        except Exception:
+            pass
+        return {
+            'has_item': self._my_voice_has_uploaded_file(q),
+            'uploading': False,
+            'toast_success': False,
+            'toast_fail': False,
+            'fallback': True,
+        }
+
+    def _wait_my_voice_upload_ready(self, q: Question, timeout: int = 20) -> bool:
+        start = time.monotonic()
+        ready_since = None
+        last_status: Dict[str, Any] = {}
+        while time.monotonic() - start < timeout:
+            status = self._my_voice_upload_status(q)
+            last_status = status
+            if status.get('toast_fail'):
+                print("\tMy voice 附件上传失败")
+                return False
+            if status.get('has_item') and not status.get('uploading'):
+                if status.get('toast_success') or status.get('fallback'):
+                    time.sleep(0.4)
+                    return True
+                now = time.monotonic()
+                if ready_since is None:
+                    ready_since = now
+                elif now - ready_since >= 1.5:
+                    return True
+            else:
+                ready_since = None
+            time.sleep(0.4)
+        print(f"\tMy voice 附件上传超时（{timeout}s，has_item={last_status.get('has_item')}，"
+              f"uploading={last_status.get('uploading')}），停止提交以避免漏传")
+        return False
 
     def _create_my_voice_pdf(self, answer: str) -> str:
         filename = f"unipus_my_voice_{int(time.time())}.pdf"
@@ -9477,6 +9535,260 @@ class AnswerPrefetch:
         return self.answer
 
 
+def _format_webdriver_error(exc: Exception, driver=None) -> str:
+    raw = str(exc or '').split('Stacktrace:')[0].strip()
+    lines = []
+    for line in raw.splitlines():
+        cleaned = re.sub(r'^(?:Message:\s*)+', '', line.strip()).strip()
+        if cleaned:
+            lines.append(cleaned)
+    detail = ' '.join(lines)
+    base = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+    if driver is None:
+        return base
+    state = describe_directory_page_state(driver)
+    parts = [base]
+    body_head = state.get('body_head') if isinstance(state, dict) else ''
+    url = state.get('url') if isinstance(state, dict) else ''
+    if isinstance(body_head, str) and body_head.strip():
+        parts.append(f"页面={body_head.strip()[:50]}")
+    if isinstance(url, str) and url.strip():
+        parts.append(f"url={url.strip()[:100]}")
+    return ' | '.join(parts)
+
+
+def _wait_for_unit_container(driver, course_home_url: str, stop_requested=None,
+                             max_attempts: int = 3, per_attempt_timeout: int = 18):
+    last_summary = ''
+    for attempt in range(1, max_attempts + 1):
+        if stop_requested is not None and stop_requested.is_set():
+            raise TimeoutException('单元切换已停止')
+        if attempt > 1 and course_home_url:
+            driver.get(course_home_url)
+            if stop_requested is not None and stop_requested.wait(1.0):
+                raise TimeoutException('单元切换已停止')
+        try:
+            container = WebDriverWait(driver, per_attempt_timeout).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, '[class*="unitTabScrollContainer"]'))
+            )
+            children = container.find_elements(By.CSS_SELECTOR, ':scope > *')
+            if isinstance(children, (list, tuple)) and len(children) == 0:
+                for _ in range(10):
+                    if stop_requested is not None and stop_requested.is_set():
+                        raise TimeoutException('单元切换已停止')
+                    if stop_requested is not None:
+                        if stop_requested.wait(0.3):
+                            raise TimeoutException('单元切换已停止')
+                    else:
+                        time.sleep(0.3)
+                    children = container.find_elements(By.CSS_SELECTOR, ':scope > *')
+                    if not isinstance(children, (list, tuple)) or len(children) > 0:
+                        break
+            if not isinstance(children, (list, tuple)) or len(children) > 0:
+                return container
+            raise TimeoutException('unitTabScrollContainer 已出现但 Unit 列表为空')
+        except TimeoutException:
+            if stop_requested is not None and stop_requested.is_set():
+                raise
+            state = describe_directory_page_state(driver)
+            body_head = state.get('body_head') if isinstance(state, dict) else ''
+            last_summary = (body_head or state.get('title') or state.get('url') or '未知状态')[:60]
+            if attempt < max_attempts:
+                print(f"    课程目录未加载完成（第 {attempt}/{max_attempts} 次，页面状态: {last_summary}），"
+                      f"重新加载目录页...")
+    raise TimeoutException(f"课程目录加载超时（已尝试 {max_attempts} 次，页面状态: {last_summary}）")
+
+
+def _dismiss_known_info_overlays(driver) -> bool:
+    if driver is None:
+        return False
+    try:
+        clicked = driver.execute_script("""
+            const vis = el => !!el && !!el.getClientRects().length;
+            let hit = false;
+            for (const sel of ['.system-info-cloud-ok-button', '.know-box .iKnow']) {
+                for (const btn of document.querySelectorAll(sel)) {
+                    if (vis(btn)) {
+                        btn.click();
+                        hit = true;
+                    }
+                }
+            }
+            return hit;
+        """)
+        return clicked is True
+    except Exception:
+        return False
+
+
+def _install_submit_network_hook(driver) -> None:
+    if driver is None:
+        return
+    try:
+        driver.execute_script("""
+            const isTarget = url => /\\/(?:submit|grade\\/content)(?:[/?#]|$)/i.test(String(url || ''));
+            if (!window.__unipusSubmitMonitor) {
+                const state = {
+                    reqCount: 0,
+                    inFlight: 0,
+                    gradingPending: false,
+                    submitSucceeded: false,
+                    lastError: '',
+                    reset() {
+                        this.reqCount = 0;
+                        this.inFlight = 0;
+                        this.gradingPending = false;
+                        this.submitSucceeded = false;
+                        this.lastError = '';
+                    }
+                };
+                const inspectResponse = (url, status, bodyText) => {
+                    const u = String(url || '');
+                    const txt = String(bodyText || '');
+                    if (status >= 400) {
+                        state.lastError = 'HTTP ' + status + ' ' + u.slice(-60);
+                        state.gradingPending = false;
+                        return;
+                    }
+                    if (/icorrectId/i.test(txt) || /\\\\?"GradeStatus\\\\?":\\s*0/.test(txt)) {
+                        state.gradingPending = true;
+                        return;
+                    }
+                    if (/\\\\?"GradeStatus\\\\?":\\s*1/.test(txt)) {
+                        state.gradingPending = false;
+                        return;
+                    }
+                    if (/\\/submit(?:[/?#]|$)/i.test(u) && /"code"\\s*:\\s*0/.test(txt)) {
+                        state.gradingPending = false;
+                        state.submitSucceeded = true;
+                        return;
+                    }
+                    if (/\\/grade\\/content/i.test(u) && /"code"\\s*:\\s*10/.test(txt)) {
+                        state.gradingPending = true;
+                    }
+                };
+                if (typeof window.fetch === 'function') {
+                    const origFetch = window.fetch;
+                    window.fetch = function(...args) {
+                        const raw = args[0];
+                        const url = String((raw && raw.url) || raw || '');
+                        if (!isTarget(url)) return origFetch.apply(this, args);
+                        state.reqCount += 1;
+                        state.inFlight += 1;
+                        return origFetch.apply(this, args).then(res => {
+                            try {
+                                res.clone().text().then(txt => {
+                                    inspectResponse(url, res.status, txt);
+                                }).catch(() => {});
+                            } catch (_) {}
+                            state.inFlight = Math.max(0, state.inFlight - 1);
+                            return res;
+                        }, err => {
+                            state.inFlight = Math.max(0, state.inFlight - 1);
+                            state.lastError = String((err && err.message) || err || 'fetch error').slice(0, 80);
+                            throw err;
+                        });
+                    };
+                }
+                const origOpen = XMLHttpRequest.prototype.open;
+                const origSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    this.__unipusHookUrl = String(url || '');
+                    return origOpen.apply(this, arguments);
+                };
+                XMLHttpRequest.prototype.send = function() {
+                    const url = this.__unipusHookUrl || '';
+                    if (isTarget(url)) {
+                        state.reqCount += 1;
+                        state.inFlight += 1;
+                        this.addEventListener('loadend', () => {
+                            state.inFlight = Math.max(0, state.inFlight - 1);
+                            inspectResponse(url, this.status, this.responseText);
+                        });
+                    }
+                    return origSend.apply(this, arguments);
+                };
+                window.__unipusSubmitMonitor = state;
+            }
+            window.__unipusSubmitMonitor.reset();
+        """)
+    except Exception:
+        pass
+
+
+def _read_submit_network_state(driver) -> Optional[Dict[str, Any]]:
+    if driver is None:
+        return None
+    try:
+        res = driver.execute_script("""
+            const m = window.__unipusSubmitMonitor;
+            if (!m) return null;
+            return {
+                reqCount: Number(m.reqCount || 0),
+                inFlight: Number(m.inFlight || 0),
+                gradingPending: !!m.gradingPending,
+                submitSucceeded: !!m.submitSucceeded,
+                lastError: String(m.lastError || '')
+            };
+        """)
+        return res if isinstance(res, dict) else None
+    except Exception:
+        return None
+
+
+def _read_submit_progress_toast(driver) -> str:
+    if driver is None:
+        return ''
+    try:
+        res = driver.execute_script("""
+            const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const vis = el => !!el && !!el.getClientRects().length;
+            return [...document.querySelectorAll('.ant-message-notice, .ant-spin-text')]
+                .filter(vis)
+                .map(el => clean(el.innerText))
+                .filter(Boolean)
+                .join(' | ');
+        """)
+        return res if isinstance(res, str) else ''
+    except Exception:
+        return ''
+
+
+def _describe_submit_timeout_state(driver, net_state: Optional[Dict[str, Any]] = None) -> str:
+    parts = []
+    if isinstance(net_state, dict):
+        parts.append(
+            f"xhr(req={net_state.get('reqCount', 0)}, inFlight={net_state.get('inFlight', 0)}, "
+            f"grading={net_state.get('gradingPending', False)})"
+        )
+        if net_state.get('lastError'):
+            parts.append(f"err={net_state['lastError']}")
+    if driver is None:
+        return ' | '.join(parts)
+    try:
+        dom = driver.execute_script("""
+            const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+            const vis = el => !!el && !!el.getClientRects().length;
+            const btns = [...document.querySelectorAll('button, a.btn, .btn')].filter(vis).slice(0, 6).map(b =>
+                clean(b.innerText).slice(0, 20) + '[' + String(b.className || '').slice(0, 30) + ']'
+            );
+            const modals = [...document.querySelectorAll('[role="dialog"], .ant-modal, .ant-message-notice')]
+                .filter(vis).slice(0, 2).map(m => clean(m.innerText).slice(0, 60));
+            return {btns, modals};
+        """)
+        if isinstance(dom, dict):
+            btns = dom.get('btns') or []
+            modals = dom.get('modals') or []
+            if btns:
+                parts.append(f"可见按钮={btns}")
+            if modals:
+                parts.append(f"可见弹窗={modals}")
+    except Exception:
+        pass
+    return ' | '.join(parts)
+
+
 class AISolver:
 
     def __init__(self, driver, config: Config):
@@ -9816,7 +10128,7 @@ class AISolver:
         if '_element' in tab and tab['_element'] is not None:
             if task_idx > 0 or self.driver.current_url != course_home_url:
                 self.driver.get(course_home_url)
-                if self.stop_requested.wait(3):
+                if self.stop_requested.wait(1.0):
                     return 'stopped'
                 self.ai_client.force_reset(f"{chapter_name}_{tab_name}")
 
@@ -9837,9 +10149,8 @@ class AISolver:
         if '_element' in tab and tab['_element'] is not None:
             if '_unit_idx' in tab:
                 try:
-                    unit_container = WebDriverWait(self.driver, 10).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, '[class*="unitTabScrollContainer"]'))
+                    unit_container = _wait_for_unit_container(
+                        self.driver, course_home_url, self.stop_requested
                     )
                     unit_tabs = unit_container.find_elements(By.CSS_SELECTOR, ':scope > *')
                     if tab.get('_unit_id'):
@@ -9855,7 +10166,9 @@ class AISolver:
                         return 'stopped'
                     select_course_unit(self.driver, unit_tabs[unit_index], self.stop_requested)
                 except Exception as e:
-                    print(f"    切换Unit失败: {str(e)[:50]}")
+                    err_summary = _format_webdriver_error(e, self.driver)
+                    print(f"    切换Unit失败: {err_summary}")
+                    logger.warning(f"切换Unit失败 ({tab.get('display') or tab_name}): {err_summary}")
                     return 'skipped'
 
             chapter_clicked = False
@@ -9890,7 +10203,7 @@ class AISolver:
                     except Exception:
                         continue
             except Exception as e:
-                print(f"    重新定位章节失败: {str(e)[:50]}")
+                print(f"    重新定位章节失败: {_format_webdriver_error(e, self.driver)}")
 
             if self._should_stop():
                 return 'stopped'
@@ -10255,9 +10568,11 @@ class AISolver:
 
             def open_unit():
                 self.driver.get(directory_url)
-                WebDriverWait(self.driver, 25).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, '[class*="unitTabScrollContainer"]')))
-                time.sleep(1.5)
+                _wait_for_unit_container(
+                    self.driver, directory_url, self.stop_requested,
+                    max_attempts=2, per_attempt_timeout=18
+                )
+                time.sleep(1.0)
                 tabs = self.driver.find_elements(By.CSS_SELECTOR, '[class*="unitTabScrollContainer"] > *')
                 target = None
                 if unit_label:
@@ -11471,6 +11786,8 @@ class AISolver:
             if self._should_stop():
                 return False
             if self_check_handled and not normal_questions:
+                _dismiss_known_info_overlays(self.driver)
+                _install_submit_network_hook(self.driver)
                 if not self.executor.submit() or not self._wait_for_submit_complete():
                     return False
                 if self._should_stop():
@@ -11501,6 +11818,9 @@ class AISolver:
 
             if self._should_stop():
                 return False
+            if total_questions:
+                _dismiss_known_info_overlays(self.driver)
+                _install_submit_network_hook(self.driver)
             if total_questions and self.executor.submit():
                 if not self._wait_for_submit_complete():
                     self._last_tab_outcome = 'error'
@@ -12705,19 +13025,65 @@ class AISolver:
         return ""
 
     def _handle_confirm_dialog(self):
+        self._last_dialog_kind = None
+        self._last_dialog_text = ''
+        if self._should_stop():
+            return False
         try:
-            buttons = self.driver.find_elements(By.TAG_NAME, 'button')
-            for btn in buttons:
-                text = btn.text.strip()
-                if self._should_stop():
+            res = self.driver.execute_script("""
+                const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+                const vis = el => !!el && !!el.getClientRects().length;
+                const containers = [...document.querySelectorAll(
+                    '[role="dialog"], .ant-modal, .ant-modal-confirm, [class*="modal"], [class*="dialog"]'
+                )].filter(el => vis(el) && !el.classList.contains('ant-modal-mask'));
+                if (!containers.length) return null;
+
+                for (let i = containers.length - 1; i >= 0; i--) {
+                    const modal = containers[i];
+                    const modalText = clean(modal.innerText);
+                    if (!modalText) continue;
+
+                    const isValidationError = /还有.*没有作答|请完成后提交|请先作答|字数不足|不能少于|请先上传/.test(modalText);
+                    const isInfoOverlay = /本单元学习时间|学习截止时间已过|是否必修/.test(modalText) ||
+                        !!modal.querySelector('.system-info-cloud-ok-button');
+
+                    const btns = [...modal.querySelectorAll('button, a.btn, .btn, a')].filter(vis);
+                    let target = null;
+                    if (isValidationError || isInfoOverlay) {
+                        target = btns.find(b => b.classList && b.classList.contains('system-info-cloud-ok-button')) ||
+                            btns.find(b => /我知道了|确定|确认|ok/i.test(clean(b.innerText))) ||
+                            btns[0];
+                        if (target) {
+                            target.click();
+                            return {
+                                kind: isValidationError ? 'validation_error' : 'info_overlay',
+                                text: modalText.slice(0, 120)
+                            };
+                        }
+                    } else {
+                        for (const b of btns) {
+                            const txt = clean(b.innerText).replace(/\\s+/g, '');
+                            if (!txt || /取消|cancel|关闭|close|返回/i.test(txt)) continue;
+                            if (/确认提交|确认|确定|提交|我知道了|继续|ok|submit/i.test(txt)) {
+                                target = b;
+                                break;
+                            }
+                        }
+                        if (target) {
+                            target.click();
+                            return {kind: 'confirm', text: modalText.slice(0, 120)};
+                        }
+                    }
+                }
+                return null;
+            """)
+            if isinstance(res, dict) and res.get('kind'):
+                self._last_dialog_kind = res['kind']
+                self._last_dialog_text = res.get('text', '')
+                if self.stop_requested.wait(1):
                     return False
-                if any(k in text for k in ['确认', '确定', '我知道了', '继续', 'OK']):
-                    if btn.is_displayed():
-                        btn.click()
-                        if self.stop_requested.wait(1):
-                            return False
-                        return True
-        except:
+                return True
+        except Exception:
             pass
         return False
 
@@ -13060,14 +13426,38 @@ class AISolver:
         except Exception:
             return False
 
-    def _wait_for_submit_complete(self, timeout: int = 18) -> bool:
+    def _wait_for_submit_complete(self, timeout: int = 18, grading_timeout: int = 60) -> bool:
         if self.stop_requested.wait(1.5):
             return False
         start = time.time()
+        effective_timeout = timeout
+        resubmit_count = 0
+        last_click_elapsed = 0.0
+        grading_notified = False
 
-        while time.time() - start < timeout and not self._should_stop():
+        while not self._should_stop():
+            elapsed = time.time() - start
+            if elapsed >= effective_timeout:
+                break
             try:
+                self._last_dialog_kind = None
+                self._last_dialog_text = ''
                 if self._handle_confirm_dialog():
+                    dialog_kind = getattr(self, '_last_dialog_kind', None)
+                    if dialog_kind == 'validation_error':
+                        dialog_text = str(getattr(self, '_last_dialog_text', '') or '')[:80]
+                        print(f"   提交被页面拦截（{dialog_text}），保留任务为未完成")
+                        return False
+                    if dialog_kind == 'info_overlay':
+                        net_state = _read_submit_network_state(self.driver)
+                        no_req = net_state is None or (
+                            net_state.get('reqCount', 0) == 0 and net_state.get('inFlight', 0) == 0
+                        )
+                        if no_req and resubmit_count < 2:
+                            print("   已关闭提示遮罩，重新点击提交")
+                            if self.executor.submit():
+                                resubmit_count += 1
+                                last_click_elapsed = elapsed
                     continue
                 submit_btn = self._find_visible_submit_button()
                 if submit_btn is None:
@@ -13081,13 +13471,40 @@ class AISolver:
                     print(f"   检测到成功提示")
                     return True
 
-            except:
+                net_state = _read_submit_network_state(self.driver)
+                toast_text = _read_submit_progress_toast(self.driver)
+                grading_active = (
+                    (isinstance(net_state, dict)
+                     and (net_state.get('gradingPending') or net_state.get('inFlight', 0) > 0))
+                    or any(kw in toast_text for kw in ('正在提交', '评测中', '评分中'))
+                )
+                if grading_active:
+                    if effective_timeout < grading_timeout:
+                        effective_timeout = max(timeout, grading_timeout)
+                    if not grading_notified:
+                        print(f"   检测到平台提交/智能评测进行中，延长等待上限至 {effective_timeout}s...")
+                        grading_notified = True
+                elif (isinstance(net_state, dict)
+                      and net_state.get('reqCount', 0) == 0
+                      and net_state.get('inFlight', 0) == 0
+                      and not net_state.get('gradingPending')
+                      and resubmit_count < 2
+                      and (elapsed - last_click_elapsed) >= 4.0):
+                    print(f"   尚未检测到提交请求，尝试重新点击提交按钮（第 {resubmit_count + 1}/2 次）")
+                    if self.executor.submit():
+                        resubmit_count += 1
+                        last_click_elapsed = elapsed
+
+            except Exception:
                 pass
 
             if self.stop_requested.wait(0.5):
                 return False
 
-        print(f"   等待提交确认超时（{timeout}s），保留任务为未完成")
+        print(f"   等待提交确认超时（{effective_timeout}s），保留任务为未完成")
+        diag = _describe_submit_timeout_state(self.driver, _read_submit_network_state(self.driver))
+        if diag:
+            print(f"   超时现场诊断: {diag}")
         return False
 
     def _find_visible_submit_button(self) -> Optional[Any]:

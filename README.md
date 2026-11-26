@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-3.9.17-2561C7">
+  <img alt="Version" src="https://img.shields.io/badge/version-3.9.18-2561C7">
   <img alt="Python" src="https://img.shields.io/badge/python-3.9+-3776AB">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-555555">
   <img alt="Browser" src="https://img.shields.io/badge/browser-Edge%20%7C%20Chrome-43B02A">
@@ -321,10 +321,10 @@ UnipusAI-Helper/
 
 近期版本摘要（完整记录见 [CHANGELOG.md](CHANGELOG.md)）：
 
+- **v3.9.18（2026-11-26）**：修复批量切换 Unit 超时与长文本提交确认超时（issue #73）：支持课程目录慢加载自动重载与完整状态诊断、同模板 Unit 切换防超时、长文本 iCorrect 异步评测延长等待至 60s、弹窗容器化分类处理及 My voice 附件上传完成校验。
 - **v3.9.17（2026-11-26）**：新增实验性官方答案接口（`answer_api_enabled`，默认开启），客观题优先直填平台答案并跳过不必要的原文读取与音频转写、支持与 `target_accuracy` 配合控分；大模型 API 改为可选（未配置时需 AI 任务自动跳过），右上角模型检测改为手动触发。
 - **v3.9.16（2026-11-25）**：新增客观题目标正确率控制（`target_accuracy`）与三档自动跳过跟读/录音任务（`skip_record_mode`）两项实验性功能（issue #66）。
 - **v3.9.15（2026-11-25）**：修复示例页跳过与批量中断、自提交录音页无提交按钮误判、提交确认超时及视频弹窗续播与模型硬编码问题（issue #71）。
-- **v3.9.14（2026-11-24）**：修复搭配填空空位错位、首字母前缀扣除与 Learning / Practicing 学习材料读取（issue #68）。
 
 ---
 
