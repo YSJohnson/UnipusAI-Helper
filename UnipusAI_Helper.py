@@ -2114,6 +2114,7 @@ return (function (root) {
     name: name,
     index: index,
     total: total,
+    slideCount: wrapper.querySelectorAll('.swiper-slide').length,
     hasButton: !!button,
     recording: !!(button && button.querySelector('svg rect[fill="currentColor"]')),
     recordings: recordings
@@ -2134,14 +2135,14 @@ return (function (root, reset) {
   const move = function (inst) {
     const method = reset ? 'slideTo' : 'slideNext';
     if (!inst || typeof inst[method] !== 'function') { return false; }
-    if (reset) { inst.slideTo(0); } else { inst.slideNext(); }
+    if (reset) { inst.slideTo(0, 0); } else { inst.slideNext(0); }
     return true;
   };
   if (sw && move(sw.swiper)) {
     return 'swiper';
   }
   const btn = !reset && wrapper.querySelector(
-      '.swiper-button-next, [class*="vocNext"], [class*="next-btn"], [class*="nextBtn"]');
+      '.swiper-button-next, .action.next, [class*="vocNext"], [class*="next-btn"], [class*="nextBtn"]');
   if (btn) { btn.click(); return 'button'; }
   for (const key of ['vocSwiper', 'swiper', 'mySwiper']) {
     const inst = window[key];
@@ -5492,11 +5493,24 @@ class AnswerExecutor:
                 break
             word = (info.get('word') or '').strip()
             ok = self._record_vocab_card(q, info)
+            if not ok and not self.stop_requested.is_set():
+                print(f"\t词汇跟读 [{index}/{total}] {word} 首次失败，重试一次...")
+                if not self.stop_requested.wait(0.5):
+                    retry_info = self._wait_vocab_card(q, index)
+                    if retry_info:
+                        ok = self._record_vocab_card(q, retry_info)
+                        info = retry_info
             print(f"\t词汇跟读 [{index}/{total}] {word} -> {'OK' if ok else '失败'}")
             if not ok or self.stop_requested.is_set():
                 break
             done += 1
             if index == total:
+                if int(info.get('slideCount') or 0) > total:
+                    try:
+                        self.driver.execute_script(VOCAB_NEXT_JS, q.element)
+                        self.stop_requested.wait(1.5)
+                    except Exception:
+                        pass
                 break
 
             try:
@@ -9709,10 +9723,23 @@ class FlashcardHandler(ContentHandler):
 PAGE_SCORE_JS = r"""
     const clean = t => (t || '').replace(/\s+/g, ' ').trim();
     const visible = e => !!(e && e.getClientRects().length);
-    const body = clean(document.body.innerText);
+    const ignoreSel = 'nav, header, script, style, [class*="slider-menu"], [class*="pc-menu"], '
+                    + '[class*="break-crumb"], [class*="breadcrumb"], [class*="pc-header"]';
+    const texts = [];
+    if (document.body) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+            const parent = node.parentElement;
+            if (!parent || !visible(parent) || parent.closest(ignoreSel)) continue;
+            const t = (node.nodeValue || '').trim();
+            if (t) texts.push(t);
+        }
+    }
+    const body = clean(texts.join(' '));
 
-    const summary = body.match(/(?:得分|成绩|分数|总分)\s*[:：]?\s*(\d{1,3}(?:\.\d+)?)/)
-                 || body.match(/(\d{1,3}(?:\.\d+)?)\s*分/);
+    const summary = body.match(/(?:最终得分|本次得分|得分|成绩|分数|总分)\s*[:：]?\s*(\d{1,3}(?:\.\d+)?)(?:\s*分)?(?![\u4e00-\u9fffA-Za-z0-9.])/)
+                 || body.match(/(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*分(?![\u4e00-\u9fffA-Za-z0-9])/);
     if (summary) return parseFloat(summary[1]);
     const scores = [];
     for (const el of document.querySelectorAll('.score_layout')) {
@@ -10180,8 +10207,18 @@ class AISolver:
 
             if status == 'done':
                 self._retry_hint = ''
-                score = self._read_task_score()
-                if score is None and getattr(self, '_last_question_types', set()) & {
+                non_graded_types = {
+                    QuestionType.VIDEO, QuestionType.AUDIO,
+                    QuestionType.VOCABULARY_FLASHCARD, QuestionType.DISCUSSION_BOARD,
+                    QuestionType.SELF_CHECK,
+                }
+                last_types = getattr(self, '_last_question_types', set())
+                skip_score_check = (
+                    tab.get('is_scored') is False
+                    or (bool(last_types) and last_types <= non_graded_types)
+                )
+                score = None if skip_score_check else self._read_task_score()
+                if not skip_score_check and score is None and last_types & {
                         QuestionType.RECORD, QuestionType.ORAL_ALOUD,
                         QuestionType.MY_VOICE_TEXT}:
                     for _ in range(15):
