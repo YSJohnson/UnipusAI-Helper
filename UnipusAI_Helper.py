@@ -96,7 +96,7 @@ gui_log_queue = queue.Queue()
 
 DEBUG_MODE = False
 
-APP_VERSION = "3.9.18"
+APP_VERSION = "3.9.19"
 
 DEFAULT_LOGIN_URL = "https://uai.unipus.cn/sso/index.html?service=https%3A%2F%2Fucloud.unipus.cn%2Fhome"
 UCLOUD_HOME_URL = "https://ucloud.unipus.cn/home"
@@ -696,18 +696,128 @@ class WebDriverHelper:
                 continue
         return []
 
+    LONG_TEXT_JS_THRESHOLD = 120
+
     @staticmethod
     def human_like_delay(base_delay: float = 0.1) -> None:
         delay = base_delay * (0.8 + random.random() * 0.4)
         time.sleep(delay)
 
     @staticmethod
+    def _scroll_into_view_instant(driver, element) -> None:
+        try:
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest', behavior: 'auto'});",
+                element,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_element_focused(driver, element) -> bool:
+        try:
+            return bool(driver.execute_script("return document.activeElement === arguments[0];", element))
+        except Exception:
+            return False
+
+    @staticmethod
+    def ensure_focused(driver, element, retries: int = 3) -> bool:
+        for _ in range(max(1, retries)):
+            WebDriverHelper._scroll_into_view_instant(driver, element)
+            time.sleep(0.05)
+            if WebDriverHelper._is_element_focused(driver, element):
+                return True
+            try:
+                element.click()
+            except Exception:
+                try:
+                    ActionChains(driver).move_to_element(element).click().perform()
+                except Exception:
+                    pass
+            if WebDriverHelper._is_element_focused(driver, element):
+                return True
+            try:
+                driver.execute_script(
+                    "try { arguments[0].focus({preventScroll: true}); } "
+                    "catch (e) { arguments[0].focus(); }",
+                    element,
+                )
+            except Exception:
+                pass
+            if WebDriverHelper._is_element_focused(driver, element):
+                return True
+            time.sleep(0.1)
+        return WebDriverHelper._is_element_focused(driver, element)
+
+    @staticmethod
+    def set_value_via_js(driver, element, value: str, dispatch_blur: bool = True) -> None:
+        driver.execute_script("""
+            const el = arguments[0];
+            const value = arguments[1];
+            const dispatchBlur = Boolean(arguments[2]);
+            try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+            const prev = el.value;
+            const proto = el.tagName === 'TEXTAREA'
+                ? HTMLTextAreaElement.prototype
+                : (el.tagName === 'INPUT' ? HTMLInputElement.prototype : Object.getPrototypeOf(el));
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (desc && desc.set) { desc.set.call(el, value); } else { el.value = value; }
+            const tracker = el._valueTracker;
+            if (tracker) {
+                tracker.setValue(prev === value ? (value ? '' : ' ') : prev);
+            }
+            try {
+                el.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, cancelable: true,
+                    inputType: value ? 'insertText' : 'deleteContentBackward',
+                    data: value || null
+                }));
+            } catch (e) {
+                el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+            }
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            if (dispatchBlur) {
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }
+        """, element, value, dispatch_blur)
+
+    @staticmethod
+    def clear_input_verified(driver, element) -> bool:
+        try:
+            element.clear()
+        except Exception:
+            pass
+        try:
+            current = element.get_attribute('value') or ''
+        except Exception:
+            current = ''
+        if current:
+            try:
+                element.send_keys(Keys.CONTROL, 'a')
+                element.send_keys(Keys.BACKSPACE)
+                current = element.get_attribute('value') or ''
+            except Exception:
+                pass
+        if current:
+            try:
+                WebDriverHelper.set_value_via_js(driver, element, '', dispatch_blur=False)
+                current = element.get_attribute('value') or ''
+            except Exception:
+                pass
+        return not current
+
+    @staticmethod
     def simulate_typing(driver, element, text: str) -> None:
-        actions = ActionChains(driver)
-        actions.move_to_element(element).click().perform()
+        WebDriverHelper.ensure_focused(driver, element)
         WebDriverHelper.human_like_delay(0.1)
-        element.clear()
+        WebDriverHelper.clear_input_verified(driver, element)
+        if not WebDriverHelper._is_element_focused(driver, element):
+            WebDriverHelper.ensure_focused(driver, element, retries=2)
         WebDriverHelper.human_like_delay(0.1)
+        if len(text) > WebDriverHelper.LONG_TEXT_JS_THRESHOLD:
+            WebDriverHelper.set_value_via_js(driver, element, text, dispatch_blur=True)
+            WebDriverHelper.human_like_delay(0.1)
+            return
         for char in text:
             element.send_keys(char)
             time.sleep(random.uniform(0.01, 0.05))
@@ -5043,10 +5153,10 @@ class AnswerExecutor:
                             print(f"        匹配到选项: {clean_word}")
 
                     self.driver.execute_script(
-                        "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
+                        "arguments[0].scrollIntoView({block: 'center', inline: 'nearest', behavior: 'auto'});",
                         blank['input']
                     )
-                    time.sleep(0.3)
+                    time.sleep(0.05)
 
                     if not self._fill_text_input_verified(blank['input'], clean_word):
                         print(f"        空{i + 1}: 写入后校验失败，跳过该空")
@@ -5861,10 +5971,10 @@ class AnswerExecutor:
 
                 print(f"\t题{idx}: {ans[:60]}...")
                 self.driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
+                    "arguments[0].scrollIntoView({block: 'center', inline: 'nearest', behavior: 'auto'});",
                     inp
                 )
-                time.sleep(0.2)
+                time.sleep(0.05)
                 if self._fill_text_input_verified(inp, ans):
                     success_count += 1
                 else:
@@ -5880,10 +5990,10 @@ class AnswerExecutor:
         if ans:
             inp = q.inputs[0]
             self.driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});",
+                "arguments[0].scrollIntoView({block: 'center', inline: 'nearest', behavior: 'auto'});",
                 inp
             )
-            time.sleep(0.2)
+            time.sleep(0.05)
             if not self._fill_text_input_verified(inp, ans):
                 return False
             if q.q_type == QuestionType.MY_VOICE_TEXT:
@@ -5895,34 +6005,64 @@ class AnswerExecutor:
 
     def _fill_text_input_verified(self, inp, ans: str) -> bool:
         WebDriverHelper.simulate_typing(self.driver, inp, ans)
-        time.sleep(0.2)
+        time.sleep(0.15)
         if self._input_value_matches(inp, ans):
             return True
 
-        print("\t输入框为受控组件，使用 JS 同步值")
-        self.driver.execute_script("""
-            const el = arguments[0];
-            const value = arguments[1];
-            const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-            setter.call(el, value);
-            el.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                cancelable: true,
-                inputType: 'insertText',
-                data: value
-            }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-        """, inp, ans)
-        time.sleep(0.3)
-        return self._input_value_matches(inp, ans)
+        if len(ans) > WebDriverHelper.LONG_TEXT_JS_THRESHOLD:
+            try:
+                WebDriverHelper.ensure_focused(self.driver, inp, retries=2)
+                WebDriverHelper.clear_input_verified(self.driver, inp)
+                inp.send_keys(ans)
+                self.driver.execute_script("""
+                    arguments[0].dispatchEvent(new Event('input', {bubbles: true}));
+                    arguments[0].dispatchEvent(new Event('change', {bubbles: true}));
+                    arguments[0].dispatchEvent(new Event('blur', {bubbles: true}));
+                """, inp)
+                time.sleep(0.2)
+                if self._input_value_matches(inp, ans):
+                    return True
+            except Exception:
+                pass
+            print("\t长文本输入未匹配，重试 JS 同步值")
+            try:
+                WebDriverHelper.set_value_via_js(self.driver, inp, ans, dispatch_blur=True)
+                time.sleep(0.25)
+                if self._input_value_matches(inp, ans):
+                    return True
+            except Exception:
+                pass
+        else:
+            print("\t输入框为受控组件，使用 JS 同步值")
+            try:
+                WebDriverHelper.set_value_via_js(self.driver, inp, ans, dispatch_blur=True)
+                time.sleep(0.25)
+                if self._input_value_matches(inp, ans):
+                    return True
+            except Exception:
+                pass
+
+        try:
+            current = inp.get_attribute('value') or ''
+        except Exception:
+            current = ''
+        try:
+            maxlength = inp.get_attribute('maxlength')
+        except Exception:
+            maxlength = None
+        focused = WebDriverHelper._is_element_focused(self.driver, inp)
+        print(
+            f"\t文本写入校验失败: 当前长度={len(current)}, 期望长度={len(ans)}, "
+            f"maxlength={maxlength or '无'}, 已聚焦={focused}"
+        )
+        return False
 
     @staticmethod
     def _input_value_matches(inp, ans: str) -> bool:
         try:
-            current = inp.get_attribute('value') or ''
-            return current.strip() == ans.strip()
+            current = (inp.get_attribute('value') or '').replace('\r\n', '\n')
+            expected = (ans or '').replace('\r\n', '\n')
+            return current.strip() == expected.strip()
         except:
             return False
 
@@ -8804,6 +8944,63 @@ class VideoHandler(ContentHandler):
         self.skip_transcription = False
         self._transcript_lock = threading.Lock()
         self._handling_popup = threading.Event()
+        self._preprocessed_video_marker: Optional[Dict[str, Any]] = None
+        self._active_tab_key: str = ""
+
+    @staticmethod
+    def _normalize_video_url(url: str) -> str:
+        return (url or '').strip().split('#')[0]
+
+    def set_active_tab(self, tab_key: str) -> None:
+        self._active_tab_key = (tab_key or '').strip()
+
+    def clear_preprocessed_played(self) -> None:
+        self._preprocessed_video_marker = None
+
+    def mark_preprocessed_played(
+        self,
+        video_key: str = "",
+        video_url: str = "",
+        tab_key: str = "",
+        video_element=None,
+    ) -> None:
+        self._preprocessed_video_marker = {
+            'video_key': (video_key or '').strip(),
+            'video_url': self._normalize_video_url(video_url),
+            'tab_key': (tab_key or '').strip(),
+            'video_element': video_element,
+        }
+
+    def _consume_preprocessed_played(self) -> bool:
+        marker = getattr(self, '_preprocessed_video_marker', None)
+        if not marker:
+            return False
+        self._preprocessed_video_marker = None
+
+        active_tab_key = (getattr(self, '_active_tab_key', '') or '').strip()
+        marker_tab_key = (marker.get('tab_key') or '').strip()
+        if active_tab_key and marker_tab_key and active_tab_key != marker_tab_key:
+            return False
+
+        try:
+            info = self._get_video_info() or {}
+        except Exception:
+            info = {}
+
+        current_url = self._normalize_video_url(info.get('url', ''))
+        marker_url = (marker.get('video_url') or '').strip()
+        if marker_url and current_url and marker_url == current_url:
+            return True
+
+        marker_el = marker.get('video_element')
+        current_el = info.get('element')
+        if marker_el is not None and current_el is not None and marker_el == current_el:
+            return True
+
+        if active_tab_key and marker_tab_key and active_tab_key == marker_tab_key:
+            return True
+
+        return False
 
     def _play_video_and_handle_popups(self, on_transcript: Optional[Callable[[str], None]] = None):
         if self.stop_requested.is_set():
@@ -8855,6 +9052,10 @@ class VideoHandler(ContentHandler):
         return question.q_type == QuestionType.VIDEO
 
     def handle(self, question: Question) -> bool:
+        if self._consume_preprocessed_played():
+            print("     视频已在预处理阶段播放完成，跳过重复播放")
+            return True
+
         if self._check_video_completed():
             print("     视频已标记为完成，跳过")
             return True
@@ -10895,6 +11096,13 @@ class AISolver:
 
         if self._should_stop():
             return False
+        tab_key = f"{tab_name}|{l1_idx}|{l2_idx}"
+        video_handler = getattr(self, 'video_handler', None)
+        if video_handler is not None:
+            if hasattr(video_handler, 'clear_preprocessed_played'):
+                video_handler.clear_preprocessed_played()
+            if hasattr(video_handler, 'set_active_tab'):
+                video_handler.set_active_tab(tab_key)
         if self._is_publish_page():
             print("    检测到新版 ipublish 播放器，跳过旧版音视频预处理")
             return self._process_current_tab_content(
@@ -11526,6 +11734,8 @@ class AISolver:
                             print("    讨论区发帖需要 AI 作答，但未配置 AI 接口，跳过该任务")
                             self._last_tab_outcome = 'skipped_no_ai'
                             return False
+                        if q.q_type == QuestionType.VIDEO and hasattr(handler, 'set_active_tab'):
+                            handler.set_active_tab(f"{tab_name}|{l1_idx}|{l2_idx}")
                         print(f"     使用 {handler.__class__.__name__} 处理")
                         handled = handler.handle(q)
                         if not handled or self._should_stop():
@@ -13492,8 +13702,9 @@ class AISolver:
             if not video_info:
                 print("   未找到可播放的视频，停止当前任务")
                 return False
+            tab_key = f"{tab_name}|{l1_idx}|{l2_idx}"
             video_url = (video_info or {}).get('url', '')
-            video_key = video_url.split('#')[0] if video_url else f"{tab_name}|{l1_idx}|{l2_idx}"
+            video_key = video_url.split('#')[0] if video_url else tab_key
             if video_key in self._processed_video_tabs:
                 transcript = self._video_transcripts[video_key]
                 self.ai_client.add_video_transcript_if_new(transcript)
@@ -13545,9 +13756,23 @@ class AISolver:
                 print(f"   视频转写完成（{len(transcript)}字符）")
                 self._processed_video_tabs.add(video_key)
                 self._video_transcripts[video_key] = transcript
+                if hasattr(self.video_handler, 'mark_preprocessed_played'):
+                    self.video_handler.mark_preprocessed_played(
+                        video_key=video_key,
+                        video_url=video_url,
+                        tab_key=tab_key,
+                        video_element=video_info.get('element'),
+                    )
                 return True
             elif skip_transcription:
                 self._skipped_video_tabs.add(video_key)
+                if hasattr(self.video_handler, 'mark_preprocessed_played'):
+                    self.video_handler.mark_preprocessed_played(
+                        video_key=video_key,
+                        video_url=video_url,
+                        tab_key=tab_key,
+                        video_element=video_info.get('element'),
+                    )
                 return True
             else:
                 print("   视频转写失败")

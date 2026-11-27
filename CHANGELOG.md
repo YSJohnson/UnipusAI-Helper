@@ -4,6 +4,17 @@
 
 ---
 
+## v3.9.19（2026-11-27）
+
+修复长文本框不自动聚焦输入与视频任务重复播放两遍问题（issue #75），并包含新版单元测试题型扩展与修复（issue #74）。
+
+- **长文本框聚焦校验与快速写入**：将 `_fill_text` / `_fill_banked_cloze` 的平滑滚动改为瞬时滚动（`behavior: 'auto'`），输入前强制校验 `document.activeElement === element`（点击未命中时 JS `.focus()` 兜底）并复查清空状态；超过 120 字的长文本改用原生原型 setter + React `_valueTracker` 同步快速写入，短文本保留逐字输入；校验失败时输出当前长度、期望长度、`maxlength` 与聚焦状态诊断，并归一化 `\r\n` 换行比对（issue #75）。
+- **视频任务预处理与正式处理去重**：在 `VideoHandler` 中引入一次性预处理播放完成标记（按归一化 URL、`<video>` 元素与 tab 标识校验，消费后立即清空并在切换 tab 时清理残留），避免预处理播完后 `VideoHandler.handle()` 再次重播同一视频（issue #75）。
+- **新版单元测试扩展与修复**：扩展新版 `ipublish` 单元测试支持选词填空与翻译题型，并修复翻译方向判断、已有作答检测与多空切片问题（issue #74）。
+- **致谢**：感谢 [@xmzzmark](https://github.com/xmzzmark) 提供复现日志与根因定位线索（issue #75）。
+
+---
+
 ## v3.9.18（2026-11-26）
 
 修复批量处理目录切换超时跳题与简答/写作/My voice 页提交确认超时问题（issue #73）。
