@@ -1,5 +1,6 @@
 import re
 import time
+from collections import Counter
 from urllib.parse import parse_qs, urlsplit
 
 from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
@@ -7,7 +8,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .task_grading import (READ_GRADING_JS, assign_task_records, build_record_index,
-                           grading_text, score_text)
+                           build_unit_names, grading_text, score_text)
 
 
 def describe_directory_page_state(driver) -> dict:
@@ -52,9 +53,25 @@ def describe_directory_page_state(driver) -> dict:
     }
 
 
+def _wait_unit_statuses_settled(driver, target, state_script, stop_requested=None,
+                                timeout: float = 3.0):
+    deadline = time.monotonic() + max(0.0, float(timeout or 0.0))
+    while time.monotonic() < deadline:
+        if stop_requested is not None and stop_requested.is_set():
+            raise TimeoutException('单元切换已停止')
+        time.sleep(0.1)
+        try:
+            state = driver.execute_script(state_script, target)
+        except Exception:
+            return
+        if not isinstance(state, dict) or not state.get('pendingStatus'):
+            return
+
+
 def select_course_unit(driver, target, stop_requested=None,
                        timeout: float = 12.0,
-                       stable_same_signature_sec: float = 2.5):
+                       stable_same_signature_sec: float = 2.5,
+                       settle_timeout: float = 3.0):
     if stop_requested is not None and stop_requested.is_set():
         raise TimeoutException('单元切换已停止')
     state_script = """
@@ -78,12 +95,20 @@ def select_course_unit(driver, target, stop_requested=None,
             .filter(el => visible(el) && !el.closest('[class*="unitTabScrollContainer"]'))
             .map(el => clean(el.innerText));
         const loading = [...root.querySelectorAll('.ant-spin-spinning, [aria-busy="true"]')].some(visible);
+        const statuses = tasks.map(el => {
+            const tip = el.querySelector(
+                '[class*="nodePassStateTip"], [class*="taskPassStateTip"], [class*="PassStateTip"], [class*="passStateTip"]'
+            ) || el.querySelector('[class*="taskStateContainer"], [class*="nodeStateContainer"]');
+            return clean(tip && tip.innerText);
+        });
+        const isPlaceholderStatus = s => !s || /^(已锁定|加载中\\.{0,3}|loading\\.{0,3}|locked)$/i.test(s);
+        const pendingStatus = statuses.length > 0 && statuses.every(isPlaceholderStatus);
         const taskSig = tasks.map(el => {
             const ds = el.dataset ? JSON.stringify(el.dataset) : '';
             return ds + '|' + el.innerHTML;
         }).join('\\n');
         return {active, linked: !!panel, ready: (!panel || visible(panel)) && !loading && tasks.length > 0,
-                loading, taskCount: tasks.length,
+                loading, taskCount: tasks.length, pendingStatus,
                 signature: headers.join('|') + '\\n' + taskSig};
     """
     before = driver.execute_script(state_script, target)
@@ -131,6 +156,10 @@ def select_course_unit(driver, target, stop_requested=None,
                 f"ready={last_state.get('ready')}, tasks={last_state.get('taskCount', '?')})"
             ) from None
         raise
+    if isinstance(last_state, dict) and last_state.get('pendingStatus'):
+        _wait_unit_statuses_settled(
+            driver, target, state_script, stop_requested=stop_requested, timeout=settle_timeout
+        )
 
 
 class CourseCatalogMixin:
@@ -172,7 +201,9 @@ class CourseCatalogMixin:
 
           if (!el.getClientRects().length) return;
           const nameEl = el.querySelector('[class*="taskTypeName"], [class*="nodeTypeName"]');
-          const statusEl = el.querySelector('[class*="nodePassStateTip"]');
+          const statusEl = el.querySelector(
+              '[class*="nodePassStateTip"], [class*="taskPassStateTip"], [class*="PassStateTip"], [class*="passStateTip"]'
+          ) || el.querySelector('[class*="taskStateContainer"], [class*="nodeStateContainer"]');
           const requireEl = el.querySelector('[class*="taskRequireIcon"], [class*="nodeRequireIcon"]');
           const path = [];
           let p = el;
@@ -201,6 +232,78 @@ class CourseCatalogMixin:
         return (title || el.innerText || '').replace(/\\s+/g, ' ').trim();
     """
 
+    UNIT_PANEL_NAME_JS = """
+        const visible = el => !!el && !!el.getClientRects().length;
+        const node = [...document.querySelectorAll(
+            '[class*="unitNameLabel"], [class*="unitName__"], [class*="unitTitle"]')]
+            .find(el => visible(el) && !el.closest('[class*="unitTabScrollContainer"]') && (el.innerText || '').trim());
+        return node ? (node.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+    """
+
+    VISIBLE_STATUS_PENDING_JS = """
+        const clean = t => (t || '').replace(/\\s+/g, ' ').trim();
+        const isPlaceholderStatus = s => !s || /^(已锁定|加载中\\.{0,3}|loading\\.{0,3}|locked)$/i.test(s);
+        const tasks = [...document.querySelectorAll(
+            '[class*="taskItemInnerLayout"], [class*="nodeItemInnerLayout"]')]
+            .filter(el => !!el && !!el.getClientRects().length);
+        if (!tasks.length) return false;
+        return tasks.every(el => {
+            const tip = el.querySelector(
+                '[class*="nodePassStateTip"], [class*="taskPassStateTip"], [class*="PassStateTip"], [class*="passStateTip"]'
+            ) || el.querySelector('[class*="taskStateContainer"], [class*="nodeStateContainer"]');
+            return isPlaceholderStatus(clean(tip && tip.innerText));
+        });
+    """
+
+    @staticmethod
+    def _is_placeholder_unit_label(label: str) -> bool:
+        return not re.search(r'[A-Za-z0-9\u4e00-\u9fff]', (label or '').strip())
+
+    @staticmethod
+    def _player_directory_target(route: str):
+        parsed = urlsplit(route or '')
+        if parsed.hostname != 'ucontent.unipus.cn':
+            return '', ''
+        query = parse_qs(parsed.query)
+        resource = (query.get('courseResourceId') or [''])[0].strip()
+        if not resource:
+            callback = (query.get('sourceCallBackUrl') or [''])[0]
+            if callback:
+                resource = (parse_qs(urlsplit(callback).query).get('courseResourceId') or [''])[0].strip()
+        if not resource.isdigit():
+            return '', ''
+        match = re.search(r'/courseware/([^/]+)', parsed.fragment or '')
+        return resource, (match.group(1) if match else '')
+
+    def _wait_visible_statuses_settled(self, timeout: float = 3.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(timeout or 0.0))
+        while True:
+            try:
+                pending = bool(self.driver.execute_script(self.VISIBLE_STATUS_PENDING_JS))
+            except Exception:
+                return
+            if not pending or time.monotonic() >= deadline:
+                return
+            time.sleep(0.1)
+
+    def _resolve_unit_display(self, info, duplicate_label: bool = False):
+        unit_display = info["display"]
+        unit_is_preview = info["is_preview"]
+        if not duplicate_label and not self._is_placeholder_unit_label(info.get("label", "")):
+            return unit_display, unit_is_preview
+        try:
+            panel_name = (self.driver.execute_script(self.UNIT_PANEL_NAME_JS) or "").strip()
+        except Exception:
+            panel_name = ""
+        if not panel_name:
+            return unit_display, unit_is_preview
+        if re.search(r'unit\s*([0-9]+)', panel_name, re.I):
+            return self._parse_unit_label(panel_name)
+        is_preview = bool(re.search(
+            r'preview|intro|预备|预习|准备|starter|start\s*up|导学', panel_name, re.I
+        ))
+        return panel_name, is_preview
+
     @staticmethod
     def _parse_unit_label(label: str):
         text = (label or "").strip()
@@ -216,11 +319,21 @@ class CourseCatalogMixin:
     @staticmethod
     def _status_key(text: str) -> str:
         value = (text or "").strip()
-        if any(kw in value for kw in ("进行中", "未完成", "继续")):
+        lowered = value.lower()
+        if any(kw in lowered for kw in (
+            "进行中", "学习中", "作答中", "未完成", "部分完成", "继续", "未通过", "未达标", "重做",
+            "in progress", "ongoing", "incomplete", "failed"
+        )):
             return "doing"
-        if any(kw in value for kw in ("未开始", "未学习", "未做")):
+        if any(kw in lowered for kw in (
+            "未开始", "未学习", "未做", "待学习", "待完成", "待作答",
+            "not started", "unstarted", "to do"
+        )):
             return "todo"
-        if any(kw in value for kw in ("已完成", "完成", "通过", "满分")):
+        if any(kw in lowered for kw in (
+            "已完成", "完成", "已通过", "通过", "满分", "已提交", "已达标",
+            "completed", "finished", "passed", "done"
+        )):
             return "done"
         return "unknown"
 
@@ -228,13 +341,12 @@ class CourseCatalogMixin:
         tabs = []
         try:
             player_unit = ''
-            if self.solver._is_publish_page():
-                route = self.driver.current_url
-                resource = parse_qs(urlsplit(route).query).get('courseResourceId', [''])[0]
-                if not resource.isdigit():
-                    raise ValueError('播放器地址缺少 courseResourceId，无法定位课程目录')
-                match = re.search(r'/courseware/([^/]+)', urlsplit(route).fragment)
-                player_unit = match.group(1) if match else ''
+            is_publish = self.solver._is_publish_page()
+            route = self.driver.current_url or ''
+            resource, player_unit = self._player_directory_target(route)
+            if is_publish and not resource:
+                raise ValueError('播放器地址缺少 courseResourceId，无法定位课程目录')
+            if is_publish or resource:
                 if current_unit_only and not player_unit:
                     raise ValueError('播放器地址缺少单元标识，无法确认当前单元')
                 self.gui_log_queue.put('从播放器返回本教材课程目录，读取任务列表')
@@ -262,6 +374,7 @@ class CourseCatalogMixin:
                     "unit_id": unit_id.group(1) if unit_id else '',
                 })
 
+            raw_label_counts = Counter(info.get("label", "") for info in unit_infos)
             active_info = next((i for i in unit_infos if self._is_active_unit(i["element"])), None)
             if current_unit_only and player_unit:
                 active_info = next((i for i in unit_infos
@@ -278,6 +391,12 @@ class CourseCatalogMixin:
                     except Exception:
                         self.gui_log_queue.put(f"单元 {info['display']} 未确认加载完成，跳过扫描")
                         return
+                else:
+                    self._wait_visible_statuses_settled()
+                duplicate_label = raw_label_counts.get(info.get("label", ""), 0) > 1
+                unit_display, unit_is_preview = self._resolve_unit_display(
+                    info, duplicate_label=duplicate_label
+                )
                 tasks = self.driver.execute_script(self.READ_TASKS_JS) or []
                 elements = self.driver.find_elements(self.By.CSS_SELECTOR, self.TASK_ITEM_SELECTOR)
                 for task in tasks:
@@ -304,11 +423,11 @@ class CourseCatalogMixin:
                         "l1_title": name,
                         "l2_title": section_title,
                         "display": self._format_task_display(
-                            compulsory, info["display"], section_title, name, task.get("status", "")),
+                            compulsory, unit_display, section_title, name, task.get("status", "")),
                         "is_l2": False,
                         "is_compulsory": compulsory,
-                        "unit_label": info["display"],
-                        "unit_is_preview": info["is_preview"],
+                        "unit_label": unit_display,
+                        "unit_is_preview": unit_is_preview,
                         "section": section_title,
                         "status": status_key,
                         "status_text": (task.get("status") or "").strip(),
@@ -343,6 +462,7 @@ class CourseCatalogMixin:
 
     def _enrich_task_grading(self, tabs):
         index = {}
+        unit_names = {}
         try:
             route = urlsplit(self.driver.current_url)
             resource = re.fullmatch(r'/app/cmgt/resource-detail/(\d+)/?', route.path)
@@ -350,11 +470,38 @@ class CourseCatalogMixin:
             if route.hostname == 'ucloud.unipus.cn' and resource and unit_ids:
                 self.gui_log_queue.put('正在读取学习记录中的计分标记...')
                 result = self.driver.execute_async_script(READ_GRADING_JS, resource.group(1), unit_ids) or {}
-                index = build_record_index(result.get('units') or [])
+                units = result.get('units') or []
+                index = build_record_index(units)
+                unit_names = build_unit_names(units)
         except Exception:
             self.gui_log_queue.put('学习记录计分标记读取失败，保留任务并标记为计分未知')
+        before_status_texts = [t.get('status_text', '') for t in tabs]
+        before_unit_labels = [t.get('unit_label', '') for t in tabs]
         assign_task_records(tabs, index)
-        for tab in tabs:
+        for tab, old_status_text, old_unit_label in zip(tabs, before_status_texts, before_unit_labels):
+            raw_unit_label = tab.get('unit_label', '')
+            if (raw_unit_label.startswith('预备单元 · ')
+                    and self._is_placeholder_unit_label(raw_unit_label.replace('预备单元 · ', '', 1))
+                    and unit_names.get(tab.get('_unit_id', ''))):
+                api_unit_name = unit_names[tab['_unit_id']]
+                if re.search(r'unit\s*([0-9]+)', api_unit_name, re.I):
+                    parsed_name, parsed_preview = self._parse_unit_label(api_unit_name)
+                    tab['unit_label'] = parsed_name
+                    tab['unit_is_preview'] = parsed_preview
+                else:
+                    tab['unit_label'] = api_unit_name
+                    tab['unit_is_preview'] = bool(re.search(
+                        r'preview|intro|预备|预习|准备|starter|start\s*up|导学', api_unit_name, re.I
+                    ))
+            if (tab.get('status_text', '') != old_status_text
+                    or tab.get('unit_label', '') != old_unit_label):
+                tab['display'] = self._format_task_display(
+                    tab.get('is_compulsory'),
+                    tab.get('unit_label', ''),
+                    tab.get('section', ''),
+                    tab.get('l1_title', ''),
+                    tab.get('status_text', ''),
+                )
             tab['display'] += f" · {grading_text(tab['is_scored'])}"
             if tab.get('score') is not None:
                 tab['display'] += f" · 已有 {score_text(tab['score'])} 分"
