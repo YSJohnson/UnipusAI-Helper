@@ -4202,6 +4202,16 @@ class GenericReplyStrategy(QuestionParserStrategy):
                 lines.append(f"【题目要求】{directions}")
             if material:
                 lines.append(f"【原文/材料】{material}")
+            prompts = self._collect_sub_prompts(container, textareas)
+            distinct = {prompt.strip() for prompt in prompts if prompt and prompt.strip()}
+            if len(distinct) > 1:
+                lines.append(f"【小题列表】（本页共 {len(textareas)} 个小题）")
+                for stem_index, prompt in enumerate(prompts, 1):
+                    stem = re.sub(r'^\d+\s*[.、)]\s*', '', (prompt or '').strip()).strip()
+                    lines.append(f"{stem_index}. {stem if stem else '（本小题无独立题干，按材料与题目要求作答）'}")
+                lines.append("【要求】上面每个小题都必须单独作答；回答时严格按 1、2、… 编号逐题输出，格式：1.第一题答案 2.第二题答案 …")
+            elif len(textareas) > 1:
+                lines.append(f"【作答方式】本页共 {len(textareas)} 个输入框：请按输入框顺序用 1、2、… 编号逐个作答，每个输入框都必须有内容。")
             if re.search(r'translat|翻译', directions or '', re.I):
                 lines.append("请把上面的原文完整翻译成中文，只输出译文。")
             elif re.search(r'summari|总结|概括|main idea|general idea', directions or '', re.I):
@@ -4258,6 +4268,42 @@ class GenericReplyStrategy(QuestionParserStrategy):
                 container.find_elements(By.CSS_SELECTOR, '.fe-scoop input'))
         except Exception:
             return []
+
+    @staticmethod
+    def _collect_sub_prompts(container, textareas) -> List[str]:
+        """尽量收集每个 textarea 对应的小题题干（输入框头或占位符）。"""
+        prompts = [''] * len(textareas)
+        try:
+            boxes = container.find_elements(By.CSS_SELECTOR, '.question-inputbox')
+        except Exception:
+            boxes = []
+        if boxes and len(boxes) == len(textareas):
+            for index, box in enumerate(boxes):
+                text = ''
+                try:
+                    header = box.find_element(By.CSS_SELECTOR, '.question-inputbox-header')
+                    text = (header.text or '').strip()
+                except Exception:
+                    text = ''
+                if not text:
+                    try:
+                        text = (box.text or '').strip()
+                    except Exception:
+                        text = ''
+                prompts[index] = text
+        if not any(prompt.strip() for prompt in prompts):
+            for index, area in enumerate(textareas):
+                prompt = ''
+                for attr in ('placeholder', 'aria-label', 'title'):
+                    try:
+                        value = area.get_attribute(attr)
+                    except Exception:
+                        value = None
+                    if value and value.strip():
+                        prompt = value.strip()
+                        break
+                prompts[index] = prompt
+        return prompts
 
     @staticmethod
     def _material_text(container, textarea) -> str:
@@ -4703,6 +4749,23 @@ class PromptBuilder:
             elif re.search(r'translat|翻译', combined_dir, re.I):
                 target_lang = 'zh' if not CJK_CHAR_PATTERN.search(q_text) else 'generic'
 
+        if len(q.inputs) > 1:
+            stems = []
+            for item in (q.banked_blanks or []):
+                stem = ''
+                if isinstance(item, dict):
+                    stem = str(item.get('words') or item.get('question_text') or '').strip()
+                if stem:
+                    stems.append(stem)
+            if len(stems) == len(q.inputs) and len(set(stems)) > 1:
+                lines.append(f"   【小题列表】（共 {len(stems)} 个小题，每题都必须作答）")
+                for stem_index, stem in enumerate(stems, 1):
+                    lines.append(f"   {stem_index}. {stem}")
+                lines.append("   （回答时严格按 1、2、… 编号逐题输出，按题号对应每个小题，不要合并、不要遗漏）")
+            elif not stems:
+                lines.append(f"   （本题为 {len(q.inputs)} 个小题的简答组：请按题号 1、2、… 分别作答，每个小题都要有单独内容）")
+            lines.append(f"   （共 {len(q.inputs)} 小题）")
+
         multi_item = multi_text or len(q.inputs) > 1
         if target_lang == 'en':
             suffix = "请按题号分别编号输出" if multi_item else "不要保留中文原文或题号"
@@ -4796,7 +4859,8 @@ class PromptBuilder:
             lines.append("判断题: 每题回答 T 或 F，如：1.T 2.F")
 
         if QuestionType.TEXT in type_counts:
-            lines.append("简答题: 1.答案内容...")
+            lines.append("简答题: 逐题编号作答，如：1.第一题答案 2.第二题答案")
+            lines.append("注意：每个小题都必须作答，逐题编号，不要合并成一段，也不要遗漏任何一个题号！")
 
         if QuestionType.MY_VOICE_TEXT in type_counts:
             lines.append("My voice文字作答: 1.英文介绍内容（500字符以内）")
