@@ -83,8 +83,8 @@ from unipus_helper.record_skip import (normalize_skip_record_mode,
                                        should_skip_record_question)
 from openai import OpenAI
 from selenium.common.exceptions import (InvalidSessionIdException, NoSuchDriverException,
-                                        NoSuchElementException, TimeoutException,
-                                        StaleElementReferenceException,
+                                        NoSuchElementException, NoSuchWindowException,
+                                        TimeoutException, StaleElementReferenceException,
                                         SessionNotCreatedException, WebDriverException)
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -9533,12 +9533,15 @@ class VideoHandler(ContentHandler):
         except Exception:
             return False
 
+    STALL_ABORT_SECONDS = 90.0
+
     def _wait_for_video_complete(self, video, duration: float):
         max_wait = (duration / 2 + 30) if duration and duration > 0 else 60
         start_time = time.time()
         last_progress = 0
         last_current = None
         stall_since = None
+        hard_stall_since = start_time
         popup_paused_total = 0.0
         max_popup_wait = 300.0
         popup_pause_start = None
@@ -9559,6 +9562,7 @@ class VideoHandler(ContentHandler):
                 popup_paused_total += min(now - popup_pause_start, max(0.0, max_popup_wait - popup_paused_total))
                 popup_pause_start = None
                 stall_since = now
+                hard_stall_since = now
 
             if now - start_time - popup_paused_total >= max_wait:
                 break
@@ -9567,40 +9571,48 @@ class VideoHandler(ContentHandler):
                 if self.stop_requested.is_set() or self.stop_monitoring.is_set():
                     break
 
-                current = self.driver.execute_script("return arguments[0].currentTime;", video)
-                ended = self.driver.execute_script("return arguments[0].ended;", video)
+                state = self.driver.execute_script(
+                    "const v = arguments[0]; return {current: v.currentTime, ended: !!v.ended, duration: Number.isFinite(v.duration) ? v.duration : 0};",
+                    video,
+                )
+                if not isinstance(state, dict):
+                    break
+                current = state.get('current')
+                ended = bool(state.get('ended'))
 
                 if ended:
                     print(f"       视频播放完成")
                     return True
 
                 if not duration or duration <= 0:
-                    try:
-                        detected = self.driver.execute_script("return arguments[0].duration;", video)
-                        if isinstance(detected, (int, float)) and detected > 0:
-                            duration = float(detected)
-                            max_wait = duration / 2 + 30
-                    except Exception:
-                        pass
+                    detected = state.get('duration')
+                    if isinstance(detected, (int, float)) and detected > 0:
+                        duration = float(detected)
+                        max_wait = duration / 2 + 30
 
                 if last_current is None or current != last_current:
                     last_current = current
                     stall_since = now
-                elif stall_since is not None and now - stall_since >= 3:
-                    if handling_popup is None or not handling_popup.is_set():
-                        popup = None
-                        try:
-                            popup = self._find_popup_question()
-                        except Exception:
+                    hard_stall_since = now
+                else:
+                    if (handling_popup is None or not handling_popup.is_set()) and now - hard_stall_since >= self.STALL_ABORT_SECONDS:
+                        print("      视频播放连续停滞超过 90 秒，提前结束当前任务（已保留勾选）")
+                        return False
+                    if stall_since is not None and now - stall_since >= 3:
+                        if handling_popup is None or not handling_popup.is_set():
                             popup = None
-                        if not (popup and popup.is_displayed()):
-                            if self._resume_video_if_paused(video):
-                                print("      检测到视频已暂停，已尝试恢复播放")
-                    stall_since = now
+                            try:
+                                popup = self._find_popup_question()
+                            except Exception:
+                                popup = None
+                            if not (popup and popup.is_displayed()):
+                                if self._resume_video_if_paused(video):
+                                    print("      检测到视频已暂停，已尝试恢复播放")
+                        stall_since = now
 
                 elapsed = int(time.time() - start_time - popup_paused_total)
                 if elapsed - last_progress >= 5:
-                    print(f"      播放进度: {int(current)}/{int(duration)} 秒")
+                    print(f"      播放进度: {int(current or 0)}/{int(duration)} 秒")
                     last_progress = elapsed
 
                 if self.stop_requested.wait(0.5):
@@ -10136,6 +10148,46 @@ class AISolver:
             ))
         return False
 
+    @staticmethod
+    def _is_window_closed_error(exc: Exception) -> bool:
+        if isinstance(exc, NoSuchWindowException):
+            return True
+        if isinstance(exc, WebDriverException):
+            msg = str(exc).lower()
+            return any(token in msg for token in (
+                'no such window', 'target window already closed', 'web view not found',
+            ))
+        return False
+
+    @staticmethod
+    def _is_driver_timeout_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        if isinstance(exc, TimeoutException):
+            return 'receiving message from renderer' in msg or 'script timeout' in msg
+        return type(exc).__name__ in ('ReadTimeoutError', 'TimeoutError') or 'read timed out' in msg
+
+    def _ensure_active_window(self) -> bool:
+        try:
+            _ = self.driver.current_window_handle
+            _ = self.driver.current_url
+            return True
+        except Exception as exc:
+            if not self._is_window_closed_error(exc):
+                raise
+        try:
+            handles = list(self.driver.window_handles or [])
+        except Exception:
+            return False
+        for handle in reversed(handles):
+            try:
+                self.driver.switch_to.window(handle)
+                _ = self.driver.current_url
+                print("  检测到当前标签页已关闭，已自动切换到存活标签页继续")
+                return True
+            except Exception:
+                continue
+        return False
+
     def process_selected_tabs(self, selected_tabs: List[Dict], chapter_name: str = "",
                               on_task_done: Optional[Callable[[Dict], None]] = None,
                               on_task_skipped: Optional[Callable[[Dict], None]] = None):
@@ -10152,12 +10204,18 @@ class AISolver:
         self._accuracy_controller().reset()
 
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
-        course_home_url = course_home_url or self.driver.current_url
+        if not course_home_url:
+            try:
+                if self._ensure_active_window():
+                    course_home_url = self.driver.current_url
+            except Exception:
+                course_home_url = ''
 
         done_count = 0
         skipped_tasks: List[str] = []
         failed_tasks: List[str] = []
         aborted = False
+        consecutive_driver_timeouts = 0
 
         for task_idx, tab in enumerate(selected_tabs):
             if self._should_stop():
@@ -10168,12 +10226,22 @@ class AISolver:
             print(f"\n  [{task_idx + 1}/{len(selected_tabs)}] {task_label}")
             try:
                 status = self._process_selected_tab(tab, task_idx, len(selected_tabs), chapter_name, course_home_url)
+                consecutive_driver_timeouts = 0
             except Exception as exc:
                 if AISolver._is_fatal_driver_error(exc):
-                    print(f"  浏览器连接异常，已中断批量处理；剩余勾选保持原样: {str(exc)[:120]}")
+                    print(f"  浏览器连接异常，已中断批量处理；剩余勾选保持原样（请点击「重启浏览器」后继续）: {str(exc)[:120]}")
                     logger.error(f"浏览器连接中断: {exc}", exc_info=True)
                     aborted = True
                     break
+                if AISolver._is_driver_timeout_error(exc):
+                    consecutive_driver_timeouts += 1
+                    if consecutive_driver_timeouts >= 2:
+                        print("  浏览器连续响应超时，已中断批量处理；剩余勾选保持原样（请检查页面或点击「重启浏览器」后继续）")
+                        logger.error(f"浏览器连续响应超时中断: {exc}", exc_info=True)
+                        aborted = True
+                        break
+                else:
+                    consecutive_driver_timeouts = 0
                 print(f"  该任务处理异常，已保留勾选，继续处理剩余任务: {str(exc)[:120]}")
                 logger.error(f"任务处理异常: {exc}", exc_info=True)
                 status = 'error'
@@ -10207,12 +10275,22 @@ class AISolver:
                     try:
                         retry_status = self._process_selected_tab(
                             tab, task_idx, len(selected_tabs), chapter_name, course_home_url)
+                        consecutive_driver_timeouts = 0
                     except Exception as exc:
                         logger.error(f"重做任务异常: {exc}", exc_info=True)
                         if AISolver._is_fatal_driver_error(exc):
                             aborted = True
                             retry_status = 'error'
                             break
+                        if AISolver._is_driver_timeout_error(exc):
+                            consecutive_driver_timeouts += 1
+                            if consecutive_driver_timeouts >= 2:
+                                print("  浏览器连续响应超时，已中断批量处理；剩余勾选保持原样（请检查页面或点击「重启浏览器」后继续）")
+                                aborted = True
+                                retry_status = 'error'
+                                break
+                        else:
+                            consecutive_driver_timeouts = 0
                         retry_status = 'error'
                     if retry_status != 'done':
                         break
@@ -10357,6 +10435,9 @@ class AISolver:
         self._inline_learning_tried = False
         self._reading_ctx_tried = False
         self._pending_reading_context = None
+
+        if not self._ensure_active_window():
+            raise NoSuchWindowException('target window already closed: 没有可用的浏览器窗口，请点击「重启浏览器」后继续')
 
         if '_element' in tab and tab['_element'] is not None:
             if task_idx > 0 or self.driver.current_url != course_home_url:
@@ -14019,6 +14100,13 @@ class UCampusBot:
     MIC_BROWSER_ARGS = ('--use-fake-ui-for-media-stream',
                         '--autoplay-policy=no-user-gesture-required')
 
+    KEEPALIVE_BROWSER_ARGS = (
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,msSleepingTabs',
+    )
+
     def _start_browser(self, temp_dir: str, extra_args=()):
         options_cls, webdriver_cls, service_cls = driver_api(self.browser)
         options = options_cls()
@@ -14030,7 +14118,14 @@ class UCampusBot:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--window-size=1600,1000')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        if self.browser.key == 'edge':
+            try:
+                options.add_experimental_option('prefs', {'edge.sleeping_tabs.enabled': False})
+            except Exception:
+                pass
         for argument in self.MIC_BROWSER_ARGS:
+            options.add_argument(argument)
+        for argument in self.KEEPALIVE_BROWSER_ARGS:
             options.add_argument(argument)
         for argument in extra_args:
             options.add_argument(argument)
@@ -14061,6 +14156,11 @@ class UCampusBot:
             shutil.rmtree(user_data_dir, ignore_errors=True)
             raise
         driver._unipus_profile_dir = user_data_dir
+        try:
+            driver.set_page_load_timeout(45)
+            driver.set_script_timeout(60)
+        except Exception:
+            pass
         try:
             driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false});"
@@ -14412,21 +14512,47 @@ class PopupWatcher:
     def stop(self):
         self._stop_event.set()
 
+    def _is_session_dead(self, exc: Exception) -> bool:
+        if isinstance(exc, InvalidSessionIdException):
+            return True
+        msg = str(exc).lower()
+        if any(token in msg for token in (
+            'invalid session id', 'disconnected', 'not connected to devtools',
+            'chrome not reachable', 'unable to connect', 'connection refused', 'session deleted',
+        )):
+            return True
+        if isinstance(exc, NoSuchWindowException) or any(token in msg for token in (
+            'no such window', 'target window already closed', 'web view not found',
+        )):
+            try:
+                return not list(self.driver.window_handles or [])
+            except Exception:
+                return True
+        return False
+
     def run(self):
         while not self._stop_event.is_set():
             try:
                 self._click_known_buttons()
             except WebDriverException as e:
-                if not self._stop_event.is_set():
-                    logger.warning(f"弹窗监控已停止，浏览器会话不可用: {str(e)[:120]}")
-                break
+                if self._is_session_dead(e):
+                    if not self._stop_event.is_set():
+                        logger.warning(f"弹窗监控已停止，浏览器会话不可用: {str(e)[:120]}")
+                    break
+                if self._stop_event.is_set():
+                    break
+                logger.warning(f"弹窗监控瞬态异常，稍后重试: {str(e)[:120]}")
+                self._stop_event.wait(3.0)
+                continue
             except Exception as e:
                 if self._stop_event.is_set():
                     break
                 error_msg = str(e)
                 print(f"操作失败: {error_msg[:50]}")
                 logger.warning(f"弹窗监控操作失败: {error_msg[:120]}")
-            self._stop_event.wait(0.5)
+                self._stop_event.wait(5.0)
+                continue
+            self._stop_event.wait(1.5)
 
     def _click_known_buttons(self):
         js = """
