@@ -2114,7 +2114,7 @@ return (function (root) {
     name: name,
     index: index,
     total: total,
-    slideCount: wrapper.querySelectorAll('.swiper-slide').length,
+    slideCount: wrapper.querySelectorAll('.swiper-slide:not(.swiper-slide-duplicate)').length,
     hasButton: !!button,
     recording: !!(button && button.querySelector('svg rect[fill="currentColor"]')),
     recordings: recordings
@@ -5497,7 +5497,11 @@ class AnswerExecutor:
                 print(f"\t词汇跟读 [{index}/{total}] {word} 首次失败，重试一次...")
                 if not self.stop_requested.wait(0.5):
                     retry_info = self._wait_vocab_card(q, index)
-                    if retry_info:
+                    if retry_info and retry_info.get('recording'):
+                        retry_info = self._stop_vocab_recording_if_active(q, retry_info)
+                        if retry_info:
+                            retry_info = self._wait_vocab_card(q, index)
+                    if retry_info and not retry_info.get('recording'):
                         ok = self._record_vocab_card(q, retry_info)
                         info = retry_info
             print(f"\t词汇跟读 [{index}/{total}] {word} -> {'OK' if ok else '失败'}")
@@ -5523,6 +5527,29 @@ class AnswerExecutor:
 
         print(f"\t词汇跟读完成 {done}/{total} 张")
         return done == total and not self.stop_requested.is_set()
+
+    def _stop_vocab_recording_if_active(self, q: Question, info: Optional[Dict] = None) -> Optional[Dict]:
+        current = info
+        if current is None:
+            try:
+                current = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+            except Exception:
+                return None
+        if not current.get('recording'):
+            return current
+        buttons = self._vocab_record_buttons(q)
+        if buttons:
+            WebDriverHelper.safe_click(self.driver, buttons[0])
+        for _ in range(12):
+            if self.stop_requested.wait(0.25):
+                return None
+            try:
+                latest = self.driver.execute_script(VOCAB_CARD_JS, q.element) or {}
+            except Exception:
+                return None
+            if latest and not latest.get('recording'):
+                return latest
+        return current
 
     def _wait_vocab_card(self, q: Question, index: int) -> Optional[Dict]:
         for _ in range(24):
@@ -9722,7 +9749,11 @@ class FlashcardHandler(ContentHandler):
 
 PAGE_SCORE_JS = r"""
     const clean = t => (t || '').replace(/\s+/g, ' ').trim();
-    const visible = e => !!(e && e.getClientRects().length);
+    const visible = e => {
+        if (!e || !e.getClientRects().length) return false;
+        const style = window.getComputedStyle ? window.getComputedStyle(e) : null;
+        return !style || (style.visibility !== 'hidden' && style.visibility !== 'collapse');
+    };
     const ignoreSel = 'nav, header, script, style, [class*="slider-menu"], [class*="pc-menu"], '
                     + '[class*="break-crumb"], [class*="breadcrumb"], [class*="pc-header"]';
     const texts = [];
@@ -10215,7 +10246,9 @@ class AISolver:
                 last_types = getattr(self, '_last_question_types', set())
                 skip_score_check = (
                     tab.get('is_scored') is False
-                    or (bool(last_types) and last_types <= non_graded_types)
+                    or (tab.get('is_scored') is not True
+                        and bool(last_types)
+                        and last_types <= non_graded_types)
                 )
                 score = None if skip_score_check else self._read_task_score()
                 if not skip_score_check and score is None and last_types & {
@@ -10391,6 +10424,7 @@ class AISolver:
         if self._should_stop():
             return 'stopped'
 
+        self._last_question_types = set()
         self._inline_learning_tried = False
         self._reading_ctx_tried = False
         self._pending_reading_context = None
@@ -11746,7 +11780,7 @@ class AISolver:
             if self._should_stop():
                 return False
             self._harvest_vocabulary()
-            self._last_question_types = {q.q_type for q in questions}
+            self._last_question_types |= {q.q_type for q in questions}
             print(f"\n    处理第 {page_num} 页题目...")
             print(f"    找到 {len(questions)} 个可见题目")
 
@@ -12177,6 +12211,8 @@ class AISolver:
         videos = self._publish_play_task_media()
         if videos is None:
             return False
+        if videos:
+            self._last_question_types.add(QuestionType.VIDEO)
         reading = self._publish_read_task()
         if reading is None:
             return False
@@ -12428,6 +12464,7 @@ class AISolver:
                         return False
                     group_passages = [] if state['type'] == 'translation_group' else list(active_passages)
                     seen_question_since_passage = True
+                    self._last_question_types |= {q.q_type for q in questions}
                     parsed.append((state, kind, questions, group_passages))
                 if not parsed:
                     return False
@@ -12655,6 +12692,7 @@ class AISolver:
             print("    该题目组没有可解析的题目，跳过")
             self._publish_processed_groups.add(key)
             return 'skipped'
+        self._last_question_types |= {q.q_type for q in questions}
         nodes = parser._question_nodes(group)
         if nodes and len(questions) != len(nodes):
             print("    本组有小题未能解析，不提交，请检查页面结构")
