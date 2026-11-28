@@ -10397,7 +10397,7 @@ class AISolver:
                         return 'skipped'
                     if self._should_stop():
                         return 'stopped'
-                    select_course_unit(self.driver, unit_tabs[unit_index], self.stop_requested)
+                    select_course_unit(self.driver, unit_tabs[unit_index], self.stop_requested, settle_timeout=0)
                 except Exception as e:
                     err_summary = _format_webdriver_error(e, self.driver)
                     print(f"    切换Unit失败: {err_summary}")
@@ -10818,7 +10818,7 @@ class AISolver:
                     target = tabs[unit_idx]
                 if target is None:
                     return False
-                select_course_unit(self.driver, target, self.stop_requested)
+                select_course_unit(self.driver, target, self.stop_requested, settle_timeout=0)
                 return True
 
             if not open_unit():
