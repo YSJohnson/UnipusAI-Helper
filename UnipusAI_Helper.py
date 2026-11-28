@@ -3734,7 +3734,8 @@ class DropdownSelectStrategy(QuestionParserStrategy):
             q_type=QuestionType.DROPDOWN_SELECT,
             element=container,
             banked_blanks=blanks,
-            banked_options=banked_options
+            banked_options=banked_options,
+            blank_count=len(blanks)
         )
 
 
@@ -6505,6 +6506,39 @@ class AnswerExecutor:
 
         return result
 
+    @staticmethod
+    def _resolve_dropdown_choice(ans: str, blank: Dict[str, Any]) -> Tuple[str, int]:
+        """把字母型答案映射为下拉选项文本与序号；非字母答案原样返回。
+
+        官方答案接口对下拉题返回的是选项字母（A/B/C），而下拉菜单里展示的是
+        选项文本（如 /s/、/z/、/ɪz/），需要按选项顺序换算。
+        """
+        text = (ans or '').strip()
+        options = [str(opt).strip() for opt in (blank.get('options') or [])
+                   if str(opt).strip()]
+        for index, opt in enumerate(options):
+            if opt == text:
+                return opt, index
+        letter = ''
+        body = ''
+        if re.fullmatch(r'[A-Za-z]', text):
+            letter = text.upper()
+        else:
+            match = re.match(r'^([A-Za-z])\s*[.、:：)）]\s*(.+)$', text)
+            if match:
+                letter = match.group(1).upper()
+                body = match.group(2).strip()
+        if body:
+            for index, opt in enumerate(options):
+                if opt.casefold() == body.casefold():
+                    return opt, index
+        if letter:
+            index = ord(letter) - ord('A')
+            if 0 <= index < len(options):
+                return options[index], index
+            return (body, index) if body else ('', index)
+        return text, -1
+
     def _fill_dropdown_select(self, q: Question, answer: str) -> bool:
         answers = self._parse_banked_answer(answer, len(q.banked_blanks))
         if (not q.banked_blanks or len(answers) != len(q.banked_blanks)
@@ -6520,7 +6554,11 @@ class AnswerExecutor:
                 continue
 
             try:
-                print(f"      空{i + 1}: '{ans}'")
+                expected, option_index = self._resolve_dropdown_choice(ans, blank)
+                if expected and expected != ans:
+                    print(f"      空{i + 1}: '{ans}' -> 选项 '{expected}'")
+                else:
+                    print(f"      空{i + 1}: '{ans}'")
                 select_wrapper = blank['element']
 
                 self.driver.execute_script(
@@ -6560,64 +6598,100 @@ class AnswerExecutor:
 
                 if not dropdown_menu:
                     print(f"         下拉菜单未出现，尝试备选方案")
-                    if self._force_select_by_js(select_wrapper, ans):
+                    display_value = expected or (ans if option_index < 0 else "")
+                    if display_value and self._force_select_by_js(select_wrapper, display_value):
                         success_count += 1
                     continue
 
-                option_selectors = [
-                    f'.ant-dropdown-menu-item:contains("{ans}")',
-                    f'.ant-select-item-option:contains("{ans}")',
-                    f'.ant-dropdown-menu-item[title="{ans}"]',
-                    '//li[contains(@class,"ant-dropdown-menu-item") and contains(text(),"{}")]'.format(ans),
-                    '//div[contains(@class,"ant-select-item-option-content") and contains(text(),"{}")]'.format(ans)
-                ]
-
+                target_text = expected or (ans if option_index < 0 else "")
+                clicked_label = ""
                 option_clicked = False
 
-                for selector in option_selectors[:3]:
-                    try:
-                        options = self.driver.find_elements(By.CSS_SELECTOR,
-                                                            selector.replace(f':contains("{ans}")', ''))
-                        for opt in options:
-                            if ans.lower() in opt.text.lower() and opt.is_displayed():
-                                ActionChains(self.driver).move_to_element(opt).click().perform()
-                                print(f"         点击选项: {opt.text[:20]}")
-                                option_clicked = True
-                                break
-                        if option_clicked:
-                            break
-                    except Exception as e:
-                        continue
+                if target_text:
+                    option_selectors = [
+                        f'.ant-dropdown-menu-item:contains("{target_text}")',
+                        f'.ant-select-item-option:contains("{target_text}")',
+                        f'.ant-dropdown-menu-item[title="{target_text}"]',
+                        '//li[contains(@class,"ant-dropdown-menu-item") and contains(text(),"{}")]'.format(target_text),
+                        '//div[contains(@class,"ant-select-item-option-content") and contains(text(),"{}")]'.format(target_text)
+                    ]
 
-                if not option_clicked:
-                    try:
-                        for opt in self.driver.find_elements(
+                    for selector in option_selectors[:3]:
+                        try:
+                            options = self.driver.find_elements(
                                 By.CSS_SELECTOR,
-                                '[role="option"], .ant-select-item-option, '
-                                '.ant-dropdown-menu-item, li[class*="option"]'):
-                            if not opt.is_displayed():
-                                continue
-                            label = (opt.text or '').strip()
-                            if label and (label.lower() == ans.lower()
-                                          or ans.lower() in label.lower()):
-                                ActionChains(self.driver).move_to_element(opt).click().perform()
-                                print(f"         通用候选项点击: {label[:20]}")
-                                option_clicked = True
+                                selector.replace(f':contains("{target_text}")', ''))
+                            for opt in options:
+                                if target_text.lower() in opt.text.lower() and opt.is_displayed():
+                                    ActionChains(self.driver).move_to_element(opt).click().perform()
+                                    print(f"         点击选项: {opt.text[:20]}")
+                                    clicked_label = (opt.text or '').strip()
+                                    option_clicked = True
+                                    break
+                            if option_clicked:
                                 break
+                        except Exception:
+                            continue
+
+                    if not option_clicked:
+                        try:
+                            for opt in self.driver.find_elements(
+                                    By.CSS_SELECTOR,
+                                    '[role="option"], .ant-select-item-option, '
+                                    '.ant-dropdown-menu-item, li[class*="option"]'):
+                                if not opt.is_displayed():
+                                    continue
+                                label = (opt.text or '').strip()
+                                if label and target_text.lower() in label.lower():
+                                    ActionChains(self.driver).move_to_element(opt).click().perform()
+                                    print(f"         通用候选项点击: {label[:20]}")
+                                    clicked_label = label
+                                    option_clicked = True
+                                    break
+                        except Exception:
+                            pass
+
+                    if not option_clicked:
+                        for xpath in option_selectors[3:]:
+                            try:
+                                option = self.driver.find_element(By.XPATH, xpath)
+                                if option.is_displayed():
+                                    ActionChains(self.driver).move_to_element(option).click().perform()
+                                    print(f"         XPath点击选项")
+                                    clicked_label = (option.text or '').strip()
+                                    option_clicked = True
+                                    break
+                            except Exception:
+                                continue
+
+                if not option_clicked and option_index >= 0:
+                    try:
+                        scope = None
+                        try:
+                            scope = dropdown_menu.find_element(
+                                By.XPATH,
+                                './self::*[contains(@class, "dropdown") or @role="listbox"]'
+                                ' | ./ancestor::*[contains(@class, "dropdown") or @role="listbox"][1]')
+                        except Exception:
+                            scope = None
+                        visible_options = []
+                        for root in ([scope] if scope is not None else [self.driver]):
+                            for opt in root.find_elements(
+                                    By.CSS_SELECTOR,
+                                    '[role="option"], .ant-select-item-option, '
+                                    '.ant-dropdown-menu-item, li[class*="option"]'):
+                                if opt.is_displayed() and opt not in visible_options:
+                                    visible_options.append(opt)
+                        if 0 <= option_index < len(visible_options):
+                            option = visible_options[option_index]
+                            ActionChains(self.driver).move_to_element(option).click().perform()
+                            clicked_label = (option.text or '').strip()
+                            print(f"         按序号点击选项: {clicked_label[:20]}")
+                            option_clicked = True
+                        else:
+                            print(f"         选项序号 {option_index + 1} 超出菜单范围")
                     except Exception:
                         pass
-
-                if not option_clicked:
-                    for xpath in option_selectors[3:]:
-                        try:
-                            option = self.driver.find_element(By.XPATH, xpath)
-                            if option.is_displayed():
-                                ActionChains(self.driver).move_to_element(option).click().perform()
-                                print(f"         XPath点击选项")
-                                option_clicked = True
-                                break
-                        except:
-                            continue
 
                 if option_clicked:
                     time.sleep(0.5)
@@ -6626,20 +6700,22 @@ class AnswerExecutor:
                         answer_text_elem = select_wrapper.find_element(
                             By.CSS_SELECTOR, '.user-answer-text, .ant-select-selection-item')
                         displayed_text = answer_text_elem.text.strip()
+                        verify_text = expected or clicked_label or (ans if option_index < 0 else "")
 
-                        if ans.lower() in displayed_text.lower():
+                        if verify_text and verify_text.lower() in displayed_text.lower():
                             print(f"         验证成功，显示文本: {displayed_text[:20]}")
                             success_count += 1
                         else:
                             print(f"         视觉反馈异常，文本: {displayed_text[:20]}")
-                            self._sync_react_state(select_wrapper, ans)
+                            self._sync_react_state(select_wrapper, verify_text or ans)
 
                     except Exception as e:
                         print(f"         验证失败: {str(e)[:50]}")
 
                 else:
                     print(f"         未找到选项 '{ans}'")
-                    if self._force_select_by_js(select_wrapper, ans):
+                    display_value = expected or (ans if option_index < 0 else "")
+                    if display_value and self._force_select_by_js(select_wrapper, display_value):
                         success_count += 1
 
             except Exception as e:
