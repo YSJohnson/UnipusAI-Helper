@@ -9572,7 +9572,7 @@ class VideoHandler(ContentHandler):
                     break
 
                 state = self.driver.execute_script(
-                    "const v = arguments[0]; return {current: v.currentTime, ended: !!v.ended, duration: v.duration};",
+                    "const v = arguments[0]; return {current: v.currentTime, ended: !!v.ended, duration: Number.isFinite(v.duration) ? v.duration : 0};",
                     video,
                 )
                 if not isinstance(state, dict):
@@ -10149,8 +10149,21 @@ class AISolver:
         return False
 
     @staticmethod
+    def _is_window_closed_error(exc: Exception) -> bool:
+        if isinstance(exc, NoSuchWindowException):
+            return True
+        if isinstance(exc, WebDriverException):
+            msg = str(exc).lower()
+            return any(token in msg for token in (
+                'no such window', 'target window already closed', 'web view not found',
+            ))
+        return False
+
+    @staticmethod
     def _is_driver_timeout_error(exc: Exception) -> bool:
         msg = str(exc).lower()
+        if isinstance(exc, TimeoutException):
+            return 'receiving message from renderer' in msg or 'script timeout' in msg
         return type(exc).__name__ in ('ReadTimeoutError', 'TimeoutError') or 'read timed out' in msg
 
     def _ensure_active_window(self) -> bool:
@@ -10159,8 +10172,8 @@ class AISolver:
             _ = self.driver.current_url
             return True
         except Exception as exc:
-            if not (isinstance(exc, NoSuchWindowException) or self._is_fatal_driver_error(exc)):
-                return True
+            if not self._is_window_closed_error(exc):
+                raise
         try:
             handles = list(self.driver.window_handles or [])
         except Exception:
@@ -10191,7 +10204,12 @@ class AISolver:
         self._accuracy_controller().reset()
 
         course_home_url = selected_tabs[0].get('_directory_url') if selected_tabs else ''
-        course_home_url = course_home_url or self.driver.current_url
+        if not course_home_url:
+            try:
+                if self._ensure_active_window():
+                    course_home_url = self.driver.current_url
+            except Exception:
+                course_home_url = ''
 
         done_count = 0
         skipped_tasks: List[str] = []
@@ -10257,12 +10275,22 @@ class AISolver:
                     try:
                         retry_status = self._process_selected_tab(
                             tab, task_idx, len(selected_tabs), chapter_name, course_home_url)
+                        consecutive_driver_timeouts = 0
                     except Exception as exc:
                         logger.error(f"重做任务异常: {exc}", exc_info=True)
                         if AISolver._is_fatal_driver_error(exc):
                             aborted = True
                             retry_status = 'error'
                             break
+                        if AISolver._is_driver_timeout_error(exc):
+                            consecutive_driver_timeouts += 1
+                            if consecutive_driver_timeouts >= 2:
+                                print("  浏览器连续响应超时，已中断批量处理；剩余勾选保持原样（请检查页面或点击「重启浏览器」后继续）")
+                                aborted = True
+                                retry_status = 'error'
+                                break
+                        else:
+                            consecutive_driver_timeouts = 0
                         retry_status = 'error'
                     if retry_status != 'done':
                         break
@@ -14484,14 +14512,38 @@ class PopupWatcher:
     def stop(self):
         self._stop_event.set()
 
+    def _is_session_dead(self, exc: Exception) -> bool:
+        if isinstance(exc, InvalidSessionIdException):
+            return True
+        msg = str(exc).lower()
+        if any(token in msg for token in (
+            'invalid session id', 'disconnected', 'not connected to devtools',
+            'chrome not reachable', 'unable to connect', 'connection refused', 'session deleted',
+        )):
+            return True
+        if isinstance(exc, NoSuchWindowException) or any(token in msg for token in (
+            'no such window', 'target window already closed', 'web view not found',
+        )):
+            try:
+                return not list(self.driver.window_handles or [])
+            except Exception:
+                return True
+        return False
+
     def run(self):
         while not self._stop_event.is_set():
             try:
                 self._click_known_buttons()
             except WebDriverException as e:
-                if not self._stop_event.is_set():
-                    logger.warning(f"弹窗监控已停止，浏览器会话不可用: {str(e)[:120]}")
-                break
+                if self._is_session_dead(e):
+                    if not self._stop_event.is_set():
+                        logger.warning(f"弹窗监控已停止，浏览器会话不可用: {str(e)[:120]}")
+                    break
+                if self._stop_event.is_set():
+                    break
+                logger.warning(f"弹窗监控瞬态异常，稍后重试: {str(e)[:120]}")
+                self._stop_event.wait(3.0)
+                continue
             except Exception as e:
                 if self._stop_event.is_set():
                     break
