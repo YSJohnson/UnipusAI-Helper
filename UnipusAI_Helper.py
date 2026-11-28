@@ -6516,6 +6516,9 @@ class AnswerExecutor:
         text = (ans or '').strip()
         options = [str(opt).strip() for opt in (blank.get('options') or [])
                    if str(opt).strip()]
+        for index, opt in enumerate(options):
+            if opt == text:
+                return opt, index
         letter = ''
         body = ''
         if re.fullmatch(r'[A-Za-z]', text):
@@ -6595,7 +6598,8 @@ class AnswerExecutor:
 
                 if not dropdown_menu:
                     print(f"         下拉菜单未出现，尝试备选方案")
-                    if self._force_select_by_js(select_wrapper, ans):
+                    display_value = expected or (ans if option_index < 0 else "")
+                    if display_value and self._force_select_by_js(select_wrapper, display_value):
                         success_count += 1
                     continue
 
@@ -6662,13 +6666,22 @@ class AnswerExecutor:
 
                 if not option_clicked and option_index >= 0:
                     try:
-                        visible_options = [
-                            opt for opt in self.driver.find_elements(
-                                By.CSS_SELECTOR,
-                                '[role="option"], .ant-select-item-option, '
-                                '.ant-dropdown-menu-item, li[class*="option"]')
-                            if opt.is_displayed()
-                        ]
+                        scope = None
+                        try:
+                            scope = dropdown_menu.find_element(
+                                By.XPATH,
+                                './self::*[contains(@class, "dropdown") or @role="listbox"]'
+                                ' | ./ancestor::*[contains(@class, "dropdown") or @role="listbox"][1]')
+                        except Exception:
+                            scope = None
+                        visible_options = []
+                        for root in ([scope] if scope is not None else [self.driver]):
+                            for opt in root.find_elements(
+                                    By.CSS_SELECTOR,
+                                    '[role="option"], .ant-select-item-option, '
+                                    '.ant-dropdown-menu-item, li[class*="option"]'):
+                                if opt.is_displayed() and opt not in visible_options:
+                                    visible_options.append(opt)
                         if 0 <= option_index < len(visible_options):
                             option = visible_options[option_index]
                             ActionChains(self.driver).move_to_element(option).click().perform()
